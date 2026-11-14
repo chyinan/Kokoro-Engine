@@ -27,6 +27,7 @@ use std::{
 use tauri::Manager;
 use teloxide::types::ChatId;
 use tokio::sync::{Notify, RwLock};
+use warp::Filter;
 
 type FixtureStream<T> = Pin<Box<dyn Stream<Item = Result<T, String>> + Send>>;
 
@@ -97,6 +98,8 @@ impl LlmProvider for ControlledProvider {
                 Ok("partial [TOOL_CALL:get_time]".into()),
                 Err("fixture stream interrupted".into()),
             ]
+        } else if last_user.contains("[tool-only]") {
+            vec![Ok("[TOOL_CALL:count_executions]".into())]
         } else if last_user.contains("[tools]") && !body_text.contains("[Tool results]") {
             vec![Ok("First [TOOL_CALL:get_time]".into())]
         } else {
@@ -127,6 +130,7 @@ impl LlmProvider for ControlledProvider {
             "[native-exchange-failure]",
             "[after-tool-stream-failure]",
             "[after-tool-final-save]",
+            "[native-tool-only]",
         ]
         .iter()
         .any(|label| last_user.contains(label));
@@ -169,11 +173,15 @@ async fn webhook(
     text: &str,
     image: Option<&str>,
 ) -> (u16, Value) {
+    let body = json!({"request_id": id, "conversation_id": peer, "text": text, "image": image});
+    webhook_body(app, body).await
+}
+
+async fn webhook_body(app: &tauri::AppHandle, body: Value) -> (u16, Value) {
     let config = WebhookBotConfig {
         bearer_token: Some("fixture-token".into()),
         ..Default::default()
     };
-    let body = json!({"request_id": id, "conversation_id": peer, "text": text, "image": image});
     let response = handle_generic_webhook(
         config,
         Some("Bearer fixture-token".into()),
@@ -664,6 +672,261 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         persisted_assistant_text(&state.db, result.assistant_message_id.unwrap()).await,
         result.text
     );
+
+    verify_external_tool_only_replies(&handle, &provider, &tool_executions).await;
+    verify_audio_admission(&handle, &provider).await;
+}
+
+async fn verify_external_tool_only_replies(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+    executions: &AtomicUsize,
+) {
+    let settings = app.state::<Arc<RwLock<ToolSettings>>>();
+    let previous = settings.read().await.max_tool_rounds;
+    settings.write().await.max_tool_rounds = 1;
+    let db = &app.state::<AIOrchestrator>().db;
+    for (index, text) in ["[tool-only]", "[native-tool-only]"]
+        .into_iter()
+        .enumerate()
+    {
+        let before = executions.load(Ordering::Relaxed);
+        let calls = provider.prompts.lock().unwrap().len();
+        let first = webhook(app, text, text, text, None).await;
+        assert_eq!(first.0, 200);
+        let notice = first.1["reply"].as_str().unwrap();
+        assert!(!notice.is_empty());
+        assert!(
+            !notice.contains("sentinel executed"),
+            "Do not expose model-only tool output"
+        );
+        assert_eq!(webhook(app, text, text, text, None).await, first);
+        assert_eq!(executions.load(Ordering::Relaxed), before + 1);
+        assert_eq!(provider.prompts.lock().unwrap().len(), calls + 1);
+        let saved: String = sqlx::query_scalar("SELECT content FROM conversation_messages WHERE role = 'assistant' ORDER BY id DESC LIMIT 1")
+            .fetch_one(db).await.unwrap();
+        assert_eq!(notice, saved);
+
+        let session = SessionMode::Private;
+        let submit = || {
+            submit_message(
+                app,
+                ChatId(100),
+                100 + index as i32,
+                text,
+                vec![],
+                &session,
+                "test-character",
+            )
+        };
+        let reply = submit().await.unwrap();
+        assert_eq!(reply.text, notice);
+        assert_eq!(
+            persisted_assistant_text(db, reply.assistant_message_id.unwrap()).await,
+            notice
+        );
+        assert_eq!(submit().await.unwrap(), reply);
+        assert_eq!(executions.load(Ordering::Relaxed), before + 2);
+        assert_eq!(provider.prompts.lock().unwrap().len(), calls + 2);
+    }
+    settings.write().await.max_tool_rounds = previous;
+}
+
+async fn verify_audio_admission(app: &tauri::AppHandle, provider: &ControlledProvider) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mode = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let route = warp::post().and(warp::body::bytes()).and_then({
+        let (calls, mode, entered, release) = (
+            calls.clone(),
+            mode.clone(),
+            entered.clone(),
+            release.clone(),
+        );
+        move |_: bytes::Bytes| {
+            let (calls, mode, entered, release) = (
+                calls.clone(),
+                mode.clone(),
+                entered.clone(),
+                release.clone(),
+            );
+            async move {
+                let call = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                let mode = mode.load(Ordering::Relaxed);
+                if mode == 2 {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                if mode == 4 {
+                    std::future::pending::<()>().await;
+                }
+                let (status, text) = match mode {
+                    1 => (
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "unavailable".into(),
+                    ),
+                    3 => (warp::http::StatusCode::OK, String::new()),
+                    _ => (
+                        warp::http::StatusCode::OK,
+                        format!("voice transcript {call}"),
+                    ),
+                };
+                Ok::<_, std::convert::Infallible>(warp::reply::with_status(
+                    warp::reply::json(&json!({"text": text})),
+                    status,
+                ))
+            }
+        }
+    });
+    let (address, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+    let server = tokio::spawn(server);
+    let config = crate::stt::config::SttConfig {
+        providers: vec![serde_json::from_value(json!({
+            "id": "openai_whisper", "provider_type": "openai_whisper", "api_key": "fixture",
+            "base_url": format!("http://{address}/v1"), "model": "fixture"
+        }))
+        .unwrap()],
+        ..Default::default()
+    };
+    app.manage(crate::stt::SttService::init_from_config(&config).await);
+    let body = json!({"request_id": "audio-first", "conversation_id": "audio", "audio_base64": "AQID", "audio_format": "wav"});
+    let first = webhook_body(app, body.clone()).await;
+    assert_eq!(first.0, 200, "{first:?}");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(provider
+        .prompts
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("voice transcript 1"));
+    let model_calls = provider.prompts.lock().unwrap().len();
+    mode.store(1, Ordering::Relaxed);
+    assert_eq!(webhook_body(app, body.clone()).await, first);
+    for (field, value) in [
+        ("audio_base64", "BAUG"),
+        ("audio_format", "mp3"),
+        ("text", "caption"),
+        ("image", "data:image/png;base64,AAAB"),
+    ] {
+        let mut conflicting = body.clone();
+        conflicting[field] = value.into();
+        assert_eq!(webhook_body(app, conflicting).await.0, 409);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(provider.prompts.lock().unwrap().len(), model_calls);
+
+    let mut failed = body.clone();
+    failed["request_id"] = "audio-failed".into();
+    let failure = webhook_body(app, failed.clone()).await;
+    assert_eq!(failure.0, 500);
+    // The HTTP provider may retry a 503 within one transcription attempt.
+    let failed_calls = calls.load(Ordering::Relaxed);
+    assert_eq!(webhook_body(app, failed).await, failure);
+    assert_eq!(calls.load(Ordering::Relaxed), failed_calls);
+
+    mode.store(3, Ordering::Relaxed);
+    let mut empty = body.clone();
+    empty["request_id"] = "audio-empty".into();
+    assert_eq!(webhook_body(app, empty).await.0, 400);
+
+    mode.store(2, Ordering::Relaxed);
+    let mut pending = body.clone();
+    pending["request_id"] = "audio-pending".into();
+    let first = tokio::spawn({
+        let app = app.clone();
+        let pending = pending.clone();
+        async move { webhook_body(&app, pending).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let before = calls.load(Ordering::Relaxed);
+    let duplicate = tokio::spawn({
+        let app = app.clone();
+        let pending = pending.clone();
+        async move { webhook_body(&app, pending).await }
+    });
+    let mut busy = body.clone();
+    busy["request_id"] = "audio-busy".into();
+    assert_eq!(webhook_body(app, busy).await.0, 503);
+    assert_eq!(
+        webhook(app, "text-busy", "audio", "busy during transcription", None)
+            .await
+            .0,
+        503
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), before);
+    first.abort(); // Only the subscriber is dropped; transcription stays application-owned.
+    release.notify_one();
+    let completed = tokio::time::timeout(Duration::from_secs(5), duplicate)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.0, 200);
+    assert_eq!(webhook_body(app, pending).await, completed);
+    assert_eq!(calls.load(Ordering::Relaxed), before);
+
+    let mut cancelled = body.clone();
+    cancelled["request_id"] = "audio-cancelled".into();
+    cancelled["text"] = "cancel this voice".into();
+    let task = tokio::spawn({
+        let app = app.clone();
+        let cancelled = cancelled.clone();
+        async move { webhook_body(&app, cancelled).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    let snapshot = runtime
+        .snapshots()
+        .into_iter()
+        .find(|turn| turn.message == "cancel this voice")
+        .unwrap();
+    crate::chat::application::cancel_chat_turn_inner(
+        snapshot.client_request_id,
+        None,
+        app.state::<Arc<TurnCancellationState>>().inner().clone(),
+    )
+    .await
+    .unwrap();
+    let cancelled_result = task.await.unwrap();
+    assert_eq!(cancelled_result.0, 500);
+    assert_eq!(webhook_body(app, cancelled).await, cancelled_result);
+    release.notify_one();
+
+    let mut timed_out = body;
+    mode.store(4, Ordering::Relaxed);
+    timed_out["request_id"] = "audio-timeout".into();
+    let timeout_started = std::time::Instant::now();
+    let timeout = webhook_body(app, timed_out.clone()).await;
+    assert_eq!(timeout.0, 500);
+    assert!(timeout_started.elapsed() >= Duration::from_secs(10));
+    assert!(
+        timeout.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("Failed to transcribe audio"),
+        "{timeout:?}"
+    );
+    assert_eq!(webhook_body(app, timed_out).await, timeout);
+    assert_eq!(
+        webhook(
+            app,
+            "after-audio-timeout",
+            "audio",
+            "free after timeout",
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    release.notify_one();
+    server.abort();
 }
 
 async fn assert_non_retryable_diagnostic(db: &sqlx::SqlitePool, turn_id: &str, stage: &str) {

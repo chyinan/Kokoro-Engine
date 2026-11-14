@@ -27,24 +27,25 @@ Telegram 文本 / 图片 / 转写 ───────┘                      
 
 Bot、Telegram 文本和 Telegram 图片原有模型/工具循环、独立标签解释和记忆任务都已删除。应用层保留 `application.rs` 中的活动、绑定和持久化编排，把 Provider 流读取移到 `model_round.rs`，把记忆调度移到 `follow_up.rs`。原有 tags 测试覆盖工具和翻译，应用层继续使用跨轮清理，外部图片和控制标记测试位于共享 `tags.rs`。
 
-- 桌面继承现有工作任务、会话版本检查、重生成、流事件、审批、视觉、MOD hooks 和语音播放。外部入口提交已授权角色、会话、消息 ID、转写文本或图片引用。外部能力由 Rust 适配器设置，用户 JSON 不能开启桌面文件、屏幕、Live2D、通知、背景或交互审批能力。允许的工具仍受现有配置与执行器限制。
+- 桌面继承现有工作任务、会话版本检查、重生成、流事件、审批、视觉、MOD hooks 和语音播放。外部入口提交已授权角色、会话、消息 ID、文本或图片引用；Webhook 原始音频在公共任务接收后才转写，纳入忙碌拒绝、取消和准备超时。外部能力由 Rust 适配器设置，用户 JSON 不能开启桌面文件、屏幕、Live2D、通知、背景或交互审批能力。允许的工具仍受现有配置与执行器限制。
 - Telegram 默认按 chat 与角色隔离。`/new` 创建该 chat 的新绑定，首次发消息时才落库。`/continue` 显式固定调用时的桌面角色和会话，之后切换桌面选择不会重新指向其他会话。新会话与继续选择存于本次轮询服务中，重启后恢复到稳定默认绑定。
 - 三类入口共用同一忙碌拒绝规则，包括同一会话的跨入口提交。目前也互斥不同会话的生成，沿用桌面历史编辑与角色切换的现有保护范围。被拒绝的同一请求 ID 会重放拒绝结果，有新输入意图时应发新消息 ID。
 - 逻辑重复提交在进程内共享 journal 结果。Telegram、Discord、LINE 和 QQ 使用平台提供的消息标识，Webhook 支持可选 `request_id`，并按来源和私聊或群会话作用域构造实际 ID。不同输入复用同一 ID 返回冲突。进程重启后，若相同平台及请求 ID 已写入任一会话，外部入口会拒绝重投，避免绑定重置或角色变化后重复执行。进程内可使用原有 ID 重新获得生成结果。
+- Webhook 音频指纹使用原始字节的 SHA-256 和格式，不使用可能变化的转写结果。相同输入重投会共享正在进行的任务或原有结果，不再次调用 STT；不同音频、格式、文本或图片复用 ID 会冲突。转写失败也会保留，修正服务配置后应以新 ID 发起新尝试。仅工具输出的外部回合会保存可发送的完成提示，不暴露工具内部结果，也不重跑工具。
 - 最终 SQLite 回复是完成边界。流中错误丢弃未执行的工具，桌面可显示已有部分，外部适配器返回失败而不发送部分文本。原生工具交换的调用行和结果行在同一事务提交。交换保存失败会回滚技术行并报告数据库错误。同一请求 ID 重放失败结果。工具已交给执行器时，技术行写入、后续模型轮次或最终保存的失败诊断都不会提供自动重试，以免再次执行有副作用的工具。最终保存失败同样保留数据库错误类型。外部实时事件记入 journal，桌面订阅按当前会话读取共享回合。取消使用该任务的 ID。
 - 旧媒体兼容标记 `[IMAGE_PROMPT:…]` 进入共享工具循环，以前它可在 Bot 输出步骤直接调用生成器。现在受图片能力、工具配置、参数验证、取消和审批规则约束。结果包含图像附件或明确告警。TTS、媒体组装、平台发送和记忆失败各有独立反馈，已提交文字不因这些动作的失败被重新生成。
 
 ## 验证
 
-Windows 无窗口测试调用桌面 IPC、真实通用 Webhook handler、Telegram 消息适配入口。受控 Provider 与 SQLx 内存数据库断言文本、图片、工具继续轮次、部分响应错误、强制原生工具交换回滚、写入失败、工具后的诊断与请求重放、授权、会话隔离、并发拒绝、订阅断开和取消。Telegram 会话规则与分段另有单测。前端 scope 测试覆盖默认取消不会命中其他外部会话。
+Windows 无窗口测试调用桌面 IPC、真实通用 Webhook handler、Telegram 消息适配入口。受控 Provider 与 SQLx 内存数据库断言文本、图片、工具继续轮次、仅工具回复、部分响应错误、强制原生工具交换回滚、写入失败、工具后的诊断与请求重放、授权、会话隔离、并发拒绝、订阅断开和取消。本地受控 STT HTTP 服务还验证音频重投与冲突、并发重复、转写失败、空转写、取消、超时和忙碌拒绝。Telegram 会话规则与分段另有单测。前端 scope 测试覆盖默认取消不会命中其他外部会话。
 
 | 检查 | 结果 |
 | --- | --- |
-| `cargo test --offline --manifest-path src-tauri/Cargo.toml --lib` | 966 项通过。Windows 链接器报告 LNK4098 默认库冲突警告。 |
+| `cargo test --offline --manifest-path src-tauri/Cargo.toml --lib` | 967 项通过。Windows 链接器报告 LNK4098 默认库冲突警告。 |
 | `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings` | 通过。 |
 | `npm test` | 88 个测试文件，928 项通过。 |
 | `npm run check:ipc` | 176 个 IPC 命令调用均匹配。 |
 | `npm run build` | TypeScript 与 Vite 构建通过。Vite 报告已有的混用静态/动态导入和 chunk 大小警告。 |
-| AstrBot Python adapter | Python 语法检查通过。当前环境缺少 pytest，离线依赖缓存不足，未执行 pytest suite。 |
+| `uv run --no-project --with-requirements requirements-dev.txt python -B -m pytest -q -p no:cacheprovider`（AstrBot adapter） | 9 项通过。 |
 
 应用层集成测试使用无窗口的 Tauri runtime 装配真实 SQLite 存储和受控 Provider。单轮模型读取可独立于 Tauri 测试。真实 Telegram、Discord、LINE、QQ、AstrBot 在线平台和外部模型未用于本次验证。

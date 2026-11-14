@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "tool_only_completion": "工具呼叫已結束，但未產生文字回覆。",
         "speech_failed": "無法朗讀這則回覆：{{error}}",
         "status": {
             "streaming": "生成中",

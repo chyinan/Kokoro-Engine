@@ -1136,6 +1136,7 @@
         }
     },
     "chat": {
+        "tool_only_completion": "工具调用已结束，但未生成文字回复。",
         "speech_failed": "未能朗读这条回复：{{error}}",
         "status": {
             "streaming": "生成中",

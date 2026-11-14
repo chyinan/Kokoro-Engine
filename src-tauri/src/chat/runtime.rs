@@ -350,6 +350,11 @@ impl ChatRuntimeState {
         if let Some(id) = payload.get("user_message_id").and_then(Value::as_i64) {
             snapshot.user_message_id = Some(id);
         }
+        if name == "chat-turn-bound" {
+            if let Some(message) = payload.get("message").and_then(Value::as_str) {
+                snapshot.message = message.to_owned();
+            }
+        }
         if let Some(id) = payload.get("assistant_message_id").and_then(Value::as_i64) {
             snapshot.assistant_message_id = Some(id);
         }
@@ -746,6 +751,30 @@ mod tests {
         journal.complete("a", result("a")).unwrap();
         assert_eq!(*a.borrow(), *b.borrow());
         assert!(!journal.begin(&request("a")).unwrap().0);
+    }
+
+    #[test]
+    fn audio_admission_uses_original_bytes_without_retaining_them_in_json() {
+        let journal = ChatRuntimeState::default();
+        let mut original = request("audio");
+        original.audio = Some(crate::chat::application::ChatAudioInput {
+            data: vec![42; 3 * 1024 * 1024],
+            format: "wav".into(),
+        });
+        let encoded = serde_json::to_string(&original).unwrap();
+        assert!(encoded.len() < 1024, "Audio must be hashed before JSON encoding");
+        let from_ipc: ChatRequest = serde_json::from_str(&encoded).unwrap();
+        assert!(from_ipc.audio.is_none(), "Desktop IPC cannot submit adapter audio");
+        let policy = ChatPolicy::External { create_conversation: true, image_output: true, source: "webhook" };
+        assert!(journal.begin_with_policy(&original, policy).unwrap().0);
+        journal.complete("audio", result("audio")).unwrap();
+        assert!(!journal.begin_with_policy(&original, policy).unwrap().0);
+        let mut changed = original.clone();
+        changed.audio.as_mut().unwrap().data[0] = 43;
+        assert!(journal.begin_with_policy(&changed, policy).unwrap_err().contains("chat_request_conflict"));
+        original.audio.as_mut().unwrap().format = "mp3".into();
+        assert!(journal.begin_with_policy(&original, policy).unwrap_err().contains("chat_request_conflict"));
+        assert!(serde_json::to_string(&journal.snapshots()).unwrap().len() < 1024);
     }
     #[test]
     fn conflict_is_rejected_without_changing_original_request() {

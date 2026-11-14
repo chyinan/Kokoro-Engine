@@ -1,7 +1,9 @@
 // pattern: Mixed (needs refactoring)
 
 use crate::ai::context::AIOrchestrator;
-use crate::chat::application::{channel_id, submit_chat, ChatImage, ChatPolicy, ChatRequest};
+use crate::chat::application::{
+    channel_id, submit_chat, ChatAudioInput, ChatImage, ChatPolicy, ChatRequest,
+};
 use crate::error::KokoroError;
 use crate::stt::{AudioSource, SttService};
 use crate::telegram::TelegramService;
@@ -821,11 +823,17 @@ fn reply_text_with_translation(reply: &BotReply) -> String {
     text
 }
 
+#[derive(Default)]
+struct BotInput {
+    text: String,
+    images: Vec<String>,
+    audio: Option<ChatAudioInput>,
+}
+
 async fn generate_bot_reply(
     app: &tauri::AppHandle,
     platform: &'static str,
-    text: &str,
-    image_urls: Vec<String>,
+    input: BotInput,
     character_id: Option<&str>,
     conversation_key: Option<&str>,
     message_id: Option<&str>,
@@ -843,12 +851,12 @@ async fn generate_bot_reply(
     let client_request_id = message_id
         .map(|id| channel_id(platform, peer, id))
         .unwrap_or_else(|| format!("{platform}-{}", uuid::Uuid::new_v4()));
-    let text = if text.trim().is_empty() && !image_urls.is_empty() {
+    let text = if input.text.trim().is_empty() && !input.images.is_empty() {
         "The user sent an image:"
     } else {
-        text.trim()
+        input.text.trim()
     };
-    if text.is_empty() {
+    if text.is_empty() && input.audio.is_none() {
         return Err(KokoroError::Validation("Message text is empty".into()));
     }
 
@@ -857,7 +865,8 @@ async fn generate_bot_reply(
         character_id: Some(char_id.to_owned()),
         conversation_id: Some(conversation_id),
         client_request_id: Some(client_request_id),
-        images: Some(image_urls),
+        images: Some(input.images),
+        audio: input.audio,
         ..Default::default()
     }, ChatPolicy::External { create_conversation: true, image_output: platform != "qq", source: platform }).await?;
     if response.status.as_deref() == Some("cancelled") {
@@ -883,8 +892,14 @@ pub(crate) async fn generate_bot_text_reply(
     conversation_key: &str,
     message_id: &str,
 ) -> Result<String, String> {
-    let reply = generate_bot_reply(app, platform, text, Vec::new(),
-        character_id, Some(conversation_key), Some(message_id)).await.map_err(|error| error.to_string())?;
+    let reply = generate_bot_reply(
+        app,
+        platform,
+        BotInput { text: text.into(), ..Default::default() },
+        character_id,
+        Some(conversation_key),
+        Some(message_id),
+    ).await.map_err(|error| error.to_string())?;
     Ok(reply_text_with_translation(&reply))
 }
 
@@ -1502,22 +1517,6 @@ pub(crate) async fn handle_generic_webhook(
         Ok(value) => value,
         Err(error) => return bad_request(&error),
     };
-    let text = if let Some(audio) = parsed.audio {
-        let format = parsed
-            .audio_format
-            .unwrap_or_else(|| audio_format_from_mime_or_name(None, None));
-        match transcribe_bot_audio(&app, "webhook", audio, format).await {
-            Ok(transcription) => text_with_transcription(parsed.text, transcription),
-            Err(error) => return server_error(&error),
-        }
-    } else {
-        parsed.text
-    };
-
-    if text.trim().is_empty() {
-        return bad_request("Missing text or media");
-    }
-
     let active_character_id = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
         orchestrator.get_character_id().await
     } else {
@@ -1532,8 +1531,16 @@ pub(crate) async fn handle_generic_webhook(
     match generate_bot_reply(
         &app,
         "webhook",
-        &text,
-        parsed.images,
+        BotInput {
+            text: parsed.text,
+            images: parsed.images,
+            audio: parsed.audio.map(|data| ChatAudioInput {
+                data,
+                format: parsed
+                    .audio_format
+                    .unwrap_or_else(|| audio_format_from_mime_or_name(None, None)),
+            }),
+        },
         Some(&character_id),
         parsed.conversation_key.as_deref(),
         parsed.request_id.as_deref(),
@@ -1720,8 +1727,11 @@ async fn handle_line_webhook(
         match generate_bot_reply(
             &app,
             "line",
-            &text,
-            image_urls,
+            BotInput {
+                text,
+                images: image_urls,
+                ..Default::default()
+            },
             config.character_id.as_deref(),
             user_id.as_deref(),
             message.id.as_deref(),
@@ -2063,8 +2073,11 @@ async fn handle_discord_message(
     match generate_bot_reply(
         app,
         "discord",
-        &content,
-        image_urls,
+        BotInput {
+            text: content,
+            images: image_urls,
+            ..Default::default()
+        },
         cfg.character_id.as_deref(),
         Some(&conversation_key),
         message.get("id").and_then(Value::as_str),

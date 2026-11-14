@@ -1142,6 +1142,10 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub allow_image_gen: Option<bool>,
     pub images: Option<Vec<String>>,
+    /// Trusted adapters submit the original audio before admission. Include it in
+    /// the request fingerprint, but never accept it through desktop IPC.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) audio: Option<ChatAudioInput>,
     /// One-shot vision context, excluded from the journal and history previews.
     pub camera_frame: Option<String>,
     pub character_id: Option<String>,
@@ -1166,6 +1170,37 @@ pub struct ChatRequest {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub conversation_generation: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ChatAudioInput {
+    pub data: Vec<u8>,
+    pub format: String,
+}
+
+impl Serialize for ChatAudioInput {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use sha2::{Digest, Sha256};
+        // Do not expand or retain multi-megabyte audio in JSON while hashing a
+        // request. The original bytes live only in the pending worker input.
+        (&self.format, format!("{:x}", Sha256::digest(&self.data))).serialize(serializer)
+    }
+}
+
+fn tool_only_completion_notice(language: &str) -> String {
+    let catalog = match language.trim().to_lowercase().as_str() {
+        "zh" | "zh-cn" | "中文" | "简体中文" => include_str!("../../../src/ui/locales/zh.json"),
+        "zh-tw" | "zh-hk" | "繁體中文" => include_str!("../../../src/ui/locales/zh-TW.json"),
+        "ja" | "ja-jp" | "日本語" => include_str!("../../../src/ui/locales/ja.json"),
+        "ko" | "ko-kr" | "한국어" => include_str!("../../../src/ui/locales/ko.json"),
+        "ru" | "ru-ru" | "русский" => include_str!("../../../src/ui/locales/ru.json"),
+        _ => include_str!("../../../src/ui/locales/en.json"),
+    };
+    let catalog: serde_json::Value = serde_json::from_str(catalog).expect("bundled locale JSON");
+    catalog["chat"]["tool_only_completion"]
+        .as_str()
+        .expect("bundled tool completion notice")
+        .to_owned()
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -2394,11 +2429,15 @@ async fn execute_chat(
                 .message
                 .strip_prefix("[case:lifecycle-hold-preparation-")
                 .and_then(|phase| phase.strip_suffix(']'))
+                .map(str::to_owned)
         } else {
             None
         };
         #[cfg(debug_assertions)]
-        if lifecycle_hold.is_some_and(|phase| phase != "after-selection") {
+        if lifecycle_hold
+            .as_deref()
+            .is_some_and(|phase| phase != "after-selection")
+        {
             std::future::pending::<()>().await;
         }
         // Keep shared character_id in sync for modules that still read it (heartbeat)
@@ -2477,6 +2516,37 @@ async fn execute_chat(
             Some(profile)
         };
         let prompt_state = profile_state.as_ref().unwrap_or(state);
+        if !desktop {
+            if external_request_exists(&state.db, policy.source(), &client_request_id).await? {
+                return Err(KokoroError::Validation("chat_request_already_persisted: this request reached storage in a previous run".into()));
+            }
+            if let Some(audio) = request.audio.take() {
+                let stt = app
+                    .try_state::<crate::stt::SttService>()
+                    .ok_or_else(|| KokoroError::Chat("STT service not available".into()))?;
+                let audio = crate::stt::AudioSource::Encoded {
+                    data: audio.data,
+                    format: audio.format,
+                };
+                let transcription = stt.transcribe(&audio, None).await.map_err(|error| {
+                    KokoroError::Chat(format!("Failed to transcribe audio: {error}"))
+                })?;
+                let transcription = transcription.text.trim();
+                if !transcription.is_empty() {
+                    request.message = if request.message.trim().is_empty() {
+                        transcription.to_owned()
+                    } else {
+                        format!(
+                            "{}\n\nVoice message transcript: {}",
+                            request.message, transcription
+                        )
+                    };
+                }
+                if request.message.trim().is_empty() {
+                    return Err(KokoroError::Validation("Missing text or media".into()));
+                }
+            }
+        }
         let mut external_memory_history = Vec::new();
         let mut external_message_count = 0;
         let (conversation_id, user_message_id, history_snapshot, bound_generation, regeneration) = 'bind: {
@@ -2492,11 +2562,6 @@ async fn execute_chat(
                 let cid = requested_conversation_id.as_deref().ok_or_else(|| {
                     KokoroError::Validation("External conversation is missing".into())
                 })?;
-                let duplicate = external_request_exists(&state.db, policy.source(), &client_request_id).await?;
-                if duplicate {
-                    return Err(KokoroError::Validation("chat_request_already_persisted: this request reached storage in a previous run".into()));
-                }
-
                 if create_conversation {
                     let now = chrono::Utc::now().to_rfc3339();
                     sqlx::query(
@@ -2559,6 +2624,7 @@ async fn execute_chat(
                             "character_id": char_id,
                             "conversation_id": cid,
                             "user_message_id": mid,
+                            "message": request.message,
                         }),
                     )
                     .await;
@@ -2720,7 +2786,7 @@ async fn execute_chat(
                     crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
                 }
                 #[cfg(debug_assertions)]
-                if lifecycle_hold == Some("after-selection") {
+                if lifecycle_hold.as_deref() == Some("after-selection") {
                     std::future::pending::<()>().await;
                 }
                 Some(new_id)
@@ -3780,7 +3846,7 @@ async fn execute_chat(
         );
     }
 
-    let full_response = strip_leaked_tags(&all_cleaned_text);
+    let mut full_response = strip_leaked_tags(&all_cleaned_text);
     output_warnings.extend(media_delivery_failures.into_iter().map(str::to_owned));
 
     if stream_failed {
@@ -3854,8 +3920,13 @@ async fn execute_chat(
         return Err(KokoroError::Llm(err_msg));
     }
 
-    if !desktop && full_response.is_empty() && images.is_empty() && output_warnings.is_empty() && !executed_any_tool {
-        return Err(KokoroError::Llm("No response from AI".into()));
+    if !desktop && full_response.is_empty() && images.is_empty() && output_warnings.is_empty() {
+        if !executed_any_tool {
+            return Err(KokoroError::Llm("No response from AI".into()));
+        }
+        // Tool results may contain internal data intended only for the model.
+        // Persist a deliverable completion notice without disclosing or rerunning them.
+        full_response = tool_only_completion_notice(&memory_target_language);
     }
     if request.hidden && is_proactive_noop_response(&full_response) {
         if let Some(row_id) = draft_row_id {

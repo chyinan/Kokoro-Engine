@@ -663,6 +663,12 @@ input returns HTTP 409. After a process restart, an ID whose user message
 already reached storage also returns HTTP 409. Omit `request_id` to submit
 each HTTP request as a new chat turn.
 
+Audio identity uses the submitted bytes and format, together with the text,
+images, and conversation scope. Duplicate requests share the original outcome
+without transcribing again, including while the first transcription is pending.
+Transcription failures are retained for that request ID; use a new ID for a new
+attempt after correcting the STT configuration.
+
 ### `WebhookReply`
 
 ```ts
@@ -687,6 +693,8 @@ interface WebhookReply {
 An HTTP 200 response reports the saved chat result. Optional image and voice
 output failures appear in `output_warnings`. A media-only reply may have an
 empty `reply` string and nonempty `images`.
+If tool calls finish without producing text or media, the saved reply contains
+a completion notice. Internal tool results are not copied into that notice.
 
 ### `TelegramStatus`
 
