@@ -424,7 +424,7 @@ try {
     assert.equal(await cancellation.count(), 0);
     return { conversation: source.conversation_id };
   });
-  await check("first-send preparation timeout follows the new selection before the user row exists", async () => {
+  await check("first-send preparation timeout keeps the empty selection before the user row commits", async () => {
     const message = "[case:lifecycle-hold-preparation-after-selection]";
     const select = id => main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), id);
     const input = main.locator("textarea[data-onboarding-id='chat-input']");
@@ -440,9 +440,9 @@ try {
       // until preparation times out and the lock is released.
       const scoped = await waitFor(async () => {
         const turns = await pet.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_runtime_snapshot"));
-        return turns.find(turn => turn.message === message && turn.status === "accepted" && turn.conversation_id);
+        return turns.find(turn => turn.message === message && turn.status === "accepted" && turn.conversation_generation === empty.generation);
       });
-      assert.equal(scoped.conversation_generation, empty.generation + 1);
+      assert.equal(scoped.conversation_id, null);
       assert.equal(scoped.user_message_id, null);
       await setPanelMounted(main, false);
       detached = true;
@@ -451,8 +451,8 @@ try {
         const state = await view(pet);
         const turn = state.turns.find(turn => turn.client_request_id === scoped.client_request_id && turn.status === "error");
         if (!turn) return null;
-        assert.equal(state.conversation_id, scoped.conversation_id);
-        assert.equal(state.generation, scoped.conversation_generation);
+        assert.equal(state.conversation_id, null);
+        assert.equal(state.generation, empty.generation);
         assert.equal(turn.conversation_id, state.conversation_id);
         assert.equal(turn.conversation_generation, state.generation);
         assert.equal(turn.user_message_id, null);
@@ -496,11 +496,16 @@ try {
     assert.equal(during.replies[0].tools.length, 1);
     const result = await outcome(pet, "__toolRounds");
     assert.equal(result.result?.status, "completed");
-    assert.equal(result.result.assistant_message_id, during.draft.id);
     const state = await view(pet);
     const turn = state.turns.find(turn => turn.client_request_id === requestId);
     const tools = state.messages.filter(message => message.role === "tool" && message.metadata?.includes(turn.turn_id));
-    assert.equal(tools.length, 1); return { during, turn, tools };
+    assert.equal(tools.length, 1);
+    const reply = state.messages.find(message => message.id === result.result.assistant_message_id);
+    assert.equal(reply?.role, "assistant");
+    assert.equal(JSON.parse(reply.metadata).turn_id, during.turn.turn_id);
+    assert(!state.messages.some(message => message.id === during.draft.id));
+    assert(tools[0].id < reply.id, "the committed tool exchange must precede its final answer");
+    return { during, turn, tools };
   });
   await check("text-mode tool result remains visible after the saved history takes over", async () => {
     const turn = await petSend("text-tool");

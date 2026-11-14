@@ -1137,6 +1137,9 @@
     },
     "chat": {
         "speech_failed": "Could not read this reply aloud: {{error}}",
+        "persistence_failed": "Could not save this chat to the database.",
+        "reply_unfinished": "Unfinished reply",
+        "retry_save": "Retry saving",
         "status": {
             "streaming": "STREAMING",
             "chat": "CHAT"

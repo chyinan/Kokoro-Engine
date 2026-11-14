@@ -1,12 +1,13 @@
 param(
   [Parameter(Mandatory=$true)][string]$PlaywrightModule,
   [switch]$SkipBuild,
-  [switch]$KeepRunning
+  [switch]$KeepRunning,
+  [switch]$Persistence
 )
 $ErrorActionPreference = 'Stop'
 $chatRepo = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $chatRepo
-$chatOutput = Join-Path $chatRepo 'output/playwright/chat-lifecycle'
+$chatOutput = Join-Path $chatRepo $(if ($Persistence) { 'output/playwright/chat-lifecycle/persistence' } else { 'output/playwright/chat-lifecycle' })
 New-Item -ItemType Directory -Path $chatOutput -Force | Out-Null
 $chatExecutable = Join-Path $chatRepo 'src-tauri/target/debug/tauri-appkokoro-engine.exe'
 # Stop only this fixture's recorded executable/command, never arbitrary PID reuse.
@@ -18,7 +19,7 @@ foreach ($chatPidFile in @('app.pid','fixture.pid')) {
   }
 }
 $chatRun = Get-Date -Format 'yyyyMMdd-HHmmss'
-foreach ($chatArtifact in @('native-report.json','controlled-model-calls.json')) {
+foreach ($chatArtifact in @('native-report.json','persistence-report.json','controlled-model-calls.json')) {
   $chatSource = Join-Path $chatOutput $chatArtifact
   if (Test-Path -LiteralPath $chatSource) { Copy-Item -LiteralPath $chatSource -Destination (Join-Path $chatOutput ($chatRun + '-previous-' + $chatArtifact)) }
 }
@@ -42,7 +43,8 @@ if (-not (Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction Silent
   $chatVite = Start-Process -FilePath (Get-Command node).Source -ArgumentList 'node_modules/vite/bin/vite.js' -WorkingDirectory $chatRepo -WindowStyle Hidden -RedirectStandardOutput (Join-Path $chatOutput 'vite.log') -RedirectStandardError (Join-Path $chatOutput 'vite.stderr.log') -PassThru
   $chatVite.Id | Set-Content -LiteralPath (Join-Path $chatOutput 'vite.pid')
 }
-$chatModel = Start-Process -FilePath (Get-Command node).Source -ArgumentList 'scripts/chat-lifecycle-model-fixture.mjs' -WorkingDirectory $chatRepo -WindowStyle Hidden -RedirectStandardOutput (Join-Path $chatOutput 'model.log') -RedirectStandardError (Join-Path $chatOutput 'model.stderr.log') -PassThru
+$chatFixtureOutput = if ($Persistence) { 'output/playwright/chat-lifecycle/persistence' } else { 'output/playwright/chat-lifecycle' }
+$chatModel = Start-Process -FilePath (Get-Command node).Source -ArgumentList 'scripts/chat-lifecycle-model-fixture.mjs',$chatFixtureOutput -WorkingDirectory $chatRepo -WindowStyle Hidden -RedirectStandardOutput (Join-Path $chatOutput 'model.log') -RedirectStandardError (Join-Path $chatOutput 'model.stderr.log') -PassThru
 $chatModel.Id | Set-Content -LiteralPath (Join-Path $chatOutput 'fixture.pid')
 $chatApp = Start-Process -FilePath $chatExecutable -WorkingDirectory $chatRepo -WindowStyle Hidden -RedirectStandardOutput (Join-Path $chatOutput 'app.stdout.log') -RedirectStandardError (Join-Path $chatOutput 'app.stderr.log') -PassThru
 $chatApp.Id | Set-Content -LiteralPath (Join-Path $chatOutput 'app.pid')
@@ -54,8 +56,9 @@ try {
     if ((Get-Date) -gt $chatDeadline) { throw 'WebView2 CDP startup timed out' }
     Start-Sleep -Milliseconds 100
   }
-  node scripts/chat-lifecycle-native-check.mjs *> (Join-Path $chatOutput 'native-check.log')
-  if ($LASTEXITCODE -ne 0) { throw 'Native assertions failed; see native-check.log and native-report.json' }
+  $chatCheck = if ($Persistence) { 'scripts/chat-persistence-native-check.mjs' } else { 'scripts/chat-lifecycle-native-check.mjs' }
+  node $chatCheck $chatOutput *> (Join-Path $chatOutput 'native-check.log')
+  if ($LASTEXITCODE -ne 0) { Get-Content -Tail 80 (Join-Path $chatOutput 'native-check.log'); throw 'Native assertions failed; see the report in the validation output directory' }
   Get-Content -LiteralPath (Join-Path $chatOutput 'native-check.log')
 } finally {
   if (-not $KeepRunning) {

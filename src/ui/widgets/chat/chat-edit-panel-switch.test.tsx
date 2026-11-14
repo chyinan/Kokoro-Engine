@@ -81,6 +81,42 @@ it("restores a speech failure on its saved reply after reopening and never recre
     }
 });
 
+it("restores an unfinished reply and offers its storage retry without a saved diagnostic", async () => {
+    chat.reset();
+    const failed = {
+        ...turn("persist", 3, "error"), character_id: "char-1", conversation_id: "conv-1",
+        user_message_id: 1, assistant_message_id: null, error: "Could not save chat messages",
+        error_code: "CHAT_PERSISTENCE_ERROR", persistence_retryable: true, text: "Partial reply",
+    };
+    const prompt = { id: 1, role: "user", content: "Prompt", created_at: "now" };
+    chat.set({ revision: 3, messages: [prompt], turns: [failed] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const retry = () => [...container.querySelectorAll("button")].find(button => button.textContent === "chat.retry_save");
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        expect(container.querySelector('[role="alert"]')?.textContent).toBe("chat.persistence_failed");
+        expect(container.textContent).toContain("Partial reply");
+        expect(container.textContent).toContain("chat.reply_unfinished");
+        expect(retry()).toBeDefined();
+        await act(async () => retry()?.click());
+        expect(chat.retryPersistence).toHaveBeenCalledExactlyOnceWith(failed.client_request_id);
+        expect(chat.continueFrom).not.toHaveBeenCalled();
+        await act(async () => chat.set({
+            revision: 4,
+            turns: [{ ...failed, revision: 4, status: "completed", persistence_retryable: false, error: null, assistant_message_id: 2 }],
+            messages: [prompt, { id: 2, role: "assistant", content: failed.text, created_at: "now", metadata: JSON.stringify({ turn_id: failed.turn_id }) }],
+        }));
+        expect(container.querySelector('[role="alert"]')).toBeNull();
+        expect(container.textContent).not.toContain("chat.reply_unfinished");
+        expect(retry()).toBeUndefined();
+    } finally {
+        await act(async () => root.unmount());
+        container.remove();
+    }
+});
+
 it("shows the legacy Mod failure once across the journal and history, scoped to its conversation and character", async () => {
     chat.reset();
     const prompt = { id: 1, role: "user", content: "Mod prompt", created_at: "now" };

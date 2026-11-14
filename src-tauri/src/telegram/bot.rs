@@ -11,10 +11,12 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::persistence::{self, ExternalTurn};
+use crate::error::KokoroError;
 use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
 use crate::imagegen::ImageGenService;
 use crate::llm::messages::{
-    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
+    assistant_text_message, is_user_message, replace_user_message_with_images, history_message_to_chat_message,
     system_message, user_message_with_images, user_text_message,
 };
 use crate::llm::service::LlmService;
@@ -168,29 +170,19 @@ async fn handle_message(
         }
     }
 
-    // Check for commands
-    if let Some(text) = msg.text() {
-        if text.starts_with('/') {
-            return handle_command(&bot, &msg, text, &config, &sessions, &app).await;
+    let result = match msg.text() {
+        Some(text) if text.starts_with('/') => handle_command(&bot, &msg, text, &config, &sessions, &app).await,
+        Some(text) => handle_text(&bot, &msg, text, &config, &app).await,
+        None if msg.voice().is_some() => handle_voice(&bot, &msg, &config, &sessions, &app).await,
+        None if msg.photo().is_some() => handle_photo(&bot, &msg, &config, &app).await,
+        None => Ok(()),
+    };
+    if let Err(error) = &result {
+        if let Some(KokoroError::ChatPersistence(message)) = error.downcast_ref::<KokoroError>() {
+            let _ = bot.send_message(chat_id, format!("⚠️ {message} ({})", KokoroError::CHAT_PERSISTENCE_CODE)).await;
         }
     }
-
-    // Voice message
-    if msg.voice().is_some() {
-        return handle_voice(&bot, &msg, &config, &sessions, &app).await;
-    }
-
-    // Photo message (with optional caption)
-    if msg.photo().is_some() {
-        return handle_photo(&bot, &msg, &config, &app).await;
-    }
-
-    // Regular text message
-    if let Some(text) = msg.text() {
-        return handle_text(&bot, &msg, text, &config, &app).await;
-    }
-
-    Ok(())
+    result
 }
 
 /// Handle bot commands: /start, /new, /continue, /status
@@ -276,6 +268,31 @@ async fn handle_command(
     Ok(())
 }
 
+async fn begin_telegram_turn(
+    orchestrator: &AIOrchestrator,
+    character_id: &str,
+    chat_id: i64,
+    message_id: i32,
+    text: &str,
+    continue_selected: bool,
+) -> Result<ExternalTurn, KokoroError> {
+    let chat_key = chat_id.to_string();
+    let conversation_id = persistence::external_identity("telegram", &[character_id, &chat_key]);
+    let request_id = persistence::external_identity("telegram", &[&chat_key, &message_id.to_string()]);
+    ExternalTurn::begin(orchestrator, character_id, conversation_id, request_id, text, continue_selected).await
+}
+
+fn format_telegram_text(text: &str) -> String {
+    strip_markdown_emphasis_markers(&compact_newlines(text))
+}
+
+fn telegram_reply_text(text: &str, translation: Option<&str>) -> String {
+    match translation {
+        Some(translation) => format!("{text}\n\n🌐 {translation}"),
+        None => text.to_owned(),
+    }
+}
+
 /// Handle a plain text message — run through the LLM pipeline and reply.
 async fn handle_text(
     bot: &Bot,
@@ -318,9 +335,22 @@ async fn handle_text(
         }
     };
     tracing::info!(target: "telegram", "[Telegram] Resolved char_id='{}' for this request", char_id);
-    orchestrator
-        .add_message("user".to_string(), text.to_string(), &char_id)
-        .await;
+    let continue_selected = orchestrator.get_character_id().await == char_id;
+    let isolated;
+    let orchestrator = if !continue_selected {
+        isolated = orchestrator.fork_with_isolated_history().await;
+        if !isolated.apply_character_profile(&char_id).await? {
+            return Err(KokoroError::Validation("Unknown Telegram character".into()).into());
+        }
+        &isolated
+    } else {
+        &*orchestrator
+    };
+    let turn = begin_telegram_turn(orchestrator, &char_id, chat_id.0, msg.id.0, text, continue_selected).await?;
+    if let Some((text, translation)) = &turn.previous_reply {
+        bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(text), translation.as_deref())).await?;
+        return Ok(());
+    }
 
     // Sync user message to desktop UI
     let _ = app.emit(
@@ -354,7 +384,8 @@ async fn handle_text(
     };
 
     let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(text, false, tool_prompt, false, &char_id, &_chat_turn_guard)
+        .compose_prompt_for_conversation_with_guard(text, false, tool_prompt, false, &char_id,
+            Some(&turn.target.conversation_id), Some(turn.history.clone()), &_chat_turn_guard)
         .await
         .map_err(|e| e.to_string())?;
     for w in &compose_warnings {
@@ -363,7 +394,7 @@ async fn handle_text(
 
     let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
+        .map(|m| history_message_to_chat_message(&m.role, m.content, m.metadata.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Ensure the latest user turn is in the messages
@@ -389,8 +420,7 @@ async fn handle_text(
             match result {
                 Ok(delta) => response.push_str(&delta),
                 Err(e) => {
-                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
-                    break;
+                    return Err(KokoroError::Llm(e.to_string()).into());
                 }
             }
         }
@@ -478,9 +508,8 @@ async fn handle_text(
         )));
     }
 
-    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
-        &all_cleaned_text,
-    )));
+    let canonical_response = strip_control_tags(&all_cleaned_text);
+    let response = format_telegram_text(&canonical_response);
     let translation = if all_translations.is_empty() {
         None
     } else {
@@ -495,25 +524,7 @@ async fn handle_text(
     }
 
     // 5. Persist assistant message
-    let metadata = translation
-        .as_ref()
-        .map(|t| serde_json::json!({ "translation": t }).to_string());
-    if let Err(e) = orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            response.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await
-    {
-        tracing::error!(
-            target: "telegram",
-            "[Telegram] Failed to persist assistant message: {}",
-            e
-        );
-    }
+    turn.save_reply(orchestrator, &canonical_response, translation.as_deref()).await?;
 
     // Event-driven + periodic memory extraction
     let msg_count = orchestrator.get_message_count().await;
@@ -547,7 +558,7 @@ async fn handle_text(
                     msg_count
                 );
 
-                let history = orchestrator.get_recent_memory_history(10).await;
+                let history = turn.recent_committed_history(orchestrator, 10).await;
                 let memory_mgr = orchestrator.memory_manager.clone();
                 let provider_for_mem = llm_service.provider().await;
                 let char_id_for_mem = char_id.clone();
@@ -592,7 +603,7 @@ async fn handle_text(
             "[Telegram/Memory] Triggering memory extraction (count={})",
             msg_count
         );
-        let history = orchestrator.get_recent_memory_history(10).await;
+        let history = turn.recent_committed_history(orchestrator, 10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
         let char_id_for_mem = char_id.clone();
@@ -667,14 +678,8 @@ async fn handle_text(
     );
 
     // 6. Build reply text (include translation if present)
-    let reply_text = if let Some(ref t) = translation {
-        format!("{}\n\n📝 {}", response, t)
-    } else {
-        response.clone()
-    };
-
-    // 7. Send text reply
-    bot.send_message(chat_id, &reply_text).await.ok();
+    let reply_text = telegram_reply_text(&response, translation.as_deref());
+    bot.send_message(chat_id, reply_text).await?;
 
     // 8. Optionally send voice reply
     if config.send_voice_reply {
@@ -735,11 +740,6 @@ async fn handle_voice(
             .ok();
         return Ok(());
     }
-
-    // Send recognized text back as context
-    bot.send_message(chat_id, format!("🎤 {}", transcription))
-        .await
-        .ok();
 
     // Process as regular text
     handle_text(bot, msg, &transcription, config, app).await
@@ -818,9 +818,22 @@ async fn handle_photo(
         "[Telegram] Resolved char_id='{}' for photo request",
         char_id
     );
-    orchestrator
-        .add_message("user".to_string(), caption.clone(), &char_id)
-        .await;
+    let continue_selected = orchestrator.get_character_id().await == char_id;
+    let isolated;
+    let orchestrator = if !continue_selected {
+        isolated = orchestrator.fork_with_isolated_history().await;
+        if !isolated.apply_character_profile(&char_id).await? {
+            return Err(KokoroError::Validation("Unknown Telegram character".into()).into());
+        }
+        &isolated
+    } else {
+        &*orchestrator
+    };
+    let turn = begin_telegram_turn(orchestrator, &char_id, chat_id.0, msg.id.0, &caption, continue_selected).await?;
+    if let Some((text, translation)) = &turn.previous_reply {
+        bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(text), translation.as_deref())).await?;
+        return Ok(());
+    }
 
     // Sync user message to desktop UI
     let _ = app.emit(
@@ -854,12 +867,14 @@ async fn handle_photo(
     };
 
     let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(
+        .compose_prompt_for_conversation_with_guard(
             &caption,
             false,
             tool_prompt,
             false,
             &char_id,
+            Some(&turn.target.conversation_id),
+            Some(turn.history.clone()),
             &_chat_turn_guard,
         )
         .await
@@ -870,7 +885,7 @@ async fn handle_photo(
 
     let mut client_messages = prompt_messages
         .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
+        .map(|m| history_message_to_chat_message(&m.role, m.content, m.metadata.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Replace or append the last user message with multimodal content (text + image)
@@ -899,8 +914,7 @@ async fn handle_photo(
             match result {
                 Ok(delta) => round_response.push_str(&delta),
                 Err(e) => {
-                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
-                    break;
+                    return Err(KokoroError::Llm(e.to_string()).into());
                 }
             }
         }
@@ -988,9 +1002,8 @@ async fn handle_photo(
         )));
     }
 
-    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
-        &all_cleaned_text,
-    )));
+    let canonical_response = strip_control_tags(&all_cleaned_text);
+    let response = format_telegram_text(&canonical_response);
     let translation = if all_translations.is_empty() {
         None
     } else {
@@ -1005,25 +1018,7 @@ async fn handle_photo(
     }
 
     // 5. Persist
-    let metadata = translation
-        .as_ref()
-        .map(|t| serde_json::json!({ "translation": t }).to_string());
-    if let Err(e) = orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            response.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await
-    {
-        tracing::error!(
-            target: "telegram",
-            "[Telegram] Failed to persist assistant message: {}",
-            e
-        );
-    }
+    turn.save_reply(orchestrator, &canonical_response, translation.as_deref()).await?;
 
     // Trigger periodic memory extraction (every 5 user messages)
     let msg_count = orchestrator.get_message_count().await;
@@ -1040,7 +1035,7 @@ async fn handle_photo(
             "[Telegram/Memory] Triggering memory extraction (count={})",
             msg_count
         );
-        let history = orchestrator.get_recent_memory_history(10).await;
+        let history = turn.recent_committed_history(orchestrator, 10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
         let char_id_for_mem = char_id.clone();
@@ -1115,12 +1110,8 @@ async fn handle_photo(
     );
 
     // 6. Reply
-    let reply_text = if let Some(ref t) = translation {
-        format!("{}\n\n📝 {}", response, t)
-    } else {
-        response.clone()
-    };
-    bot.send_message(chat_id, &reply_text).await.ok();
+    let reply_text = telegram_reply_text(&response, translation.as_deref());
+    bot.send_message(chat_id, reply_text).await?;
 
     // 7. Voice reply
     if config.send_voice_reply {
@@ -1589,4 +1580,56 @@ mod tests {
             initial_gen + 1
         );
     }
+    #[tokio::test]
+    async fn telegram_initial_write_failure_propagates_before_text_or_photo_can_generate() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap().fork_with_isolated_history().await;
+        sqlx::query("CREATE TRIGGER reject_telegram_user BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'Telegram user fault'); END")
+            .execute(&state.db).await.unwrap();
+        for (id, text) in [(1, "typed prompt"), (2, "photo caption"), (3, "voice transcript")] {
+            assert!(matches!(
+                begin_telegram_turn(&state, "default", 10, id, text, true).await,
+                Err(KokoroError::ChatPersistence(_))
+            ));
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&state.db).await.unwrap();
+        assert_eq!(count, 0);
+        assert!(state.history.lock().await.is_empty());
+        assert!(state.current_conversation_id.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_redelivery_retries_only_the_saved_reply_in_its_original_conversation() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap().fork_with_isolated_history().await;
+        let first = begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true).await.unwrap();
+        assert!(first.previous_reply.is_none());
+        state.clear_history().await;
+        let second = begin_telegram_turn(&state, "default", 10, 2, "second question", true).await.unwrap();
+        assert_ne!(second.target.conversation_id, first.target.conversation_id);
+        sqlx::query("CREATE TRIGGER reject_telegram_assistant BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'Telegram assistant fault'); END")
+            .execute(&state.db).await.unwrap();
+        let raw_reply = "**full reply**\n\n\nnext paragraph";
+        assert!(matches!(first.save_reply(&state, raw_reply, Some("translation")).await, Err(KokoroError::ChatPersistence(_))));
+        assert!(matches!(
+            begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_telegram_assistant").execute(&state.db).await.unwrap();
+        for _ in 0..2 {
+            let retry = begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true).await.unwrap();
+            assert_eq!(retry.target.conversation_id, first.target.conversation_id);
+            assert_eq!(retry.previous_reply, Some((raw_reply.into(), Some("translation".into()))));
+        }
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id",
+        ).bind(&first.target.conversation_id).fetch_all(&state.db).await.unwrap();
+        assert_eq!(rows, [("user".into(), " typed prompt ".into()), ("assistant".into(), raw_reply.into())]);
+        let wrong: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE role = 'assistant' AND conversation_id = ?")
+            .bind(&second.target.conversation_id).fetch_one(&state.db).await.unwrap();
+        assert_eq!(wrong, 0);
+        assert_eq!(state.history.lock().await.len(), 1);
+    }
+
 }

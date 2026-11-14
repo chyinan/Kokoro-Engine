@@ -86,8 +86,7 @@ export function usePetChat(): PetChatState {
         }
     }, [revision, replyRequestId, requestId, text, error, active, view.character_id]);
     const sendMessage = async (text: string) => {
-        const message = text.trim();
-        if (!message || sending.current) return;
+        if (!text.trim() || sending.current) return;
         sending.current = true;
         const sendingScope = scope.current;
         clearHideTimer();
@@ -95,7 +94,7 @@ export function usePetChat(): PetChatState {
         setRequest({ id: client_request_id, characterId: view.character_id });
         void invoke("show_bubble_window", { text: "..." }).catch(() => {});
         try {
-            await chatApplication.send({ message, client_request_id,
+            await chatApplication.send({ message: text, client_request_id,
                 character_id: view.character_id, conversation_id: view.conversation_id ?? undefined,
                 conversation_generation: view.generation });
         }

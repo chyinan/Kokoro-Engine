@@ -32,6 +32,39 @@ function harness() {
 }
 afterEach(() => vi.useRealTimers());
 
+describe("persistence failures in the chat view", () => {
+  const failedSave = {
+    ...turn("save", 4, "error"),
+    assistant_message_id: null,
+    error: "Could not save chat messages to the database.",
+    error_code: "CHAT_PERSISTENCE_ERROR",
+  };
+
+  it.each([true, false])("marks the reply unfinished when the partial draft exists in SQLite: %s", hasDraft => {
+    const messages = [
+      { id: 1, role: "user", content: "question", created_at: "now" },
+      ...(hasDraft ? [{ id: 2, role: "assistant", content: "answer", created_at: "now",
+        metadata: JSON.stringify({ turn_id: failedSave.turn_id, streaming_draft: true }) }] : []),
+    ];
+    const selection = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a" };
+    const projected = projectMessages({ ...selection, messages, turns: [failedSave] });
+    expect(projected).toEqual([
+      expect.objectContaining({ role: "user", id: 1 }),
+      expect.objectContaining({ role: "kokoro", text: "answer", unfinished: true }),
+      expect.objectContaining({ role: "kokoro", isError: true, persistenceFailure: true, text: failedSave.error }),
+    ]);
+    expect(projected[2].canRetryFailure).toBeUndefined();
+    expect(projectMessages({ ...selection, conversation_id: "conversation-b", turns: [failedSave] })).toEqual([]);
+  });
+
+  it("shows an initial save error without adding an unsaved prompt or leaking it to a new empty selection", () => {
+    const beforeUser = { ...failedSave, conversation_id: null, conversation_generation: 2, user_message_id: null, text: "" };
+    const selection = { ...emptyChatView, character_id: "character-a", generation: 2, turns: [beforeUser] };
+    expect(projectMessages(selection)).toEqual([expect.objectContaining({ persistenceFailure: true })]);
+    expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
+  });
+});
+
 describe("UI-independent chat application", () => {
   it("submits and obtains the authoritative result without any subscription or React component", async () => {
     const { app, io } = harness();

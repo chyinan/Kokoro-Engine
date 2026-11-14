@@ -1128,6 +1128,9 @@
   },
   "chat": {
       "speech_failed": "Не удалось озвучить этот ответ: {{error}}",
+      "persistence_failed": "Не удалось сохранить чат в базе данных.",
+      "reply_unfinished": "Незавершённый ответ",
+      "retry_save": "Повторить сохранение",
     "status": {
       "streaming": "ПОТОК",
       "chat": "ЧАТ"
