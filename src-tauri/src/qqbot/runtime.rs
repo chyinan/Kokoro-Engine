@@ -1,6 +1,5 @@
 // pattern: Imperative Shell
 
-use crate::ai::context::AIOrchestrator;
 use crate::commands::bot::BotConfig;
 use crate::qqbot::protocol::{
     build_text_reply_body, conversation_key, gateway_dispatch_transition, heartbeat_tick_action,
@@ -16,7 +15,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::sync::{oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -27,7 +26,6 @@ const API_BASE: &str = "https://api.sgroup.qq.com";
 const GROUP_AND_C2C_INTENT: u32 = 1 << 25;
 const TOKEN_REFRESH_AHEAD: Duration = Duration::from_secs(300);
 const MAX_DEDUPLICATED_MESSAGES: usize = 512;
-const MAX_CONVERSATION_SESSIONS: usize = 256;
 const MAX_CONCURRENT_REPLIES: usize = 4;
 const MAX_QUEUED_REPLY_TASKS: usize = 32;
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -110,19 +108,6 @@ impl TokenProvider {
 struct MessageDeduplicator {
     message_ids: VecDeque<String>,
 }
-
-struct ConversationSession {
-    orchestrator: AIOrchestrator,
-    turn_lock: Mutex<()>,
-}
-
-#[derive(Default)]
-struct ConversationSessionStore {
-    sessions: HashMap<String, Arc<ConversationSession>>,
-    insertion_order: VecDeque<String>,
-}
-
-type ConversationSessions = Arc<Mutex<ConversationSessionStore>>;
 
 #[derive(Debug, Clone, Serialize)]
 struct QQAuthorizationRequest {
@@ -310,7 +295,6 @@ pub async fn run_qq_gateway(
     };
     let token_provider = TokenProvider::new(client.clone());
     let deduplicator = Arc::new(Mutex::new(MessageDeduplicator::default()));
-    let conversation_sessions = Arc::new(Mutex::new(ConversationSessionStore::default()));
     let reply_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REPLIES));
     let task_limit = Arc::new(Semaphore::new(MAX_QUEUED_REPLY_TASKS));
     let reconnect_delays = [1_u64, 2, 5, 10, 30, 60];
@@ -325,7 +309,6 @@ pub async fn run_qq_gateway(
             config.clone(),
             app.clone(),
             deduplicator.clone(),
-            conversation_sessions.clone(),
             reply_limit.clone(),
             task_limit.clone(),
             authorization_broker.clone(),
@@ -374,7 +357,6 @@ async fn run_session(
     config: Arc<RwLock<BotConfig>>,
     app: tauri::AppHandle,
     deduplicator: Arc<Mutex<MessageDeduplicator>>,
-    conversation_sessions: ConversationSessions,
     reply_limit: Arc<Semaphore>,
     task_limit: Arc<Semaphore>,
     authorization_broker: QQAuthorizationBroker,
@@ -547,7 +529,6 @@ async fn run_session(
                         let task_app_id = app_id.clone();
                         let task_app_secret = app_secret.clone();
                         let task_reply_limit = reply_limit.clone();
-                        let task_conversation_sessions = conversation_sessions.clone();
                         let task_authorization_broker = authorization_broker.clone();
                         reply_tasks.spawn(async move {
                             let _task_admission = task_admission;
@@ -558,7 +539,6 @@ async fn run_session(
                                 &task_app_secret,
                                 &task_config,
                                 &task_app,
-                                &task_conversation_sessions,
                                 &task_authorization_broker,
                                 &task_reply_limit,
                                 message,
@@ -613,7 +593,6 @@ async fn handle_inbound_message(
     app_secret: &str,
     config: &Arc<RwLock<BotConfig>>,
     app: &tauri::AppHandle,
-    conversation_sessions: &ConversationSessions,
     authorization_broker: &QQAuthorizationBroker,
     reply_limit: &Arc<Semaphore>,
     message: QQInboundMessage,
@@ -666,21 +645,13 @@ async fn handle_inbound_message(
         .map_err(|_| "QQ reply service is shutting down".to_string())?;
 
     let key = conversation_key(&message);
-    let session = get_conversation_session(
-        app,
-        conversation_sessions,
-        &key,
-        qq_config.character_id.as_deref(),
-    )
-    .await?;
-    let _turn = session.turn_lock.lock().await;
     let reply = crate::commands::bot::generate_bot_text_reply(
         app,
         "qq",
         &message.content,
         qq_config.character_id.as_deref(),
-        Some(&key),
-        Some(&session.orchestrator),
+        &key,
+        &message.message_id,
     )
     .await?;
     if reply.trim().is_empty() {
@@ -689,57 +660,6 @@ async fn handle_inbound_message(
 
     let access_token = token_provider.access_token(app_id, app_secret).await?;
     send_text_reply(client, &access_token, &message, &reply).await
-}
-
-async fn get_conversation_session(
-    app: &tauri::AppHandle,
-    conversation_sessions: &ConversationSessions,
-    conversation_key: &str,
-    character_id: Option<&str>,
-) -> Result<Arc<ConversationSession>, String> {
-    let session_key = format!(
-        "{}|{}",
-        conversation_key,
-        character_id
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("auto")
-    );
-    {
-        let sessions = conversation_sessions.lock().await;
-        if let Some(session) = sessions.sessions.get(&session_key) {
-            return Ok(session.clone());
-        }
-    }
-    let managed_orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let orchestrator = managed_orchestrator.fork_with_isolated_history().await;
-    if let Some(character_id) = character_id.filter(|value| !value.trim().is_empty()) {
-        if !orchestrator
-            .apply_character_profile(character_id)
-            .await
-            .map_err(|error| format!("failed to load QQ character profile: {}", error))?
-        {
-            return Err(format!("QQ character profile not found: {}", character_id));
-        }
-    }
-    let session = Arc::new(ConversationSession {
-        orchestrator,
-        turn_lock: Mutex::new(()),
-    });
-    let mut sessions = conversation_sessions.lock().await;
-    if let Some(existing) = sessions.sessions.get(&session_key) {
-        return Ok(existing.clone());
-    }
-    while sessions.sessions.len() >= MAX_CONVERSATION_SESSIONS {
-        let Some(oldest) = sessions.insertion_order.pop_front() else {
-            break;
-        };
-        sessions.sessions.remove(&oldest);
-    }
-    sessions.insertion_order.push_back(session_key.clone());
-    sessions.sessions.insert(session_key, session.clone());
-    Ok(session)
 }
 
 async fn fetch_gateway_url(client: &Client, access_token: &str) -> Result<String, String> {

@@ -3,7 +3,7 @@
 import * as bridge from "../kokoro-bridge";
 import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { canTruncateRefreshedHistory, getContinueFromCutoffIndex, getContinueFromRowBoundary, getExpectedTailMessageId } from "./history-commands";
-import { findFailurePromptIndex, isActiveTurn, mergeTurnSnapshot, projectSavedMessages } from "./projection";
+import { findFailurePromptIndex, isActiveTurn, mergeTurnSnapshot, projectSavedMessages, turnMatchesView } from "./projection";
 
 export interface ChatTransport {
   read(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null>;
@@ -156,6 +156,7 @@ export class ChatApplication {
         revision: 0, client_request_id: id, turn_id: null,
         character_id: request.character_id ?? this.view.character_id,
         conversation_id: request.conversation_id ?? this.view.conversation_id,
+        conversation_generation: request.conversation_generation ?? this.view.generation,
         message: request.message, images: request.images ?? [], hidden: request.hidden ?? false,
         reusing_saved_prompt: request.retry_failure !== undefined || request.regenerate_reply !== undefined,
         status: "pending", text: "", translation: null, tools: [], error: null,
@@ -173,7 +174,7 @@ export class ChatApplication {
     return promise;
   }
   async cancel(id?: string, reason = "stopped_by_user") {
-    const target = id ?? this.view.turns.find(isActiveTurn)?.client_request_id ?? this.pending.keys().next().value;
+    const target = id ?? this.view.turns.find(turn => isActiveTurn(turn) && turnMatchesView(this.view, turn))?.client_request_id;
     if (target) await this.io.cancel(target, reason);
     await this.refresh();
   }

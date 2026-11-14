@@ -1,5 +1,5 @@
 use crate::ai::context::AIOrchestrator;
-use crate::commands::live2d::load_active_live2d_profile;
+use crate::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
 use serde::Serialize;
 use tauri::{Emitter, State};

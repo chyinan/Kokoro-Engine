@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod hooks;
 pub mod imagegen;
+pub mod live2d;
 pub mod llm;
 pub mod mcp;
 pub mod mods;
@@ -577,7 +578,7 @@ pub fn run() {
             );
 
             // WindowSizeState
-            app.manage(crate::commands::system::WindowSizeState::new());
+            app.manage(crate::imagegen::WindowSizeState::new());
 
             // LLM
             let llm_config_path = app_data.join("llm_config.json");
@@ -617,8 +618,8 @@ pub fn run() {
             let hook_runtime = HookRuntime::new();
             hook_runtime.register(Arc::new(AuditLogHookHandler));
             app.manage(hook_runtime);
-            app.manage(Arc::new(crate::commands::chat::PendingToolApprovalState::new()));
-            app.manage(Arc::new(crate::commands::chat::TurnCancellationState::new()));
+            app.manage(Arc::new(crate::chat::application::PendingToolApprovalState::new()));
+            app.manage(Arc::new(crate::chat::application::TurnCancellationState::new()));
 
             // Action Registry
             let mut action_registry = crate::actions::ActionRegistry::new();

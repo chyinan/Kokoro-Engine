@@ -280,7 +280,7 @@ async fn run_analysis_chain(
 
 fn emit_proactive_vision_comment(app_handle: &AppHandle) {
     tracing::info!(target: "vision", "Vision screen-comment trigger fired");
-    crate::commands::chat::submit_proactive(app_handle.clone(), build_proactive_vision_instruction().into());
+    crate::chat::application::submit_proactive(app_handle.clone(), build_proactive_vision_instruction().into());
     let _ = app_handle.emit(
         "proactive-trigger",
         serde_json::json!({

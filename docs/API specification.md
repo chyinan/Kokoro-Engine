@@ -634,6 +634,7 @@ interface TelegramConfig {
 
 ```ts
 interface WebhookMessageRequest {
+  request_id?: string;             // up to 256 UTF-8 bytes
   text?: string;
   message?: string;                 // legacy alias for text
   image?: string;                   // URL or base64 payload
@@ -655,12 +656,20 @@ media, audio, or any combination. Audio is transcribed by the configured STT
 service before the request is sent to the LLM. An image-only request uses the
 placeholder `The user sent an image:` when no caption is supplied.
 
+Use the same `request_id` when retrying delivery of the same message. Kokoro
+scopes it to the webhook conversation identity and returns the original chat
+outcome without rerunning the model or tools. Reusing an ID with different
+input returns HTTP 409. After a process restart, an ID whose user message
+already reached storage also returns HTTP 409. Omit `request_id` to submit
+each HTTP request as a new chat turn.
+
 ### `WebhookReply`
 
 ```ts
 interface WebhookReply {
   reply: string;
   translation?: string;
+  output_warnings?: string[];       // optional image or voice output failures
   images?: Array<{
     prompt: string;
     mime_type: string;
@@ -674,6 +683,10 @@ interface WebhookReply {
   };
 }
 ```
+
+An HTTP 200 response reports the saved chat result. Optional image and voice
+output failures appear in `output_warnings`. A media-only reply may have an
+empty `reply` string and nonempty `images`.
 
 ### `TelegramStatus`
 

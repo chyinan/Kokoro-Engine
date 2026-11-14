@@ -1,5 +1,6 @@
 //! Application-owned chat journal. A WebView is a subscriber, never the owner.
-use crate::commands::chat::{ChatRequest, StreamChatResponse};
+use crate::chat::application::{ChatPolicy, ChatRequest, StreamChatResponse};
+use crate::error::KokoroError;
 use crate::mods::manager::ModScriptQueue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,9 +42,10 @@ pub struct ChatTurnSnapshot {
     pub speech_error: Option<String>,
 }
 
-type Outcome = Result<StreamChatResponse, String>;
+type Outcome = Result<StreamChatResponse, KokoroError>;
 struct Entry {
     fingerprint: String,
+    desktop: bool,
     snapshot: ChatTurnSnapshot,
     outcome: watch::Sender<Option<Outcome>>,
 }
@@ -66,7 +68,7 @@ impl ChatRuntimeState {
     /// against a different database, and keep revisions monotonic for subscribers.
     pub(crate) fn invalidate_imported_history(&self) {
         let mut journal = self.0.lock().unwrap();
-        let replaced = Err("chat_history_replaced: backup imported; send a new request".to_string());
+        let replaced = Err(KokoroError::Chat("chat_history_replaced: backup imported; send a new request".into()));
         for (id, entry) in std::mem::take(&mut journal.entries) {
             entry.outcome.send_replace(Some(replaced.clone()));
             journal.retired.insert(id, (entry.fingerprint, replaced.clone()));
@@ -117,9 +119,15 @@ impl ChatRuntimeState {
             })
     }
     /// Duplicate delivery shares the original outcome, including rejection. No queue.
-    pub fn begin(
+    #[cfg(test)]
+    pub fn begin(&self, request: &ChatRequest) -> Result<(bool, watch::Receiver<Option<Outcome>>), String> {
+        self.begin_with_policy(request, ChatPolicy::Desktop)
+    }
+
+    pub(crate) fn begin_with_policy(
         &self,
         request: &ChatRequest,
+        policy: ChatPolicy,
     ) -> Result<(bool, watch::Receiver<Option<Outcome>>), String> {
         let id = request
             .client_request_id
@@ -127,7 +135,7 @@ impl ChatRuntimeState {
             .ok_or("missing client_request_id")?;
         let fingerprint = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(request).map_err(|e| e.to_string())?)
+            Sha256::digest(serde_json::to_vec(&(request, policy)).map_err(|e| e.to_string())?)
         );
         let mut journal = self.0.lock().unwrap();
         if request.character_id.as_ref().is_some_and(|character| {
@@ -180,6 +188,7 @@ impl ChatRuntimeState {
             id.into(),
             Entry {
                 fingerprint,
+                desktop: policy.is_desktop(),
                 snapshot: ChatTurnSnapshot {
                     revision,
                     completion_revision: None,
@@ -191,7 +200,7 @@ impl ChatRuntimeState {
                     user_message_id: None,
                     assistant_message_id: None,
                     message: request.message.clone(),
-                    images: request.images.clone().unwrap_or_default(),
+                    images: if policy.is_desktop() { request.images.clone().unwrap_or_default() } else { Vec::new() },
                     hidden: request.hidden,
                     reusing_saved_prompt: request.retry_failure.is_some() || request.regenerate_reply.is_some(),
                     status: "pending".into(),
@@ -208,8 +217,14 @@ impl ChatRuntimeState {
         Ok((true, rx))
     }
 
+    #[cfg(test)]
     pub fn snapshots(&self) -> Vec<ChatTurnSnapshot> {
         self.journal_snapshot().1
+    }
+
+    pub fn desktop_snapshots(&self, current_conversation_id: Option<&str>) -> (u64, Vec<ChatTurnSnapshot>) {
+        self.snapshot_filter(|entry| entry.desktop || (current_conversation_id.is_some()
+            && entry.snapshot.conversation_id.as_deref() == current_conversation_id))
     }
 
     pub(crate) fn failed_turn_prompt(&self, character: &str, conversation: &str, turn: &str) -> Option<i64> {
@@ -238,6 +253,7 @@ impl ChatRuntimeState {
             assistant_message_id: None,
             client_request_id: Some(id.into()),
             status: Some("cancelled".into()),
+            ..Default::default()
         })
     }
 
@@ -272,11 +288,17 @@ impl ChatRuntimeState {
             .map(|entry| entry.snapshot.text.clone())
     }
 
+    #[cfg(test)]
     pub fn journal_snapshot(&self) -> (u64, Vec<ChatTurnSnapshot>) {
+        self.snapshot_filter(|_| true)
+    }
+
+    fn snapshot_filter(&self, include: impl Fn(&Entry) -> bool) -> (u64, Vec<ChatTurnSnapshot>) {
         let journal = self.0.lock().unwrap();
         let mut snapshots: Vec<_> = journal
             .entries
             .values()
+            .filter(|entry| include(entry))
             .map(|e| e.snapshot.clone())
             .collect();
         snapshots.sort_by_key(|s| s.completion_revision.unwrap_or(s.revision));
@@ -393,6 +415,7 @@ impl ChatRuntimeState {
                 entry.snapshot.assistant_message_id = response.assistant_message_id;
             }
             Err(error) => {
+                let error = error.to_string();
                 entry.snapshot.status = if error.contains("turn cancelled by user") {
                     "cancelled"
                 } else if error.contains("chat_turn_busy") {
@@ -472,18 +495,21 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
     Ok(())
 }
 
-pub fn get_chat_runtime_snapshot(
-    runtime: tauri::State<'_, Arc<ChatRuntimeState>>,
-) -> Vec<ChatTurnSnapshot> {
-    runtime.snapshots()
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ChatViewVersion {
     pub revision: u64,
     pub history_revision: i64,
     pub generation: u64,
     pub busy: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationMessage {
+    pub id: i64,
+    pub role: String,
+    pub content: String,
+    pub metadata: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Serialize)]
@@ -493,7 +519,7 @@ pub struct ChatViewSnapshot {
     pub character_id: String,
     pub conversation_id: Option<String>,
     pub conversation_history_revision: Option<i64>,
-    pub messages: Vec<crate::commands::conversation::ConversationMessage>,
+    pub messages: Vec<ConversationMessage>,
     pub turns: Vec<ChatTurnSnapshot>,
 }
 
@@ -522,7 +548,7 @@ pub async fn get_chat_view(
     let conversation_id = state.current_conversation_id.lock().await.clone();
     // Capture the journal before SQLite so any completed turn included in this
     // revision has already persisted its history before the read starts.
-    let (revision, turns) = runtime.journal_snapshot();
+    let (revision, turns) = runtime.desktop_snapshots(conversation_id.as_deref());
     // Bind the history stamp to the same SQLite snapshot as the rows. A write
     // that races this read will still be visible to the next version check.
     let mut tx = state.db.begin().await?;
@@ -537,7 +563,7 @@ pub async fn get_chat_view(
         messages = rows
             .into_iter()
             .map(|(id, role, content, metadata, created_at)| {
-                crate::commands::conversation::ConversationMessage {
+                ConversationMessage {
                     id,
                     role,
                     content,
@@ -582,17 +608,18 @@ pub fn speak_completed_turn(
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let config = crate::commands::tts::TtsConfig {
-            provider_id: speech.provider_id,
-            request_id: Some(format!("chat_{turn_id}")),
+        let params = crate::tts::TtsParams {
             voice: speech.voice,
-            speed: speech.speed.map(|v| v as f32),
-            pitch: speech.pitch.map(|v| v as f32),
+            speed: speech.speed.map(|value| value as f32),
+            pitch: speech.pitch.map(|value| value as f32),
             emotion: None,
+            required_capabilities: None,
+            extra_params: None,
         };
-        if let Err(error) =
-            crate::commands::tts::synthesize(app.clone(), app.state(), text, config).await
-        {
+        let tts = app.state::<crate::tts::TtsService>();
+        if let Err(error) = tts.speak(
+            app.clone(), text, speech.provider_id, Some(params), format!("chat_{turn_id}"),
+        ).await {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");
             let runtime = app.state::<Arc<ChatRuntimeState>>();
             if let Some(snapshot) =
@@ -618,6 +645,7 @@ mod tests {
             assistant_message_id: Some(2),
             client_request_id: Some(id.into()),
             status: Some("completed".into()),
+            ..Default::default()
         })
     }
     #[tokio::test]
@@ -703,7 +731,7 @@ mod tests {
         assert!(after.turns.is_empty());
         let (created, old) = journal.begin(&original).unwrap();
         assert!(!created, "import must not make old IDs executable again");
-        assert!(old.borrow().as_ref().unwrap().as_ref().unwrap_err().contains("chat_history_replaced"));
+        assert!(old.borrow().as_ref().unwrap().as_ref().unwrap_err().to_string().contains("chat_history_replaced"));
         assert!(journal.complete("a", result("a")).is_none());
         assert!(journal.begin(&request("new-intent")).unwrap().0);
     }
@@ -744,7 +772,7 @@ mod tests {
             &serde_json::json!({"turn_id":"t","delta":"full text"}),
         );
         let before = journal.complete("a", result("a")).unwrap();
-        assert!(journal.complete("a", Err("late failure".into())).is_none());
+        assert!(journal.complete("a", Err(KokoroError::Chat("late failure".into()))).is_none());
         assert!(journal
             .event(
                 "chat-turn-delta",
@@ -885,7 +913,7 @@ mod tests {
         for cancellation_first in [true, false] {
             let journal = ChatRuntimeState::default();
             journal.begin(&request("a")).unwrap();
-            let cancelled = Err("turn cancelled by user".into());
+            let cancelled = Err(KokoroError::Chat("turn cancelled by user".into()));
             let (first, second) = if cancellation_first {
                 (cancelled, result("a"))
             } else {

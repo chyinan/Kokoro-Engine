@@ -861,16 +861,6 @@ impl AIOrchestrator {
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Result<(String, i64)> {
         let summary_provider = summary_provider.clone();
-        // Track user message count for memory extraction triggers
-        if role == "user" {
-            let mut count = self.message_count.lock().await;
-            *count += 1;
-            if self.is_memory_enabled() {
-                let mut memory_count = self.memory_trigger_count.lock().await;
-                *memory_count += 1;
-            }
-        }
-
         // Truncate single message before it enters persisted conversation history.
         let max_chars = *self.max_message_chars.lock().await;
         let content = truncate_message_content(content, max_chars);
@@ -891,32 +881,24 @@ impl AIOrchestrator {
         // 这既支持 target_conversation_id == None（隐式当前会话且在锁内保证一致），
         // 也保证 target_conversation_id == Some(后台会话) 时绝不会错误推入活跃内存。
         let should_push_history = current_conversation_id.as_deref() == Some(&persisted_conv_id);
+        // Track user message count for memory extraction triggers
+        if role == "user" && should_push_history {
+            let mut count = self.message_count.lock().await;
+            *count += 1;
+            if self.is_memory_enabled() {
+                let mut memory_count = self.memory_trigger_count.lock().await;
+                *memory_count += 1;
+            }
+        }
+
+
 
         if should_push_history {
-            let mut history = self.history.lock().await;
-            let parsed_metadata = metadata
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-            history.push_back(Message {
+            self.push_history_messages(std::iter::once(Message {
                 role: role.clone(),
                 content: content.clone(),
-                metadata: parsed_metadata,
-            });
-
-            // Rolling window: keep at most MAX_IN_MEMORY_HISTORY_MESSAGES messages in memory. Summary generation is now
-            // non-destructive and derives from persisted conversation_messages instead of popped history.
-            let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
-                history.pop_front();
-                true
-            } else {
-                false
-            };
-            drop(history);
-
-            if evicted {
-                let mut boundary = self.memory_history_boundary.lock().await;
-                *boundary = boundary.saturating_sub(1);
-            }
+                metadata: metadata.as_deref().and_then(|raw| serde_json::from_str(raw).ok()),
+            })).await;
         }
 
         let strategy = self.context_strategy.lock().await.clone();
@@ -1016,6 +998,76 @@ impl AIOrchestrator {
         Ok((persisted_conv_id, persisted_msg_id))
     }
 
+    /// Persist all native tool results and their assistant call as one exchange.
+    /// The active conversation history changes only after the transaction commits.
+    pub(crate) async fn persist_tool_exchange(
+        &self,
+        conversation_id: &str,
+        assistant_call: Message,
+        tool_results: Vec<Message>,
+    ) -> Result<()> {
+        let _selection = self.conversation_switch_lock.lock().await;
+        let max_chars = *self.max_message_chars.lock().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.db.begin().await?;
+        let messages = std::iter::once(assistant_call)
+            .chain(tool_results)
+            .map(|mut message| {
+                message.content = truncate_message_content(message.content, max_chars);
+                message
+            })
+            .collect::<Vec<_>>();
+
+        for message in &messages {
+            let metadata = message.metadata.as_ref().map(serde_json::Value::to_string);
+            Self::insert_message_row(
+                &mut tx,
+                conversation_id,
+                &message.role,
+                &message.content,
+                metadata.as_deref(),
+                &now,
+            )
+            .await?;
+        }
+        let updated = sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
+        tx.commit().await?;
+
+        if self.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
+            self.push_history_messages(messages).await;
+        }
+        Ok(())
+    }
+
+    async fn insert_message_row(
+        connection: &mut sqlx::SqliteConnection,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        metadata: Option<&str>,
+        created_at: &str,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(role)
+        .bind(content)
+        .bind(metadata)
+        .bind(created_at)
+        .execute(connection)
+        .await
+        .with_context(|| format!("failed to insert message row for conversation '{conversation_id}'"))?;
+        Ok(result.last_insert_rowid())
+    }
+
     /// 将消息持久化到 SQLite，如果没有活跃对话且未指定 target_conversation_id 则自动创建
     async fn persist_message(
         &self,
@@ -1078,18 +1130,8 @@ impl AIOrchestrator {
         // row back too, so callers never observe a half-saved turn reported as
         // success.
         let mut tx = self.db.begin().await?;
-        let insert_res = sqlx::query(
-            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind(&conv_id)
-        .bind(role)
-        .bind(content)
-        .bind(metadata)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("failed to insert message row for conversation '{}'", conv_id))?;
-        let message_id = insert_res.last_insert_rowid();
+        let message_id =
+            Self::insert_message_row(&mut tx, &conv_id, role, content, metadata, &now).await?;
 
         // 更新对话的 updated_at。If a hidden/context row created the
         // conversation first, let the first visible user turn restore the
@@ -1216,12 +1258,16 @@ impl AIOrchestrator {
         content: &str,
         metadata: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = COALESCE(?, metadata) WHERE id = ?")
+        let mut tx = self.db.begin().await?;
+        let row_update = sqlx::query("UPDATE conversation_messages SET content = ?, metadata = COALESCE(?, metadata) WHERE id = ?")
             .bind(content)
             .bind(metadata)
             .bind(row_id)
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await?;
+        if row_update.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
 
         // Update owning conversation updated_at directly via message row's conversation_id
         let now = chrono::Utc::now().to_rfc3339();
@@ -1230,9 +1276,10 @@ impl AIOrchestrator {
         )
         .bind(&now)
         .bind(row_id)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1425,19 +1472,19 @@ impl AIOrchestrator {
         let max_chars = *self.max_message_chars.lock().await;
         message.content = truncate_message_content(message.content, max_chars);
 
+        self.push_history_messages(std::iter::once(message)).await;
+    }
+
+    async fn push_history_messages(&self, messages: impl IntoIterator<Item = Message>) {
         let mut history = self.history.lock().await;
-        history.push_back(message);
-        let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
-            history.pop_front();
-            true
-        } else {
-            false
-        };
+        history.extend(messages);
+        let evicted = history.len().saturating_sub(MAX_IN_MEMORY_HISTORY_MESSAGES);
+        history.drain(..evicted);
         drop(history);
 
-        if evicted {
+        if evicted > 0 {
             let mut boundary = self.memory_history_boundary.lock().await;
-            *boundary = boundary.saturating_sub(1);
+            *boundary = boundary.saturating_sub(evicted);
         }
     }
 
@@ -1462,6 +1509,7 @@ impl AIOrchestrator {
             character_id,
             None,
             None,
+            true,
         )
         .await
     }
@@ -1505,6 +1553,25 @@ impl AIOrchestrator {
         history_snapshot: Option<Vec<Message>>,
         _guard: &ChatTurnGuard,
     ) -> Result<(Vec<Message>, Vec<String>)> {
+        self.compose_chat_prompt(
+            query, allow_image_gen, tool_prompt, native_tools_enabled, character_id,
+            target_conversation_id, history_snapshot, true, _guard,
+        ).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compose_chat_prompt(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+        target_conversation_id: Option<&str>,
+        history_snapshot: Option<Vec<Message>>,
+        desktop_context: bool,
+        _guard: &ChatTurnGuard,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
         self.compose_prompt_inner(
             query,
             allow_image_gen,
@@ -1513,6 +1580,7 @@ impl AIOrchestrator {
             character_id,
             target_conversation_id,
             history_snapshot,
+            desktop_context,
         )
         .await
     }
@@ -1527,6 +1595,7 @@ impl AIOrchestrator {
         character_id: &str,
         target_conversation_id: Option<&str>,
         history_snapshot: Option<Vec<Message>>,
+        desktop_context: bool,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         if let Some(reason) = self.get_runtime_degraded().await {
             anyhow::bail!(
@@ -1615,7 +1684,7 @@ impl AIOrchestrator {
             .iter()
             .enumerate()
             .filter(|(index, msg)| {
-                should_include_message_for_llm_history(
+                (desktop_context || !is_vision_context_message(msg)) && should_include_message_for_llm_history(
                     msg,
                     *index,
                     latest_vision_index,
@@ -1745,7 +1814,7 @@ impl AIOrchestrator {
         }
 
         // Section 5: Live2D cues
-        if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
+        if let Some(profile) = desktop_context.then(crate::live2d::load_active_live2d_profile).flatten() {
             if !profile.cue_map.is_empty() {
                 let cue_lines = profile
                     .cue_map

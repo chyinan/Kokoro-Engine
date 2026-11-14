@@ -521,11 +521,15 @@ impl ActionRegistry {
         vision_enabled: bool,
         tool_settings: &ToolSettings,
     ) -> Vec<LlmToolDefinition> {
-        self.list_actions_for_prompt_with_settings_and_availability(
+        Self::tool_definitions(self.list_actions_for_prompt_with_settings_and_availability(
             memory_enabled,
             vision_enabled,
             tool_settings,
-        )
+        ))
+    }
+
+    pub(crate) fn tool_definitions(actions: Vec<ActionInfo>) -> Vec<LlmToolDefinition> {
+        actions
         .into_iter()
         .map(|action| LlmToolDefinition {
             name: action.id,
@@ -587,7 +591,7 @@ impl ActionRegistry {
         }
     }
 
-    fn generate_tool_prompt_from_actions(&self, actions: Vec<ActionInfo>) -> String {
+    pub(crate) fn generate_tool_prompt_from_actions(&self, actions: Vec<ActionInfo>) -> String {
         if actions.is_empty() {
             return String::new();
         }

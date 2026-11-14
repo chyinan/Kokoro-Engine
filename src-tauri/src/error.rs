@@ -5,7 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// 统一的 Kokoro 错误类型，支持结构化序列化
-#[derive(Debug, Error, Serialize, Deserialize, Clone)]
+#[derive(Debug, Error, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "code", content = "message")]
 pub enum KokoroError {
     #[error("配置错误: {0}")]

@@ -74,6 +74,19 @@ struct ConnectionTestTarget {
 }
 
 impl LlmService {
+    #[cfg(all(test, target_os = "windows"))]
+    pub(crate) fn for_test(provider: Arc<dyn LlmProvider>) -> Self {
+        let id = provider.id().to_owned();
+        let config = LlmConfig { active_provider: id.clone(), ..LlmConfig::default() };
+        Self {
+            providers: Arc::new(RwLock::new(HashMap::from([(id.clone(), provider)]))),
+            active_provider_id: Arc::new(RwLock::new(id)),
+            config: Arc::new(RwLock::new(config)),
+            state_snapshot: Arc::new(RwLock::new(())),
+            config_path: PathBuf::new(),
+        }
+    }
+
     /// Create a new LlmService from a persisted config.
     pub fn from_config(config: LlmConfig, config_path: PathBuf) -> Self {
         let original_config = config.clone();

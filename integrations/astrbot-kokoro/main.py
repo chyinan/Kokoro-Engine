@@ -204,6 +204,12 @@ def _reply_chain(payload: Any, config: AstrBotConfig | dict[str, Any] | None) ->
             raise ValueError("Kokoro response contains malformed audio data")
         chain.append(Record.fromBase64(response_audio["data_base64"]))
 
+    output_warnings = payload.get("output_warnings") or []
+    if isinstance(output_warnings, list):
+        for warning in output_warnings[:MAX_REPLY_MEDIA]:
+            if isinstance(warning, str) and warning:
+                chain.append(Plain(warning))
+
     if not chain:
         raise ValueError("Kokoro response has no supported content")
     return chain

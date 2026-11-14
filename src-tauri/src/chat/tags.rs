@@ -960,3 +960,133 @@ mod tests {
         }));
     }
 }
+
+pub(crate) fn extract_image_prompt_tags(text: &str) -> (String, Vec<String>) {
+    let prefix = "[IMAGE_PROMPT:";
+    let mut prompts = Vec::new();
+    let mut result = text.to_string();
+
+    while let Some(start) = result.find(prefix) {
+        let Some(end_bracket) = result[start..].find(']') else {
+            break;
+        };
+        let inner = &result[start + prefix.len()..start + end_bracket];
+        let prompt = inner.trim();
+        if !prompt.is_empty() {
+            prompts.push(prompt.to_string());
+        }
+        let tag_end = start + end_bracket + 1;
+        let left = result[..start].trim_end();
+        let right = result[tag_end..].trim_start();
+        let separator = if left.is_empty() || right.is_empty() {
+            ""
+        } else {
+            " "
+        };
+        result = format!("{}{}{}", left, separator, right);
+    }
+
+    (result.trim().to_string(), prompts)
+}
+
+
+pub(crate) fn strip_external_control_tags(text: &str) -> String {
+    let mut bracket_cleaned = text.to_string();
+    for prefix in ["[ACTION:", "[EMOTION:", "[IMAGE_PROMPT:"] {
+        while let Some(start) = bracket_cleaned.find(prefix) {
+            if let Some(end) = bracket_cleaned[start..].find(']') {
+                let tag_end = start + end + 1;
+                bracket_cleaned = format!(
+                    "{}{}",
+                    &bracket_cleaned[..start],
+                    &bracket_cleaned[tag_end..]
+                );
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mut result = String::with_capacity(bracket_cleaned.len());
+    let mut chars = bracket_cleaned.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '<' {
+            result.push(ch);
+            continue;
+        }
+
+        let mut tag = String::new();
+        while let Some(next) = chars.peek().copied() {
+            tag.push(next);
+            chars.next();
+            if next == '>' || tag.len() > 64 {
+                break;
+            }
+        }
+
+        let lower = tag.to_ascii_lowercase();
+        if lower.starts_with("translate>")
+            || lower.starts_with("/translate>")
+            || lower.starts_with("emotion")
+            || lower.starts_with("/emotion>")
+            || lower.starts_with("cue")
+            || lower.starts_with("/cue>")
+        {
+            continue;
+        }
+
+        result.push('<');
+        result.push_str(&tag);
+    }
+
+    result.trim().to_string()
+}
+
+
+/// 判断消息是否为前端/用户视角的可见消息。
+/// 不可见技术消息包括：
+/// 1. `role == "tool"`
+/// 2. `metadata.type` 为 `"assistant_tool_calls" | "tool_result" | "translation_instruction" | "invalid_failure_event"`
+pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> bool {
+    if role == "tool" {
+        return false;
+    }
+    let technical_type = meta.and_then(|v| v.get("type")).and_then(|t| t.as_str());
+    !matches!(
+        technical_type,
+        Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result") | Some("invalid_failure_event")
+    )
+}
+
+pub fn is_visible_message_raw(role: &str, metadata: Option<&str>) -> bool {
+    if role == "tool" {
+        return false;
+    }
+    let meta_val = metadata.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    is_visible_message_meta(role, meta_val.as_ref())
+}
+
+
+#[cfg(test)]
+mod external_tests {
+    use super::*;
+    #[test]
+    fn extract_image_prompt_tags_strips_and_collects_prompts() {
+        let (cleaned, prompts) =
+            extract_image_prompt_tags("Here [IMAGE_PROMPT:cat cafe] and [IMAGE_PROMPT: sunset]");
+
+        assert_eq!(cleaned, "Here and");
+        assert_eq!(prompts, vec!["cat cafe", "sunset"]);
+    }
+
+    #[test]
+    fn strip_control_tags_removes_platform_unsafe_tags() {
+        let cleaned = strip_external_control_tags(
+            "Hello [ACTION:wave] <emotion>happy</emotion> [IMAGE_PROMPT:cat] world",
+        );
+
+        assert_eq!(cleaned, "Hello  happy  world");
+    }
+
+}

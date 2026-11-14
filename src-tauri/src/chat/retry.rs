@@ -1,7 +1,7 @@
 use crate::ai::context::{sync_history_window, AIOrchestrator, Message};
 use crate::chat::runtime::ChatRuntimeState;
-use crate::commands::chat::TURN_CANCELLED_BY_USER_MESSAGE;
-use crate::commands::context::is_visible_message_raw;
+use crate::chat::application::TURN_CANCELLED_BY_USER_MESSAGE;
+use crate::chat::tags::is_visible_message_raw;
 use crate::error::KokoroError;
 use serde_json::Value;
 use sqlx::SqliteConnection;

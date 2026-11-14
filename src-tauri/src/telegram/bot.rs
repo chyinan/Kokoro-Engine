@@ -3,29 +3,14 @@
 // Reason: Telegram 机器人处理网络 I/O、消息路由、持久化和异步任务调度，属于编排层。
 
 use super::config::TelegramConfig;
-use crate::actions::tool_settings::ToolSettings;
-use crate::actions::{execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
-use crate::ai::memory_event_ingress::{
-    build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
-    MemoryEventIngressOptions,
-};
-use crate::ai::memory_extractor;
-use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
-use crate::imagegen::ImageGenService;
-use crate::llm::messages::{
-    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
-    system_message, user_message_with_images, user_text_message,
-};
-use crate::llm::service::LlmService;
+use crate::chat::application::{channel_id, submit_chat, ChatPolicy, ChatRequest};
 use crate::stt::{AudioSource, SttService};
 use crate::tts::TtsService;
-use futures::StreamExt;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
 use tokio::sync::{oneshot, RwLock};
@@ -43,33 +28,40 @@ struct RateState {
 
 type RateLimiter = Arc<RwLock<HashMap<ChatId, RateState>>>;
 
-/// Per-chat session state.
-#[derive(Clone, Debug)]
-enum SessionMode {
-    /// Continue the desktop conversation (default).
-    Continue,
-    /// Fresh conversation started via /new.
-    New,
+#[derive(Clone, Debug, Default)]
+pub(crate) enum SessionMode {
+    #[default]
+    Private,
+    Fresh {
+        id: String,
+    },
+    Desktop {
+        character_id: String,
+        conversation_id: String,
+    },
 }
 
-type Sessions = Arc<RwLock<HashMap<ChatId, SessionMode>>>;
-
-async fn max_tool_rounds(app: &tauri::AppHandle) -> usize {
-    if let Some(settings) = app.try_state::<Arc<RwLock<ToolSettings>>>() {
-        settings.read().await.max_tool_rounds.max(1)
-    } else {
-        10
+impl SessionMode {
+    fn bind<'a>(&'a self, chat_id: ChatId, character_id: &'a str) -> (&'a str, String, bool) {
+        match self {
+            Self::Private => (
+                character_id,
+                channel_id("telegram", character_id, &chat_id.0.to_string()),
+                true,
+            ),
+            Self::Fresh { id } => (character_id, channel_id("telegram", character_id, id), true),
+            Self::Desktop {
+                character_id,
+                conversation_id,
+            } => (character_id, conversation_id.clone(), false),
+        }
     }
 }
 
-/// Event payload for syncing Telegram messages to the desktop chat UI.
-#[derive(Clone, Serialize)]
-struct TelegramChatSync {
-    role: String,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    translation: Option<String>,
-}
+type Sessions = Arc<RwLock<HashMap<ChatId, SessionMode>>>;
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+const MAX_MESSAGE_CHARS: usize = 4096;
+const MAX_MEDIA_BYTES: u32 = 20 * 1024 * 1024;
 
 /// Run the long-polling loop. Blocks until `shutdown_rx` fires or an error occurs.
 pub async fn run_polling(
@@ -142,7 +134,7 @@ async fn handle_message(
     let config = Arc::new(config.read().await.clone());
 
     // Access control: check whitelist
-    if !config.allowed_chat_ids.is_empty() && !config.allowed_chat_ids.contains(&chat_id.0) {
+    if !config.allowed_chat_ids.contains(&chat_id.0) {
         tracing::info!(target: "telegram", "[Telegram] Chat {} not in whitelist, ignoring", chat_id.0);
         return Ok(());
     }
@@ -182,12 +174,12 @@ async fn handle_message(
 
     // Photo message (with optional caption)
     if msg.photo().is_some() {
-        return handle_photo(&bot, &msg, &config, &app).await;
+        return handle_photo(&bot, &msg, &config, &sessions, &app).await;
     }
 
     // Regular text message
     if let Some(text) = msg.text() {
-        return handle_text(&bot, &msg, text, &config, &app).await;
+        return reply_to_message(&bot, &msg, text, Vec::new(), &config, &sessions, &app).await;
     }
 
     Ok(())
@@ -198,7 +190,7 @@ async fn handle_command(
     bot: &Bot,
     msg: &Message,
     text: &str,
-    _config: &Arc<TelegramConfig>,
+    config: &TelegramConfig,
     sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -218,481 +210,243 @@ async fn handle_command(
             }
         }
         "/new" => {
-            // Clear orchestrator history to start fresh
-            if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                // 标准清空路径：持有会话切换锁、重置历史与边界、置空会话指针、递增 generation 并持久化
-                orchestrator.clear_history().await;
-            }
-            {
-                let mut s = sessions.write().await;
-                s.insert(chat_id, SessionMode::New);
-            }
-            bot.send_message(chat_id, "✨ New conversation started.")
-                .await
-                .ok();
+            sessions.write().await.insert(
+                chat_id,
+                SessionMode::Fresh {
+                    id: uuid::Uuid::new_v4().to_string(),
+                },
+            );
+            bot.send_message(chat_id, "✨ New Telegram conversation started.")
+                .await?;
         }
         "/continue" => {
+            let state = app.state::<AIOrchestrator>();
+            let (character_id, conversation_id) = {
+                let _activation = state.enter_chat_turn()?;
+                let _selection = state.conversation_switch_lock.lock().await;
+                (
+                    state.get_character_id().await,
+                    state.current_conversation_id.lock().await.clone(),
+                )
+            };
+            let Some(conversation_id) = conversation_id else {
+                bot.send_message(
+                    chat_id,
+                    "Open an existing desktop conversation before using /continue.",
+                )
+                .await?;
+                return Ok(());
+            };
+            if config
+                .character_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty() && id != character_id)
             {
-                let mut s = sessions.write().await;
-                s.insert(chat_id, SessionMode::Continue);
+                bot.send_message(
+                    chat_id,
+                    "Telegram is configured to use a different character.",
+                )
+                .await?;
+                return Ok(());
             }
-            bot.send_message(chat_id, "🔗 Continuing desktop conversation.")
-                .await
-                .ok();
+            sessions.write().await.insert(
+                chat_id,
+                SessionMode::Desktop {
+                    character_id,
+                    conversation_id,
+                },
+            );
+            bot.send_message(chat_id, "🔗 Continuing the selected desktop conversation.")
+                .await?;
         }
         "/status" => {
-            let mode = {
-                let s = sessions.read().await;
-                s.get(&chat_id).cloned().unwrap_or(SessionMode::Continue)
-            };
+            let mode = sessions
+                .read()
+                .await
+                .get(&chat_id)
+                .cloned()
+                .unwrap_or_default();
+            let state = app.state::<AIOrchestrator>();
+            let active_character = state.get_character_id().await;
+            let character = config
+                .character_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&active_character);
+            let (character, conversation, _) = mode.bind(chat_id, character);
+            let history_len = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM conversation_messages AS m JOIN conversations AS c ON m.conversation_id = c.id
+                 WHERE c.id = ? AND c.character_id = ?"
+            ).bind(conversation).bind(character).fetch_one(&state.db).await?;
             let mode_str = match mode {
-                SessionMode::Continue => "Continue (desktop)",
-                SessionMode::New => "New conversation",
-            };
-            let history_len = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                orchestrator.history.lock().await.len()
-            } else {
-                0
+                SessionMode::Desktop { .. } => "Desktop conversation",
+                _ => "Telegram conversation",
             };
             bot.send_message(
                 chat_id,
-                format!(
-                    "📊 Session: {}\n💬 History: {} messages",
-                    mode_str, history_len
-                ),
+                format!("📊 Session: {mode_str}\n💬 History: {history_len} messages"),
             )
-            .await
-            .ok();
+            .await?;
         }
         _ => {
-            // Unknown command — treat as text
-            let clean = text.trim_start_matches('/');
-            if !clean.is_empty() {
-                handle_text(bot, msg, text, _config, app).await?;
+            if !text.trim_start_matches('/').trim().is_empty() {
+                reply_to_message(bot, msg, text, Vec::new(), config, sessions, app).await?;
             }
         }
     }
-
     Ok(())
 }
 
-/// Handle a plain text message — run through the LLM pipeline and reply.
-async fn handle_text(
+async fn reply_to_message(
     bot: &Bot,
     msg: &Message,
     text: &str,
-    config: &Arc<TelegramConfig>,
+    images: Vec<String>,
+    config: &TelegramConfig,
+    sessions: &Sessions,
     app: &tauri::AppHandle,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> HandlerResult {
     let chat_id = msg.chat.id;
-
-    let orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let llm_service = app
-        .try_state::<LlmService>()
-        .ok_or("LlmService not available")?;
-
-    if let Some(reason) = orchestrator.get_runtime_degraded().await {
-        return Err(format!(
-            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
-        )
-        .into());
-    }
-    let _chat_turn_guard = orchestrator
-        .enter_chat_turn()
-        .map_err(|e| format!("Character activation is in progress: {e}"))?;
-
-    // 1. Record user message
-    // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
-    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
-    tracing::info!(target: "telegram", "[Telegram] Resolved char_id='{}' for this request", char_id);
-    orchestrator
-        .add_message("user".to_string(), text.to_string(), &char_id)
-        .await;
-
-    // Sync user message to desktop UI
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "user".to_string(),
-            text: text.to_string(),
-            translation: None,
-        },
-    );
-
-    // 2. Compose prompt context (with tool prompt)
-    let action_registry = app
-        .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
-        .ok_or("ActionRegistry not available")?;
-    let tool_settings = app
-        .try_state::<Arc<RwLock<ToolSettings>>>()
-        .ok_or("ToolSettings not available")?;
-    let tool_prompt = {
-        let registry = action_registry.read().await;
-        let settings = tool_settings.read().await;
-        let p = registry.generate_tool_prompt_for_prompt_with_settings(
-            orchestrator.is_memory_enabled(),
-            &settings,
-        );
-        if p.is_empty() {
-            None
-        } else {
-            Some(p)
-        }
-    };
-
-    let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(text, false, tool_prompt, false, &char_id, &_chat_turn_guard)
+    let state = app.state::<AIOrchestrator>();
+    let active_character = state.get_character_id().await;
+    let preferred = config
+        .character_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&active_character);
+    let mode = sessions
+        .read()
         .await
-        .map_err(|e| e.to_string())?;
-    for w in &compose_warnings {
-        tracing::warn!("[telegram compose_prompt] {}", w);
-    }
-
-    let mut client_messages = prompt_messages
-        .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Ensure the latest user turn is in the messages
-    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
-    if !already_has_user {
-        client_messages.push(user_text_message(text.to_string()));
-    }
-
-    // 3. LLM call with tool execution loop
-    let provider = llm_service.provider().await;
-    let max_rounds = max_tool_rounds(app).await;
-    let mut all_cleaned_text = String::new();
-    let mut all_translations: Vec<String> = Vec::new();
-
-    for _round in 0..max_rounds {
-        let mut stream = provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(|e| format!("LLM stream error: {}", e))?;
-
-        let mut response = String::new();
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(delta) => response.push_str(&delta),
-                Err(e) => {
-                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        if response.is_empty() {
-            break;
-        }
-
-        let (cleaned, tool_calls) = parse_tool_call_tags(&response);
-        let (cleaned, round_translation) = extract_translate_tags(&cleaned);
-        let cleaned = strip_leaked_tags(&cleaned);
-
-        tracing::info!(
-            target: "telegram",
-            "[Telegram] Tool loop round: {} tool_calls found, char_id='{}'",
-            tool_calls.len(),
-            char_id
-        );
-
-        if let Some(t) = round_translation {
-            all_translations.push(t);
-        }
-        if !cleaned.is_empty() {
-            merge_continuation_text(&mut all_cleaned_text, &cleaned);
-        }
-
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        let tool_invocations = {
-            let registry = action_registry.read().await;
-            tool_calls
-                .iter()
-                .map(|tool_call| {
-                    crate::commands::actions::build_tool_invocation_from_input(
-                        &registry,
-                        &tool_call.name,
-                        tool_call.args.clone(),
-                        None,
-                    )
-                    .map_err(|error| format!("Tool resolution error: {}", error.0))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let execution_outcomes = execute_tool_calls(
-            app,
-            &action_registry,
-            &tool_settings,
-            &char_id,
-            &tool_invocations,
+        .get(&chat_id)
+        .cloned()
+        .unwrap_or_default();
+    let (character_id, _, create_conversation) = mode.bind(chat_id, preferred);
+    if !create_conversation
+        && config
+            .character_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty() && id != character_id)
+    {
+        bot.send_message(
+            chat_id,
+            "The configured character changed. Use /new or /continue to select a conversation.",
         )
-        .await;
-        let tool_results: Vec<String> = execution_outcomes
-            .iter()
-            .map(|outcome| {
-                tracing::info!(
-                    target: "telegram::tools",
-                    "[Telegram/ToolCall] Executing: {} with args {:?}",
-                    outcome.invocation.name, outcome.invocation.args
-                );
-                match &outcome.result {
-                    Ok(result) => {
-                        tracing::info!(target: "telegram::tools", "[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "telegram::tools", "[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    }
-                }
-                outcome.result_line()
-            })
-            .collect();
-        let any_needs_feedback = execution_outcomes
-            .iter()
-            .any(|outcome| outcome.needs_feedback);
-
-        if !any_needs_feedback {
-            break;
-        }
-
-        client_messages.push(assistant_text_message(response));
-        client_messages.push(system_message(format!(
-            "[Tool results]\n{}\nContinue your response naturally.",
-            tool_results.join("\n")
-        )));
-    }
-
-    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
-        &all_cleaned_text,
-    )));
-    let translation = if all_translations.is_empty() {
-        None
-    } else {
-        Some(compact_newlines(&all_translations.join(" ")))
-    };
-
-    if response.is_empty() {
-        bot.send_message(chat_id, "(No response from AI)")
-            .await
-            .ok();
+        .await?;
         return Ok(());
     }
+    let result = submit_message(app, chat_id, msg.id.0, text, images, &mode, preferred).await;
 
-    // 5. Persist assistant message
-    let metadata = translation
-        .as_ref()
-        .map(|t| serde_json::json!({ "translation": t }).to_string());
-    if let Err(e) = orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            response.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await
-    {
-        tracing::error!(
-            target: "telegram",
-            "[Telegram] Failed to persist assistant message: {}",
-            e
-        );
-    }
-
-    // Event-driven + periodic memory extraction
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let upgrade_config =
-        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
-    let ingress_options = MemoryEventIngressOptions {
-        enabled: upgrade_config.event_trigger_enabled,
-        event_cooldown_secs: upgrade_config.event_cooldown_secs,
-        intent_routing_enabled: upgrade_config.intent_routing_enabled,
-    };
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-    tracing::info!(
-        target: "telegram::memory",
-        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
-        msg_count, memory_msg_count, char_id
-    );
-
-    if orchestrator.is_memory_enabled() {
-        if let Some(decision) = select_memory_ingress_decision(text, &ingress_options) {
-            let cooldown_key =
-                build_cooldown_key(&char_id, &chat_id.to_string(), decision.event.event_type);
-            if orchestrator
-                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
-                .await
-            {
-                tracing::info!(
-                    target: "telegram::memory",
-                    "[Telegram/Memory] Triggering event-driven extraction (trigger={}, count={})",
-                    decision.trigger_label,
-                    msg_count
-                );
-
-                let history = orchestrator.get_recent_memory_history(10).await;
-                let memory_mgr = orchestrator.memory_manager.clone();
-                let provider_for_mem = llm_service.provider().await;
-                let char_id_for_mem = char_id.clone();
-                let memory_enabled = orchestrator.memory_enabled_flag();
-                let observation_started_at = std::time::Instant::now();
-                let trigger_for_observation = decision.trigger_label.to_string();
-                let extraction_options = memory_extractor::MemoryExtractionOptions {
-                    structured_memory_enabled: should_use_structured_extraction(
-                        upgrade_config.structured_memory_enabled,
-                        &ingress_options,
-                    ),
-                    target_language: Some(memory_target_language.clone()),
-                };
-                tauri::async_runtime::spawn(async move {
-                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                        return;
-                    }
-                    let _ = memory_mgr
-                        .record_periodic_write_if_enabled(
-                            &char_id_for_mem,
-                            "telegram",
-                            &trigger_for_observation,
-                            observation_started_at,
-                        )
-                        .await;
-                    memory_extractor::extract_and_store_memories_with_options(
-                        &history,
-                        &memory_mgr,
-                        provider_for_mem,
-                        char_id_for_mem,
-                        extraction_options,
-                    )
-                    .await;
-                });
-            }
+    let result = match result {
+        Ok(result) if result.status.as_deref() == Some("cancelled") => {
+            bot.send_message(chat_id, "Chat cancelled.").await?;
+            return Ok(());
         }
-    }
-
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        tracing::info!(
-            target: "telegram::memory",
-            "[Telegram/Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = orchestrator.get_recent_memory_history(10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.clone();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "telegram",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // Sync assistant message to desktop UI
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "assistant".to_string(),
-            text: response.clone(),
-            translation: translation.clone(),
-        },
-    );
-
-    // 6. Build reply text (include translation if present)
-    let reply_text = if let Some(ref t) = translation {
-        format!("{}\n\n📝 {}", response, t)
-    } else {
-        response.clone()
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(target: "telegram", "Chat generation failed: {error}");
+            let feedback = if error.to_string().contains("chat_turn_busy") {
+                "Another chat is in progress. Send a new message after it finishes."
+            } else {
+                "Kokoro Engine could not complete this chat. Check the client for details."
+            };
+            bot.send_message(chat_id, feedback).await?;
+            return Ok(());
+        }
     };
-
-    // 7. Send text reply
-    bot.send_message(chat_id, &reply_text).await.ok();
-
-    // 8. Optionally send voice reply
-    if config.send_voice_reply {
-        send_voice_reply(bot, chat_id, &response, app).await;
+    let mut text = result.text.clone();
+    if let Some(translation) = result.translation {
+        text.push_str(&format!("\n\n📝 {translation}"));
     }
-
-    // 9. Handle image generation tags
-    handle_image_tags(bot, chat_id, &response, app).await;
-
+    for warning in result.output_warnings {
+        text.push_str(&format!("\n\n⚠️ {warning}"));
+    }
+    for chunk in split_message(&text) {
+        bot.send_message(chat_id, chunk).await?;
+    }
+    for image in result.images {
+        send_image(bot, chat_id, &image.path).await?;
+    }
+    if config.send_voice_reply && !result.text.is_empty() {
+        send_voice_reply(bot, chat_id, &result.text, app).await?;
+    }
     Ok(())
 }
 
-/// Handle voice messages — download, transcribe via STT, then process as text.
+pub(crate) async fn submit_message(
+    app: &tauri::AppHandle,
+    chat_id: ChatId,
+    message_id: i32,
+    text: &str,
+    images: Vec<String>,
+    mode: &SessionMode,
+    preferred_character: &str,
+) -> Result<crate::chat::application::StreamChatResponse, crate::error::KokoroError> {
+    let (character_id, conversation_id, create_conversation) =
+        mode.bind(chat_id, preferred_character);
+    submit_chat(
+        app.clone(),
+        ChatRequest {
+            message: text.trim().to_owned(),
+            character_id: Some(character_id.to_owned()),
+            conversation_id: Some(conversation_id),
+            // Telegram message identifiers are unique within each chat.
+            client_request_id: Some(channel_id(
+                "telegram",
+                &chat_id.0.to_string(),
+                &message_id.to_string(),
+            )),
+            images: Some(images),
+            ..Default::default()
+        },
+        ChatPolicy::External {
+            create_conversation,
+            image_output: true,
+            source: "telegram",
+        },
+    )
+    .await
+}
+
+async fn send_image(bot: &Bot, chat_id: ChatId, path: &str) -> HandlerResult {
+    match tokio::fs::read(path).await {
+        Ok(data) => {
+            bot.send_photo(chat_id, InputFile::memory(data).file_name("image.png"))
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(target: "telegram", "Could not read the generated image: {error}");
+            bot.send_message(
+                chat_id,
+                "⚠️ Kokoro Engine could not read the generated image.",
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn split_message(text: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = text.trim();
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let boundary = remaining
+            .char_indices()
+            .nth(MAX_MESSAGE_CHARS)
+            .map(|(index, _)| index)
+            .unwrap_or(remaining.len());
+        let (chunk, rest) = remaining.split_at(boundary);
+        remaining = rest;
+        Some(chunk)
+    })
+}
+
 async fn handle_voice(
     bot: &Bot,
     msg: &Message,
     config: &Arc<TelegramConfig>,
-    _sessions: &Sessions,
+    sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
@@ -709,6 +463,11 @@ async fn handle_voice(
     };
 
     // Download voice file from Telegram
+    if voice.file.size > MAX_MEDIA_BYTES {
+        bot.send_message(chat_id, "⚠️ Voice message exceeds the 20 MB limit.")
+            .await?;
+        return Ok(());
+    }
     let file = bot.get_file(&voice.file.id).await?;
     let mut buf = Vec::new();
     teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
@@ -737,404 +496,65 @@ async fn handle_voice(
     }
 
     // Send recognized text back as context
-    bot.send_message(chat_id, format!("🎤 {}", transcription))
-        .await
-        .ok();
+    for chunk in split_message(&format!("🎤 {transcription}")) {
+        bot.send_message(chat_id, chunk).await?;
+    }
 
     // Process as regular text
-    handle_text(bot, msg, &transcription, config, app).await
+    reply_to_message(bot, msg, &transcription, Vec::new(), config, sessions, app).await
 }
 
 /// Handle photo messages — download image, convert to base64, send to LLM with vision.
 async fn handle_photo(
     bot: &Bot,
     msg: &Message,
-    config: &Arc<TelegramConfig>,
+    config: &TelegramConfig,
+    sessions: &Sessions,
     app: &tauri::AppHandle,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let chat_id = msg.chat.id;
-    let photos = msg.photo().ok_or("No photo data")?;
-
-    // Telegram sends multiple sizes — pick the largest one
-    let photo = photos.last().ok_or("Empty photo array")?;
-
-    let orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let llm_service = app
-        .try_state::<LlmService>()
-        .ok_or("LlmService not available")?;
-
-    if let Some(reason) = orchestrator.get_runtime_degraded().await {
-        return Err(format!(
-            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
-        )
-        .into());
+) -> HandlerResult {
+    let photo = msg
+        .photo()
+        .and_then(|photos| photos.last())
+        .ok_or("No photo data")?;
+    if photo.file.size > MAX_MEDIA_BYTES {
+        bot.send_message(msg.chat.id, "⚠️ Photo exceeds the 20 MB limit.")
+            .await?;
+        return Ok(());
     }
-    let _chat_turn_guard = orchestrator
-        .enter_chat_turn()
-        .map_err(|e| format!("Character activation is in progress: {e}"))?;
-
-    // Download photo file
     let file = bot.get_file(&photo.file.id).await?;
-    let mut buf = Vec::new();
-    teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
-
-    // Convert to base64 data URL
+    let mut bytes = Vec::new();
+    teloxide::net::Download::download_file(bot, &file.path, &mut bytes).await?;
     use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-    // Detect mime from file extension or default to jpeg
     let mime = if file.path.ends_with(".png") {
         "image/png"
     } else {
         "image/jpeg"
     };
-    let data_url = format!("data:{};base64,{}", mime, b64);
-
-    // Use caption as the user message, or a default prompt
+    let url = format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    );
     let caption = msg
         .caption()
-        .unwrap_or("The user sent you a photo:")
-        .to_string();
-
-    tracing::info!(target: "telegram", "[Telegram] Photo received, caption: {}", caption);
-
-    // 1. Record user message
-    // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
-    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
-    tracing::info!(
-        target: "telegram",
-        "[Telegram] Resolved char_id='{}' for photo request",
-        char_id
-    );
-    orchestrator
-        .add_message("user".to_string(), caption.clone(), &char_id)
-        .await;
-
-    // Sync user message to desktop UI
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "user".to_string(),
-            text: format!("[TG] 📷 {}", caption),
-            translation: None,
-        },
-    );
-
-    // 2. Compose prompt context (with tool prompt)
-    let action_registry = app
-        .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
-        .ok_or("ActionRegistry not available")?;
-    let tool_settings = app
-        .try_state::<Arc<RwLock<ToolSettings>>>()
-        .ok_or("ToolSettings not available")?;
-    let tool_prompt = {
-        let registry = action_registry.read().await;
-        let settings = tool_settings.read().await;
-        let p = registry.generate_tool_prompt_for_prompt_with_settings(
-            orchestrator.is_memory_enabled(),
-            &settings,
-        );
-        if p.is_empty() {
-            None
-        } else {
-            Some(p)
-        }
-    };
-
-    let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(
-            &caption,
-            false,
-            tool_prompt,
-            false,
-            &char_id,
-            &_chat_turn_guard,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    for w in &compose_warnings {
-        tracing::warn!("[telegram compose_prompt] {}", w);
-    }
-
-    let mut client_messages = prompt_messages
-        .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Replace or append the last user message with multimodal content (text + image)
-    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
-    if already_has_user {
-        let last = client_messages.last_mut().unwrap();
-        replace_user_message_with_images(last, caption.clone(), vec![data_url])?;
-    } else {
-        client_messages.push(user_message_with_images(caption.clone(), vec![data_url]));
-    }
-
-    // 3. LLM call with tool execution loop
-    let provider = llm_service.provider().await;
-    let max_rounds = max_tool_rounds(app).await;
-    let mut all_cleaned_text = String::new();
-    let mut all_translations: Vec<String> = Vec::new();
-
-    for _round in 0..max_rounds {
-        let mut stream = provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(|e| format!("LLM stream error: {}", e))?;
-
-        let mut round_response = String::new();
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(delta) => round_response.push_str(&delta),
-                Err(e) => {
-                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        if round_response.is_empty() {
-            break;
-        }
-
-        let (cleaned, tool_calls) = parse_tool_call_tags(&round_response);
-        let (cleaned, round_translation) = extract_translate_tags(&cleaned);
-        let cleaned = strip_leaked_tags(&cleaned);
-
-        tracing::info!(
-            target: "telegram",
-            "[Telegram/Photo] Tool loop round: {} tool_calls found, char_id='{}'",
-            tool_calls.len(),
-            char_id
-        );
-
-        if let Some(t) = round_translation {
-            all_translations.push(t);
-        }
-        if !cleaned.is_empty() {
-            merge_continuation_text(&mut all_cleaned_text, &cleaned);
-        }
-
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        let tool_invocations = {
-            let registry = action_registry.read().await;
-            tool_calls
-                .iter()
-                .map(|tool_call| {
-                    crate::commands::actions::build_tool_invocation_from_input(
-                        &registry,
-                        &tool_call.name,
-                        tool_call.args.clone(),
-                        None,
-                    )
-                    .map_err(|error| format!("Tool resolution error: {}", error.0))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let execution_outcomes = execute_tool_calls(
-            app,
-            &action_registry,
-            &tool_settings,
-            &char_id,
-            &tool_invocations,
-        )
-        .await;
-        let tool_results: Vec<String> = execution_outcomes
-            .iter()
-            .map(|outcome| {
-                tracing::info!(
-                    target: "telegram::tools",
-                    "[Telegram/ToolCall] Executing: {} with args {:?}",
-                    outcome.invocation.name, outcome.invocation.args
-                );
-                match &outcome.result {
-                    Ok(result) => {
-                        tracing::info!(target: "telegram::tools", "[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "telegram::tools", "[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    }
-                }
-                outcome.result_line()
-            })
-            .collect();
-        let any_needs_feedback = execution_outcomes
-            .iter()
-            .any(|outcome| outcome.needs_feedback);
-
-        if !any_needs_feedback {
-            break;
-        }
-
-        client_messages.push(assistant_text_message(round_response));
-        client_messages.push(system_message(format!(
-            "[Tool results]\n{}\nContinue your response naturally.",
-            tool_results.join("\n")
-        )));
-    }
-
-    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
-        &all_cleaned_text,
-    )));
-    let translation = if all_translations.is_empty() {
-        None
-    } else {
-        Some(compact_newlines(&all_translations.join(" ")))
-    };
-
-    if response.is_empty() {
-        bot.send_message(chat_id, "(No response from AI)")
-            .await
-            .ok();
-        return Ok(());
-    }
-
-    // 5. Persist
-    let metadata = translation
-        .as_ref()
-        .map(|t| serde_json::json!({ "translation": t }).to_string());
-    if let Err(e) = orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            response.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await
-    {
-        tracing::error!(
-            target: "telegram",
-            "[Telegram] Failed to persist assistant message: {}",
-            e
-        );
-    }
-
-    // Trigger periodic memory extraction (every 5 user messages)
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-    tracing::info!(
-        target: "telegram::memory",
-        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
-        msg_count, memory_msg_count, char_id
-    );
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        tracing::info!(
-            target: "telegram::memory",
-            "[Telegram/Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = orchestrator.get_recent_memory_history(10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.clone();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "telegram",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // Sync to desktop
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "assistant".to_string(),
-            text: response.clone(),
-            translation: translation.clone(),
-        },
-    );
-
-    // 6. Reply
-    let reply_text = if let Some(ref t) = translation {
-        format!("{}\n\n📝 {}", response, t)
-    } else {
-        response.clone()
-    };
-    bot.send_message(chat_id, &reply_text).await.ok();
-
-    // 7. Voice reply
-    if config.send_voice_reply {
-        send_voice_reply(bot, chat_id, &response, app).await;
-    }
-
-    Ok(())
+        .filter(|caption| !caption.trim().is_empty())
+        .unwrap_or("The user sent you a photo:");
+    reply_to_message(bot, msg, caption, vec![url], config, sessions, app).await
 }
 
 /// Synthesize text via TTS and send as a Telegram voice message.
-async fn send_voice_reply(bot: &Bot, chat_id: ChatId, text: &str, app: &tauri::AppHandle) {
+async fn send_voice_reply(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    app: &tauri::AppHandle,
+) -> HandlerResult {
     let tts_service = match app.try_state::<TtsService>() {
         Some(s) => s,
-        None => return,
+        None => {
+            bot.send_message(chat_id, "⚠️ The TTS service is unavailable.")
+                .await?;
+            return Ok(());
+        }
     };
 
     match tts_service.synthesize_text(text, None).await {
@@ -1147,446 +567,49 @@ async fn send_voice_reply(bot: &Bot, chat_id: ChatId, text: &str, app: &tauri::A
             } else {
                 bot.send_audio(chat_id, input).await.map(|_| ())
             };
-            if let Err(e) = result {
-                tracing::error!(target: "telegram", "[Telegram] Failed to send voice: {}", e);
-            }
+            result?;
         }
-        Ok(_) => {} // Empty audio, skip
-        Err(e) => {
-            tracing::error!(target: "telegram", "[Telegram] TTS synthesis error: {}", e);
-        }
-    }
-}
-
-/// Check for `[IMAGE_PROMPT:...]` tags in the response and generate/send images.
-async fn handle_image_tags(bot: &Bot, chat_id: ChatId, response: &str, app: &tauri::AppHandle) {
-    let prefix = "[IMAGE_PROMPT:";
-    let mut search = response.as_bytes();
-    let response_bytes = response.as_bytes();
-
-    loop {
-        let offset = response_bytes.len() - search.len();
-        let haystack = &response[offset..];
-        let start = match haystack.find(prefix) {
-            Some(s) => s,
-            None => break,
-        };
-        let rest = &haystack[start + prefix.len()..];
-        let end = match rest.find(']') {
-            Some(e) => e,
-            None => break,
-        };
-        let prompt = rest[..end].trim();
-        // Advance search past this tag
-        search = &response_bytes[offset + start + prefix.len() + end + 1..];
-
-        if prompt.is_empty() {
-            continue;
-        }
-
-        let imagegen = match app.try_state::<ImageGenService>() {
-            Some(s) => s,
-            None => break,
-        };
-
-        match imagegen
-            .generate(prompt.to_string(), None, None, None)
-            .await
-        {
-            Ok(result) => {
-                // result.image_url is a local file path
-                match tokio::fs::read(&result.image_url).await {
-                    Ok(data) => {
-                        let input = InputFile::memory(data).file_name("image.png");
-                        if let Err(e) = bot.send_photo(chat_id, input).await {
-                            tracing::error!(target: "telegram", "[Telegram] Failed to send photo: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(target: "telegram", "[Telegram] Failed to read generated image: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(target: "telegram", "[Telegram] Image generation failed: {}", e);
-                bot.send_message(chat_id, format!("⚠️ Image generation failed: {}", e))
-                    .await
-                    .ok();
-            }
+        outcome => {
+            tracing::warn!(target: "telegram", "Voice reply unavailable: {outcome:?}");
+            bot.send_message(
+                chat_id,
+                "⚠️ Kokoro Engine could not synthesize the voice reply.",
+            )
+            .await?;
         }
     }
-}
-
-// ── Tag parsing helpers (mirrored from commands/chat.rs) ──────────
-
-const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
-const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
-
-#[derive(Debug, Clone)]
-struct ToolCall {
-    name: String,
-    args: HashMap<String, String>,
-}
-
-impl From<ToolCall> for ToolInvocation {
-    fn from(value: ToolCall) -> Self {
-        Self {
-            tool_call_id: None,
-            name: value.name,
-            args: value.args,
-        }
-    }
-}
-
-fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
-    let mut result = text.to_string();
-    let mut calls = Vec::new();
-
-    // Parse [TOOL_CALL:name|key=val|...] format
-    while let Some(start) = result.rfind(TOOL_CALL_TAG_PREFIX) {
-        let rest = &result[start..];
-        if let Some(end_bracket) = rest.find(']') {
-            let inner = &rest[TOOL_CALL_TAG_PREFIX.len()..end_bracket];
-            let parts: Vec<&str> = inner.split('|').collect();
-            if let Some(name) = parts.first() {
-                let name = name.trim().to_string();
-                let mut args = HashMap::new();
-                for part in parts.iter().skip(1) {
-                    if let Some(eq_pos) = part.find('=') {
-                        let key = part[..eq_pos].trim().to_string();
-                        let val = part[eq_pos + 1..].trim().to_string();
-                        args.insert(key, val);
-                    }
-                }
-                calls.push(ToolCall { name, args });
-            }
-            let tag_end = start + end_bracket + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                if tag_end < result.len() {
-                    &result[tag_end..]
-                } else {
-                    ""
-                }
-            );
-        } else {
-            break;
-        }
-    }
-
-    // Also parse simplified [action_name|key=val] format
-    let mut extra_calls = Vec::new();
-    let mut cleaned = result.clone();
-    let mut offset = 0;
-    while offset < cleaned.len() {
-        let Some(rel_start) = cleaned[offset..].find('[') else {
-            break;
-        };
-        let start = offset + rel_start;
-        let rest = &cleaned[start..];
-        let Some(end) = rest.find(']') else { break };
-        let inner = &rest[1..end];
-        let mut matched = false;
-        if let Some(pipe_pos) = inner.find('|') {
-            let name_part = &inner[..pipe_pos];
-            let is_identifier =
-                !name_part.is_empty() && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
-            let has_kv = inner[pipe_pos + 1..].contains('=');
-            if is_identifier && has_kv {
-                let parts: Vec<&str> = inner.split('|').collect();
-                let name = parts[0].trim().to_string();
-                let mut args = HashMap::new();
-                for part in parts.iter().skip(1) {
-                    if let Some(eq_pos) = part.find('=') {
-                        let key = part[..eq_pos].trim().to_string();
-                        let val = part[eq_pos + 1..].trim().to_string();
-                        args.insert(key, val);
-                    }
-                }
-                extra_calls.push(ToolCall { name, args });
-                let tag_end = start + end + 1;
-                cleaned = format!(
-                    "{}{}",
-                    cleaned[..start].trim_end(),
-                    if tag_end < cleaned.len() {
-                        &cleaned[tag_end..]
-                    } else {
-                        ""
-                    }
-                );
-                matched = true;
-            }
-        }
-        if !matched {
-            offset = start + 1;
-        }
-    }
-    calls.extend(extra_calls);
-    calls.reverse();
-    (cleaned.trim().to_string(), calls)
-}
-
-fn extract_translate_tags(text: &str) -> (String, Option<String>) {
-    let mut translations = Vec::new();
-    let mut result = text.to_string();
-    while let Some(start) = result.find(TRANSLATE_TAG_PREFIX) {
-        if let Some(end_bracket) = result[start..].find(']') {
-            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..start + end_bracket];
-            let trimmed = inner.trim();
-            if !trimmed.is_empty() {
-                translations.push(trimmed.to_string());
-            }
-            let tag_end = start + end_bracket + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..];
-            let trimmed = inner.trim();
-            if !trimmed.is_empty() {
-                translations.push(trimmed.to_string());
-            }
-            result = result[..start].trim_end().to_string();
-        }
-    }
-    let translation = if translations.is_empty() {
-        None
-    } else {
-        Some(translations.join(" "))
-    };
-    (result.trim().to_string(), translation)
-}
-
-fn strip_leaked_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    while let Some(start) = result.find("<tool_result>") {
-        if let Some(end) = result[start..].find("</tool_result>") {
-            let tag_end = start + end + "</tool_result>".len();
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            let line_end = result[start..]
-                .find('\n')
-                .map(|i| start + i)
-                .unwrap_or(result.len());
-            result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
-        }
-    }
-    // Markdown emphasis must be cleaned only after all tool rounds have been
-    // merged; a delimiter can legitimately be opened in one round and closed
-    // in the next.
-    result.trim().to_string()
-}
-
-/// Strip control tags that shouldn't appear in Telegram messages:
-/// [ACTION:xxx], [EMOTION:xxx], [IMAGE_PROMPT:xxx] (image handled separately)
-fn strip_control_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    // Remove [ACTION:...] tags
-    while let Some(start) = result.find("[ACTION:") {
-        if let Some(end) = result[start..].find(']') {
-            let tag_end = start + end + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            break;
-        }
-    }
-    // Remove [EMOTION:...] tags
-    while let Some(start) = result.find("[EMOTION:") {
-        if let Some(end) = result[start..].find(']') {
-            let tag_end = start + end + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            break;
-        }
-    }
-    result.trim().to_string()
-}
-
-/// Collapse excessive newlines for cleaner Telegram output.
-/// Removes lines that contain only ellipsis/whitespace, then collapses 2+ newlines to 1.
-fn compact_newlines(text: &str) -> String {
-    // Filter out lines that are only whitespace or lone ellipsis fragments
-    let filtered: Vec<&str> = text
-        .lines()
-        .filter(|line| {
-            let t = line.trim().trim_matches('…').trim_matches('.').trim();
-            !t.is_empty()
-        })
-        .collect();
-    filtered.join("\n").trim().to_string()
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── compact_newlines ──────────────────────────────────
-
     #[test]
-    fn test_compact_newlines_removes_ellipsis_only_lines() {
-        let input = "Hello\n…\nWorld";
-        assert_eq!(compact_newlines(input), "Hello\nWorld");
-    }
-
-    #[test]
-    fn test_compact_newlines_removes_dot_only_lines() {
-        let input = "Hello\n...\nWorld";
-        assert_eq!(compact_newlines(input), "Hello\nWorld");
-    }
-
-    #[test]
-    fn test_compact_newlines_no_change_needed() {
-        let input = "Hello\nWorld";
-        assert_eq!(compact_newlines(input), "Hello\nWorld");
-    }
-
-    #[test]
-    fn test_compact_newlines_empty_string() {
-        assert_eq!(compact_newlines(""), "");
-    }
-
-    // ── strip_control_tags ────────────────────────────────
-
-    #[test]
-    fn test_strip_control_tags_removes_action_tag() {
-        // trim_end/trim_start collapses surrounding spaces
-        let input = "Hello [ACTION:wave] world";
-        assert_eq!(strip_control_tags(input), "Helloworld");
-    }
-
-    #[test]
-    fn test_strip_control_tags_removes_emotion_tag() {
-        let input = "[EMOTION:happy] Nice to meet you";
-        assert_eq!(strip_control_tags(input), "Nice to meet you");
-    }
-
-    #[test]
-    fn test_strip_control_tags_no_tags_unchanged() {
-        let input = "Just a normal message";
-        assert_eq!(strip_control_tags(input), "Just a normal message");
-    }
-
-    #[test]
-    fn test_strip_control_tags_multiple_tags() {
-        let input = "[ACTION:nod] Hello [EMOTION:curious] there";
-        let result = strip_control_tags(input);
-        assert!(!result.contains("[ACTION:"));
-        assert!(!result.contains("[EMOTION:"));
-        assert!(result.contains("Hello"));
-        assert!(result.contains("there"));
-    }
-
-    // ── extract_translate_tags ────────────────────────────
-
-    #[test]
-    fn test_extract_translate_tags_basic() {
-        let input = "こんにちは [TRANSLATE:Hello]";
-        let (text, translation) = extract_translate_tags(input);
-        assert_eq!(text, "こんにちは");
-        assert_eq!(translation, Some("Hello".to_string()));
-    }
-
-    #[test]
-    fn test_extract_translate_tags_none() {
-        let input = "Hello world";
-        let (text, translation) = extract_translate_tags(input);
-        assert_eq!(text, "Hello world");
-        assert!(translation.is_none());
-    }
-
-    // ── parse_tool_call_tags ──────────────────────────────
-
-    #[test]
-    fn test_parse_tool_call_tags_no_tags() {
-        let input = "Just a response";
-        let (text, calls) = parse_tool_call_tags(input);
-        assert_eq!(text, "Just a response");
-        assert!(calls.is_empty());
-    }
-
-    #[test]
-    fn test_parse_tool_call_tags_with_params() {
-        let input = "Sure! [TOOL_CALL:get_time|tz=UTC]";
-        let (text, calls) = parse_tool_call_tags(input);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "get_time");
-        assert_eq!(calls[0].args.get("tz"), Some(&"UTC".to_string()));
-        assert!(!text.contains("[TOOL_CALL:"));
-    }
-
-    #[test]
-    fn test_tool_round_markdown_is_cleaned_after_merge() {
-        let mut merged = String::new();
-        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            if !cleaned.is_empty() {
-                merge_continuation_text(&mut merged, &cleaned);
-            }
-        }
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
-
-        merged.clear();
-        for round in ["**[TOOL_CALL:get_time|{}]", "answer**。"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            if !cleaned.is_empty() {
-                merge_continuation_text(&mut merged, &cleaned);
-            }
-        }
-
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
-
-        merged.clear();
-        for round in ["*[TOOL_CALL:get_time|{}]", "answer*。"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            if !cleaned.is_empty() {
-                merge_continuation_text(&mut merged, &cleaned);
-            }
-        }
-
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
-    }
-
-    #[test]
-    fn test_telegram_error_log_prefix_format() {
-        let rendered = format!(
-            "[ERROR][Telegram] Dispatcher task failed: {}. 常见原因是网络不可达或未开启代理。",
-            "Network timeout"
-        );
-        assert!(rendered.starts_with("[ERROR][Telegram]"));
-        assert!(rendered.contains("Network timeout"));
-    }
-
-    #[tokio::test]
-    async fn test_telegram_new_conversation_bumps_generation_and_clears_active_id() {
-        let orchestrator = crate::ai::context::AIOrchestrator::new("sqlite::memory:").await.unwrap();
-        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
-        let initial_gen = orchestrator.current_conversation_generation();
-
-        // Simulate /new action calling clear_history()
-        orchestrator.clear_history().await;
-
-        assert!(orchestrator.current_conversation_id.lock().await.is_none());
+    fn new_and_default_sessions_are_isolated_while_continue_pins_desktop_scope() {
+        let default = SessionMode::Private;
+        let other = default.bind(ChatId(2), "character").1;
+        let first = default.bind(ChatId(1), "character").1;
+        assert_ne!(first, other);
+        assert_ne!(first, default.bind(ChatId(1), "another-character").1);
+        let fresh = SessionMode::Fresh { id: "fresh".into() };
+        assert_ne!(fresh.bind(ChatId(1), "character").1, first);
+        assert_eq!(default.bind(ChatId(2), "character").1, other);
+        let continue_desktop = SessionMode::Desktop {
+            character_id: "character".into(),
+            conversation_id: "selected".into(),
+        };
         assert_eq!(
-            orchestrator.current_conversation_generation(),
-            initial_gen + 1
+            continue_desktop.bind(ChatId(1), "switched"),
+            ("character", "selected".into(), false)
         );
+    }
+
+    #[test]
+    fn splitting_preserves_the_message_and_handles_multibyte_characters() {
+        let original = "界".repeat(MAX_MESSAGE_CHARS + 3);
+        let chunks = split_message(&original).collect::<Vec<_>>();
+        assert_eq!(chunks[0].chars().count(), MAX_MESSAGE_CHARS);
+        assert_eq!(chunks.concat(), original);
     }
 }

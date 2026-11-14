@@ -1,4 +1,4 @@
-use crate::commands::system::WindowSizeState;
+use crate::imagegen::WindowSizeState;
 use crate::error::KokoroError;
 use crate::imagegen::config::{load_config, save_config, ImageGenSystemConfig};
 use crate::imagegen::{ImageGenParams, ImageGenResult, ImageGenService};

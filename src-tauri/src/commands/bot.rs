@@ -1,21 +1,8 @@
 // pattern: Mixed (needs refactoring)
 
-use crate::actions::tool_settings::ToolSettings;
-use crate::actions::{builtin_tool_id, execute_tool_calls, ToolExecutionOutcome, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
-use crate::ai::memory_event_ingress::{
-    build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
-    MemoryEventIngressOptions,
-};
-use crate::ai::memory_extractor;
-use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
+use crate::chat::application::{channel_id, submit_chat, ChatImage, ChatPolicy, ChatRequest};
 use crate::error::KokoroError;
-use crate::imagegen::ImageGenService;
-use crate::llm::messages::{
-    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
-    system_message, user_message_with_images, user_text_message,
-};
-use crate::llm::service::LlmService;
 use crate::stt::{AudioSource, SttService};
 use crate::telegram::TelegramService;
 use crate::tts::TtsService;
@@ -26,7 +13,6 @@ use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -801,9 +787,9 @@ struct BotReply {
     #[serde(skip_serializing_if = "Option::is_none")]
     audio: Option<BotReplyAudio>,
     #[serde(skip)]
-    image_prompts: Vec<String>,
-    #[serde(skip)]
     generated_image_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    output_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -821,794 +807,85 @@ struct BotReplyAudio {
     data_base64: String,
 }
 
-#[derive(Debug, Clone)]
-struct GeneratedBotImage {
-    prompt: String,
-    mime_type: String,
-    file_name: String,
-    data: Vec<u8>,
-}
-
 fn reply_text_with_translation(reply: &BotReply) -> String {
-    if let Some(translation) = reply
-        .translation
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        format!("{}\n\nTranslation: {}", reply.reply, translation)
-    } else {
-        reply.reply.clone()
+    let mut text = reply.reply.clone();
+    if let Some(translation) = reply.translation.as_ref().filter(|value| !value.trim().is_empty()) {
+        text.push_str(&format!("\n\nTranslation: {translation}"));
     }
+    for warning in &reply.output_warnings {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(warning);
+    }
+    text
 }
 
 async fn generate_bot_reply(
     app: &tauri::AppHandle,
-    platform: &str,
+    platform: &'static str,
     text: &str,
     image_urls: Vec<String>,
     character_id: Option<&str>,
     conversation_key: Option<&str>,
-    orchestrator_override: Option<&AIOrchestrator>,
-) -> Result<BotReply, String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() && image_urls.is_empty() {
-        return Err("Message text is empty".to_string());
-    }
-    let prompt_text = if trimmed.is_empty() {
-        "The user sent an image:".to_string()
+    message_id: Option<&str>,
+) -> Result<BotReply, KokoroError> {
+    let state = app.state::<AIOrchestrator>();
+    let current_character_id = state.get_character_id().await;
+    let char_id = character_id.filter(|id| !id.trim().is_empty()).unwrap_or(&current_character_id);
+    let peer = conversation_key.unwrap_or(platform);
+    let conversation_id = if platform == "webhook" {
+        let scoped_key = map_webhook_conversation_to_character(char_id, conversation_key);
+        format!("webhook-{}", hex_digest(&Sha256::digest(scoped_key.as_bytes())))
     } else {
-        trimmed.to_string()
+        channel_id(platform, char_id, peer)
     };
-
-    let managed_orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let orchestrator = orchestrator_override.unwrap_or(&managed_orchestrator);
-
-    if let Some(reason) = orchestrator.get_runtime_degraded().await {
-        return Err(format!(
-            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
-        ));
-    }
-
-    let _chat_turn_guard = orchestrator
-        .enter_chat_turn()
-        .map_err(|e| format!("Character activation is in progress: {e}"))?;
-
-    let llm_service = app
-        .try_state::<LlmService>()
-        .ok_or("LlmService not available")?;
-    let action_registry = app
-        .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
-        .ok_or("ActionRegistry not available")?;
-    let tool_settings = app
-        .try_state::<Arc<RwLock<ToolSettings>>>()
-        .ok_or("ToolSettings not available")?;
-
-    let char_id = match character_id.filter(|id| !id.trim().is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
-    let conversation_key = conversation_key
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(platform)
-        .to_string();
-
-    orchestrator
-        .add_message("user".to_string(), prompt_text.clone(), &char_id)
-        .await;
-
-    let _ = app.emit(
-        "telegram:chat-sync",
-        json!({
-            "role": "user",
-            "text": format!(
-                "[{}] {}{}",
-                platform,
-                prompt_text,
-                if image_urls.is_empty() { "" } else { " [image]" }
-            ),
-        }),
-    );
-
-    let tool_prompt = {
-        let registry = action_registry.read().await;
-        let settings = tool_settings.read().await;
-        let prompt = registry.generate_tool_prompt_for_prompt_with_settings(
-            orchestrator.is_memory_enabled(),
-            &settings,
-        );
-        if prompt.is_empty() {
-            None
-        } else {
-            Some(prompt)
-        }
-    };
-
-    let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(
-            &prompt_text,
-            false,
-            tool_prompt,
-            false,
-            &char_id,
-            &_chat_turn_guard,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    for warning in compose_warnings {
-        tracing::warn!(target: "bot", "[{} compose_prompt] {}", platform, warning);
-    }
-
-    let mut client_messages = prompt_messages
-        .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
-        .collect::<Result<Vec<_>, _>>()?;
-    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
-    if image_urls.is_empty() {
-        if !already_has_user {
-            client_messages.push(user_text_message(prompt_text.clone()));
-        }
-    } else if already_has_user {
-        let last = client_messages
-            .last_mut()
-            .expect("last message checked above");
-        replace_user_message_with_images(last, prompt_text.clone(), image_urls)?;
+    let client_request_id = message_id
+        .map(|id| channel_id(platform, peer, id))
+        .unwrap_or_else(|| format!("{platform}-{}", uuid::Uuid::new_v4()));
+    let text = if text.trim().is_empty() && !image_urls.is_empty() {
+        "The user sent an image:"
     } else {
-        client_messages.push(user_message_with_images(prompt_text.clone(), image_urls));
-    }
-
-    let provider = llm_service.provider().await;
-    let max_rounds = {
-        let settings = tool_settings.read().await;
-        settings.max_tool_rounds.max(1)
+        text.trim()
     };
-    let mut all_cleaned_text = String::new();
-    let mut all_translations = Vec::new();
-    let mut all_image_prompts = Vec::new();
-    let mut all_generated_images = Vec::new();
-
-    for round in 0..max_rounds {
-        let mut stream = provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(|e| format!("LLM stream error: {}", e))?;
-
-        let mut round_response = String::new();
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(delta) => round_response.push_str(&delta),
-                Err(error) => {
-                    tracing::error!(target: "bot", "[{}] LLM stream error: {}", platform, error);
-                    break;
-                }
-            }
-        }
-
-        if round_response.is_empty() {
-            break;
-        }
-
-        let (cleaned, tool_calls) = parse_tool_call_tags(&round_response);
-        let (cleaned, round_translation) = extract_translate_tags(&cleaned);
-        let (cleaned, image_prompts) = extract_image_prompt_tags(&cleaned);
-        let cleaned = strip_leaked_tags(&cleaned);
-
-        tracing::info!(
-            target: "bot::tools",
-            "[{}] tool loop round {}: {} tool call(s), char_id='{}'",
-            platform,
-            round + 1,
-            tool_calls.len(),
-            char_id
-        );
-
-        if let Some(translation) = round_translation {
-            all_translations.push(translation);
-        }
-        all_image_prompts.extend(image_prompts);
-        if !cleaned.is_empty() {
-            merge_continuation_text(&mut all_cleaned_text, &cleaned);
-        }
-
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        let tool_invocations = {
-            let registry = action_registry.read().await;
-            tool_calls
-                .iter()
-                .map(|tool_call| {
-                    crate::commands::actions::build_tool_invocation_from_input(
-                        &registry,
-                        &tool_call.name,
-                        tool_call.args.clone(),
-                        None,
-                    )
-                    .map_err(|error| format!("Tool resolution error: {}", error.0))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let execution_outcomes = execute_tool_calls(
-            app,
-            &action_registry,
-            &tool_settings,
-            &char_id,
-            &tool_invocations,
-        )
-        .await;
-        all_generated_images
-            .extend(collect_generated_images_from_tool_outcomes(&execution_outcomes).await);
-        let tool_results = execution_outcomes
-            .iter()
-            .map(|outcome| {
-                tracing::info!(
-                    target: "bot::tools",
-                    "[{}] executing {} with args {:?}",
-                    platform,
-                    outcome.invocation.name,
-                    outcome.invocation.args
-                );
-                match &outcome.result {
-                    Ok(result) => {
-                        tracing::info!(
-                            target: "bot::tools",
-                            "[{}] {} => {}",
-                            platform,
-                            outcome.tool_name(),
-                            result.message
-                        );
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            target: "bot::tools",
-                            "[{}] {} failed: {}",
-                            platform,
-                            outcome.tool_name(),
-                            error
-                        );
-                    }
-                }
-                outcome.result_line()
-            })
-            .collect::<Vec<_>>();
-        let any_needs_feedback = execution_outcomes
-            .iter()
-            .any(|outcome| outcome.needs_feedback);
-
-        if !any_needs_feedback {
-            break;
-        }
-
-        client_messages.push(assistant_text_message(round_response));
-        client_messages.push(system_message(format!(
-            "[Tool results]\n{}\nContinue your response naturally.",
-            tool_results.join("\n")
-        )));
+    if text.is_empty() {
+        return Err(KokoroError::Validation("Message text is empty".into()));
     }
 
-    let reply = compact_newlines(&strip_markdown_emphasis_markers(&strip_control_tags(
-        &all_cleaned_text,
-    )));
-    if reply.is_empty() && all_image_prompts.is_empty() && all_generated_images.is_empty() {
-        return Err("No response from AI".to_string());
+    let response = submit_chat(app.clone(), ChatRequest {
+        message: text.to_owned(),
+        character_id: Some(char_id.to_owned()),
+        conversation_id: Some(conversation_id),
+        client_request_id: Some(client_request_id),
+        images: Some(image_urls),
+        ..Default::default()
+    }, ChatPolicy::External { create_conversation: true, image_output: platform != "qq", source: platform }).await?;
+    if response.status.as_deref() == Some("cancelled") {
+        return Err(KokoroError::Chat("Chat turn cancelled".into()));
     }
-    let translation = if all_translations.is_empty() {
-        None
-    } else {
-        Some(compact_newlines(&all_translations.join(" ")))
-    };
-
-    let metadata = translation
-        .as_ref()
-        .map(|value| json!({ "translation": value }).to_string());
-    if !reply.is_empty() {
-        if let Err(e) = orchestrator
-            .add_message_with_metadata(
-                "assistant".to_string(),
-                reply.clone(),
-                metadata,
-                &char_id,
-                None,
-            )
-            .await
-        {
-            tracing::error!(
-                target: "bot",
-                "[{}] Failed to persist assistant message: {}",
-                platform,
-                e
-            );
-        }
-    }
-
-    trigger_bot_memory_tasks(
-        platform,
-        &prompt_text,
-        &char_id,
-        &conversation_key,
-        orchestrator,
-        &llm_service,
-    )
-    .await;
-
-    if !reply.is_empty() {
-        let _ = app.emit(
-            "telegram:chat-sync",
-            json!({
-                "role": "assistant",
-                "text": reply.clone(),
-                "translation": translation.clone(),
-            }),
-        );
-    }
-
+    let mut output_warnings = response.output_warnings;
+    let images = read_tool_images(&response.images, &mut output_warnings).await;
     Ok(BotReply {
-        reply,
-        translation,
-        generated_image_count: all_generated_images.len(),
-        images: all_generated_images,
+        reply: response.text,
+        translation: response.translation,
+        generated_image_count: images.len(),
+        images,
         audio: None,
-        image_prompts: all_image_prompts,
+        output_warnings,
     })
 }
 
 pub(crate) async fn generate_bot_text_reply(
     app: &tauri::AppHandle,
-    platform: &str,
+    platform: &'static str,
     text: &str,
     character_id: Option<&str>,
-    conversation_key: Option<&str>,
-    orchestrator: Option<&AIOrchestrator>,
-) -> Result<String, String> {
-    let reply = generate_bot_reply(
-        app,
-        platform,
-        text,
-        Vec::new(),
-        character_id,
-        conversation_key,
-        orchestrator,
-    )
-    .await?;
-    Ok(reply_text_with_translation(&reply))
-}
-
-async fn trigger_bot_memory_tasks(
-    platform: &str,
-    user_text: &str,
-    char_id: &str,
     conversation_key: &str,
-    orchestrator: &AIOrchestrator,
-    llm_service: &LlmService,
-) {
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let upgrade_config =
-        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
-    let ingress_options = MemoryEventIngressOptions {
-        enabled: upgrade_config.event_trigger_enabled,
-        event_cooldown_secs: upgrade_config.event_cooldown_secs,
-        intent_routing_enabled: upgrade_config.intent_routing_enabled,
-    };
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-
-    tracing::info!(
-        target: "bot::memory",
-        "[{}] user message count: {}, memory trigger count: {}, char_id: {}",
-        platform,
-        msg_count,
-        memory_msg_count,
-        char_id
-    );
-
-    if orchestrator.is_memory_enabled() {
-        if let Some(decision) = select_memory_ingress_decision(user_text, &ingress_options) {
-            let cooldown_key =
-                build_cooldown_key(char_id, conversation_key, decision.event.event_type);
-            if orchestrator
-                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
-                .await
-            {
-                let history = orchestrator.get_recent_memory_history(10).await;
-                let memory_mgr = orchestrator.memory_manager.clone();
-                let provider_for_mem = llm_service.provider().await;
-                let char_id_for_mem = char_id.to_string();
-                let source = platform.to_string();
-                let memory_enabled = orchestrator.memory_enabled_flag();
-                let observation_started_at = std::time::Instant::now();
-                let trigger = decision.trigger_label.to_string();
-                let extraction_options = memory_extractor::MemoryExtractionOptions {
-                    structured_memory_enabled: should_use_structured_extraction(
-                        upgrade_config.structured_memory_enabled,
-                        &ingress_options,
-                    ),
-                    target_language: Some(memory_target_language.clone()),
-                };
-                tauri::async_runtime::spawn(async move {
-                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                        return;
-                    }
-                    let _ = memory_mgr
-                        .record_periodic_write_if_enabled(
-                            &char_id_for_mem,
-                            &source,
-                            &trigger,
-                            observation_started_at,
-                        )
-                        .await;
-                    memory_extractor::extract_and_store_memories_with_options(
-                        &history,
-                        &memory_mgr,
-                        provider_for_mem,
-                        char_id_for_mem,
-                        extraction_options,
-                    )
-                    .await;
-                });
-            }
-        }
-    }
-
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        let history = orchestrator.get_recent_memory_history(10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.to_string();
-        let source = platform.to_string();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .record_periodic_write_if_enabled(
-                    &char_id_for_mem,
-                    &source,
-                    "periodic_extraction",
-                    observation_started_at,
-                )
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.to_string();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let source = platform.to_string();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    &source,
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(
-                        target: "bot::memory",
-                        "[{}] consolidated {} memory clusters",
-                        source,
-                        count
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        target: "bot::memory",
-                        "[{}] memory consolidation failed: {}",
-                        source,
-                        error
-                    );
-                }
-                _ => {}
-            }
-        });
-    }
-}
-
-const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
-const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
-
-#[derive(Debug, Clone)]
-struct ToolCall {
-    name: String,
-    args: HashMap<String, String>,
-}
-
-impl From<ToolCall> for ToolInvocation {
-    fn from(value: ToolCall) -> Self {
-        Self {
-            tool_call_id: None,
-            name: value.name,
-            args: value.args,
-        }
-    }
-}
-
-fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
-    let mut result = text.to_string();
-    let mut calls_with_positions = Vec::new();
-
-    while let Some(start) = result.rfind(TOOL_CALL_TAG_PREFIX) {
-        let rest = &result[start..];
-        if let Some(end_bracket) = rest.find(']') {
-            let inner = &rest[TOOL_CALL_TAG_PREFIX.len()..end_bracket];
-            let parts: Vec<&str> = inner.split('|').collect();
-            if let Some(name) = parts.first() {
-                let name = name.trim().to_string();
-                let mut args = HashMap::new();
-                for part in parts.iter().skip(1) {
-                    if let Some(eq_pos) = part.find('=') {
-                        let key = part[..eq_pos].trim().to_string();
-                        let val = part[eq_pos + 1..].trim().to_string();
-                        args.insert(key, val);
-                    }
-                }
-                calls_with_positions.push((start, ToolCall { name, args }));
-            }
-            let tag_end = start + end_bracket + 1;
-            result = format!(
-                "{}{}",
-                &result[..start],
-                if tag_end < result.len() {
-                    &result[tag_end..]
-                } else {
-                    ""
-                }
-            );
-        } else {
-            break;
-        }
-    }
-
-    let mut cleaned = result.clone();
-    let mut offset = 0;
-    while offset < cleaned.len() {
-        let Some(rel_start) = cleaned[offset..].find('[') else {
-            break;
-        };
-        let start = offset + rel_start;
-        let rest = &cleaned[start..];
-        let Some(end) = rest.find(']') else {
-            break;
-        };
-        let inner = &rest[1..end];
-        let mut matched = false;
-        if let Some(pipe_pos) = inner.find('|') {
-            let name_part = &inner[..pipe_pos];
-            let is_identifier =
-                !name_part.is_empty() && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
-            let has_kv = inner[pipe_pos + 1..].contains('=');
-            if is_identifier && has_kv {
-                let parts: Vec<&str> = inner.split('|').collect();
-                let name = parts[0].trim().to_string();
-                let mut args = HashMap::new();
-                for part in parts.iter().skip(1) {
-                    if let Some(eq_pos) = part.find('=') {
-                        let key = part[..eq_pos].trim().to_string();
-                        let val = part[eq_pos + 1..].trim().to_string();
-                        args.insert(key, val);
-                    }
-                }
-                calls_with_positions.push((start, ToolCall { name, args }));
-                let tag_end = start + end + 1;
-                cleaned = format!(
-                    "{}{}",
-                    &cleaned[..start],
-                    if tag_end < cleaned.len() {
-                        &cleaned[tag_end..]
-                    } else {
-                        ""
-                    }
-                );
-                matched = true;
-            }
-        }
-        if !matched {
-            offset = start + 1;
-        }
-    }
-    calls_with_positions.sort_by_key(|(start, _)| *start);
-    let calls = calls_with_positions
-        .into_iter()
-        .map(|(_, call)| call)
-        .collect();
-    (cleaned.trim().to_string(), calls)
-}
-
-fn extract_translate_tags(text: &str) -> (String, Option<String>) {
-    let mut translations = Vec::new();
-    let mut result = text.to_string();
-    while let Some(start) = result.find(TRANSLATE_TAG_PREFIX) {
-        if let Some(end_bracket) = result[start..].find(']') {
-            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..start + end_bracket];
-            let trimmed = inner.trim();
-            if !trimmed.is_empty() {
-                translations.push(trimmed.to_string());
-            }
-            let tag_end = start + end_bracket + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..];
-            let trimmed = inner.trim();
-            if !trimmed.is_empty() {
-                translations.push(trimmed.to_string());
-            }
-            result = result[..start].trim_end().to_string();
-        }
-    }
-    let translation = if translations.is_empty() {
-        None
-    } else {
-        Some(translations.join(" "))
-    };
-    (result.trim().to_string(), translation)
-}
-
-fn extract_image_prompt_tags(text: &str) -> (String, Vec<String>) {
-    let prefix = "[IMAGE_PROMPT:";
-    let mut prompts = Vec::new();
-    let mut result = text.to_string();
-
-    while let Some(start) = result.find(prefix) {
-        let Some(end_bracket) = result[start..].find(']') else {
-            break;
-        };
-        let inner = &result[start + prefix.len()..start + end_bracket];
-        let prompt = inner.trim();
-        if !prompt.is_empty() {
-            prompts.push(prompt.to_string());
-        }
-        let tag_end = start + end_bracket + 1;
-        let left = result[..start].trim_end();
-        let right = result[tag_end..].trim_start();
-        let separator = if left.is_empty() || right.is_empty() {
-            ""
-        } else {
-            " "
-        };
-        result = format!("{}{}{}", left, separator, right);
-    }
-
-    (result.trim().to_string(), prompts)
-}
-
-fn strip_leaked_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    while let Some(start) = result.find("<tool_result>") {
-        if let Some(end) = result[start..].find("</tool_result>") {
-            let tag_end = start + end + "</tool_result>".len();
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            let line_end = result[start..]
-                .find('\n')
-                .map(|i| start + i)
-                .unwrap_or(result.len());
-            result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
-        }
-    }
-    // Markdown emphasis must be cleaned only after all tool rounds have been
-    // merged; a delimiter can legitimately be opened in one round and closed
-    // in the next.
-    result.trim().to_string()
-}
-
-fn strip_control_tags(text: &str) -> String {
-    let mut bracket_cleaned = text.to_string();
-    for prefix in ["[ACTION:", "[EMOTION:", "[IMAGE_PROMPT:"] {
-        while let Some(start) = bracket_cleaned.find(prefix) {
-            if let Some(end) = bracket_cleaned[start..].find(']') {
-                let tag_end = start + end + 1;
-                bracket_cleaned = format!(
-                    "{}{}",
-                    &bracket_cleaned[..start],
-                    &bracket_cleaned[tag_end..]
-                );
-            } else {
-                break;
-            }
-        }
-    }
-
-    let mut result = String::with_capacity(bracket_cleaned.len());
-    let mut chars = bracket_cleaned.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch != '<' {
-            result.push(ch);
-            continue;
-        }
-
-        let mut tag = String::new();
-        while let Some(next) = chars.peek().copied() {
-            tag.push(next);
-            chars.next();
-            if next == '>' || tag.len() > 64 {
-                break;
-            }
-        }
-
-        let lower = tag.to_ascii_lowercase();
-        if lower.starts_with("translate>")
-            || lower.starts_with("/translate>")
-            || lower.starts_with("emotion")
-            || lower.starts_with("/emotion>")
-            || lower.starts_with("cue")
-            || lower.starts_with("/cue>")
-        {
-            continue;
-        }
-
-        result.push('<');
-        result.push_str(&tag);
-    }
-
-    result.trim().to_string()
-}
-
-fn compact_newlines(text: &str) -> String {
-    let mut out = String::new();
-    let mut blank_count = 0;
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            blank_count += 1;
-            if blank_count <= 1 {
-                out.push('\n');
-            }
-        } else {
-            blank_count = 0;
-            if !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(line.trim_end());
-        }
-    }
-    out.trim().to_string()
+    message_id: &str,
+) -> Result<String, String> {
+    let reply = generate_bot_reply(app, platform, text, Vec::new(),
+        character_id, Some(conversation_key), Some(message_id)).await.map_err(|error| error.to_string())?;
+    Ok(reply_text_with_translation(&reply))
 }
 
 fn image_mime_from_name(name: &str) -> &'static str {
@@ -1786,7 +1063,7 @@ async fn synthesize_bot_audio(
     text: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     let Some(tts_service) = app.try_state::<TtsService>() else {
-        return Ok(None);
+        return Err("The TTS service is unavailable.".into());
     };
     tts_service
         .synthesize_text(text, None)
@@ -1795,137 +1072,35 @@ async fn synthesize_bot_audio(
         .map_err(|error| format!("TTS synthesis error: {}", error))
 }
 
-async fn generate_bot_images(
-    app: &tauri::AppHandle,
-    platform: &str,
-    prompts: &[String],
-) -> Vec<GeneratedBotImage> {
-    if prompts.is_empty() {
-        return Vec::new();
-    }
-    let Some(imagegen) = app.try_state::<ImageGenService>() else {
-        tracing::warn!(
-            target: "bot::imagegen",
-            "[{}] image generation requested but ImageGenService is not available",
-            platform
-        );
-        return Vec::new();
-    };
-
+async fn read_tool_images(artifacts: &[ChatImage], warnings: &mut Vec<String>) -> Vec<BotReplyImage> {
     let mut images = Vec::new();
-    for prompt in prompts {
-        match imagegen.generate(prompt.clone(), None, None, None).await {
-            Ok(result) => match tokio::fs::read(&result.image_url).await {
-                Ok(data) => {
-                    let _ = app.emit("imagegen:done", &result);
-                    let file_name = Path::new(&result.image_url)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("image.png")
-                        .to_string();
-                    images.push(GeneratedBotImage {
-                        prompt: prompt.clone(),
-                        mime_type: image_mime_from_name(&file_name).to_string(),
-                        file_name,
-                        data,
-                    });
-                }
-                Err(error) => {
-                    tracing::error!(
-                        target: "bot::imagegen",
-                        "[{}] failed to read generated image: {}",
-                        platform,
-                        error
-                    );
-                }
-            },
-            Err(error) => {
-                tracing::error!(
-                    target: "bot::imagegen",
-                    "[{}] image generation failed: {}",
-                    platform,
-                    error
-                );
-            }
-        }
-    }
-    images
-}
-
-fn bot_reply_image_from_generated(image: GeneratedBotImage) -> BotReplyImage {
-    BotReplyImage {
-        prompt: image.prompt,
-        mime_type: image.mime_type,
-        file_name: image.file_name,
-        data_base64: base64::engine::general_purpose::STANDARD.encode(image.data),
-    }
-}
-
-async fn collect_generated_images_from_tool_outcomes(
-    outcomes: &[ToolExecutionOutcome],
-) -> Vec<BotReplyImage> {
-    let generate_image_id = builtin_tool_id("generate_image");
-    let mut images = Vec::new();
-
-    for outcome in outcomes {
-        if outcome.tool_id() != generate_image_id {
-            continue;
-        }
-        let Ok(result) = &outcome.result else {
-            continue;
-        };
-        let Some(data) = result.data.as_ref() else {
-            continue;
-        };
-        let Some(image_url) = data.get("image_url").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        match tokio::fs::read(image_url).await {
+    for artifact in artifacts {
+        match tokio::fs::read(&artifact.path).await {
             Ok(bytes) => {
-                let file_name = Path::new(image_url)
+                let file_name = Path::new(&artifact.path)
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or("image.png")
-                    .to_string();
+                    .unwrap_or("image.png").to_string();
                 images.push(BotReplyImage {
-                    prompt: data
-                        .get("prompt")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    prompt: artifact.prompt.clone(),
                     mime_type: image_mime_from_name(&file_name).to_string(),
                     file_name,
                     data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
                 });
             }
             Err(error) => {
-                tracing::error!(
-                    target: "bot::imagegen",
-                    "failed to read image generated by tool: {}",
-                    error
-                );
+                tracing::error!(target: "bot::imagegen", "failed to read generated image: {error}");
+                warnings.push("Kokoro Engine could not read the generated image.".into());
             }
         }
     }
-
     images
 }
 
-async fn attach_generated_images_to_reply(
-    app: &tauri::AppHandle,
-    platform: &str,
-    reply: &mut BotReply,
-) {
-    let images = generate_bot_images(app, platform, &reply.image_prompts).await;
-    let new_images = images
-        .into_iter()
-        .map(bot_reply_image_from_generated)
-        .collect::<Vec<_>>();
-    reply.generated_image_count += new_images.len();
-    reply.images.extend(new_images);
-}
-
 async fn attach_voice_reply_to_webhook(app: &tauri::AppHandle, reply: &mut BotReply) {
+    if reply.reply.is_empty() {
+        return;
+    }
     match synthesize_bot_audio(app, &reply.reply).await {
         Ok(Some(data)) => {
             let (mime_type, extension) = audio_metadata(&data);
@@ -1935,9 +1110,10 @@ async fn attach_voice_reply_to_webhook(app: &tauri::AppHandle, reply: &mut BotRe
                 data_base64: base64::engine::general_purpose::STANDARD.encode(data),
             });
         }
-        Ok(None) => {}
+        Ok(None) => reply.output_warnings.push("TTS returned no audio.".into()),
         Err(error) => {
             tracing::error!(target: "bot::webhook", "failed to synthesize voice reply: {}", error);
+            reply.output_warnings.push("Kokoro Engine could not synthesize the voice reply.".into());
         }
     }
 }
@@ -2099,6 +1275,7 @@ async fn handle_http_bot_request(
 
 #[derive(Debug, Deserialize)]
 struct GenericWebhookMessage {
+    request_id: Option<String>,
     text: Option<String>,
     message: Option<String>,
     image: Option<String>,
@@ -2116,6 +1293,7 @@ struct GenericWebhookMessage {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedGenericWebhookPayload {
+    request_id: Option<String>,
     text: String,
     images: Vec<String>,
     audio: Option<Vec<u8>>,
@@ -2270,7 +1448,12 @@ fn parse_generic_webhook_payload(body: &[u8]) -> Result<ParsedGenericWebhookPayl
         return Err("Missing text or media".to_string());
     }
 
+    let request_id = request.request_id.filter(|id| !id.trim().is_empty());
+    if request_id.as_ref().is_some_and(|id| id.len() > 256) {
+        return Err("request_id must be at most 256 bytes".into());
+    }
     Ok(ParsedGenericWebhookPayload {
+        request_id,
         text,
         images,
         audio,
@@ -2298,58 +1481,8 @@ fn hex_digest(bytes: &[u8]) -> String {
         .join("")
 }
 
-/// Select and hydrate a stable character-owned conversation for a webhook
-/// request before the first message is persisted by the orchestrator.
-async fn prepare_webhook_conversation(
-    orchestrator: &AIOrchestrator,
-    character_id: &str,
-    conversation_key: Option<&str>,
-) -> Result<String, String> {
-    let scoped_key = map_webhook_conversation_to_character(character_id, conversation_key);
-    let mut digest = Sha256::new();
-    digest.update(scoped_key.as_bytes());
-    let conversation_id = format!("webhook-{}", hex_digest(&digest.finalize()));
-
-    sqlx::query(
-        "INSERT OR IGNORE INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, '新对话', '', '{}', ?, ?)",
-    )
-    .bind(&conversation_id)
-    .bind(character_id.trim())
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(&orchestrator.db)
-    .await
-    .map_err(|error| format!("failed to prepare webhook conversation: {error}"))?;
-
-    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
-    )
-    .bind(&conversation_id)
-    .fetch_all(&orchestrator.db)
-    .await
-    .map_err(|error| format!("failed to load webhook conversation: {error}"))?;
-
-    {
-        // 会话切换锁：webhook 会话的历史装载与会话指针写入与删除/加载等路径互斥
-        let _switch_guard = orchestrator.conversation_switch_lock.lock().await;
-        for (role, content, metadata) in rows {
-            orchestrator
-                .push_history_message(crate::ai::context::Message {
-                    role,
-                    content,
-                    metadata: metadata
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
-                })
-                .await;
-        }
-        *orchestrator.current_conversation_id.lock().await = Some(conversation_id.clone());
-        orchestrator.bump_conversation_generation();
-    }
-    Ok(conversation_id)
-}
-
-async fn handle_generic_webhook(
+/// Authenticate, normalize and deliver a webhook chat.
+pub(crate) async fn handle_generic_webhook(
     config: WebhookBotConfig,
     authorization: Option<String>,
     body: bytes::Bytes,
@@ -2396,50 +1529,6 @@ async fn handle_generic_webhook(
         Some(&active_character_id),
     );
 
-    let base_orchestrator = match app.try_state::<AIOrchestrator>() {
-        Some(orchestrator) => orchestrator,
-        None => return server_error("AIOrchestrator not available"),
-    };
-    if base_orchestrator.is_activating() {
-        return json_response(
-            json!({ "error": "Character activation is in progress" }),
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-    }
-    let webhook_orchestrator = base_orchestrator.fork_with_isolated_history().await;
-    let explicit_character_id = parsed
-        .character_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .or(config
-            .character_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty()));
-    match webhook_orchestrator
-        .apply_character_profile(&character_id)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) if explicit_character_id.is_some() => {
-            return bad_request(&format!("Unknown character: {character_id}"));
-        }
-        Ok(false) => {
-            webhook_orchestrator
-                .set_character_id(character_id.clone())
-                .await;
-        }
-        Err(error) => return server_error(&format!("Failed to load character profile: {error}")),
-    }
-    if let Err(error) = prepare_webhook_conversation(
-        &webhook_orchestrator,
-        &character_id,
-        parsed.conversation_key.as_deref(),
-    )
-    .await
-    {
-        return server_error(&error);
-    }
-
     match generate_bot_reply(
         &app,
         "webhook",
@@ -2447,21 +1536,28 @@ async fn handle_generic_webhook(
         parsed.images,
         Some(&character_id),
         parsed.conversation_key.as_deref(),
-        Some(&webhook_orchestrator),
+        parsed.request_id.as_deref(),
     )
     .await
     {
         Ok(mut reply) => {
-            attach_generated_images_to_reply(&app, "webhook", &mut reply).await;
             if config.send_voice_reply {
                 attach_voice_reply_to_webhook(&app, &mut reply).await;
             }
             json_response(json!(reply), StatusCode::OK)
         }
+        Err(KokoroError::Validation(error)) if error.starts_with("chat_request_already_persisted") => {
+            json_response(json!({ "error": error }), StatusCode::CONFLICT)
+        }
+        Err(KokoroError::Validation(error)) => bad_request(&error),
+        Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict") => {
+            json_response(json!({ "error": error }), StatusCode::CONFLICT)
+        }
         Err(error) => {
-            if error.contains("Character activation is in progress") {
+            let error = error.to_string();
+            if error.contains("Character activation is in progress") || error.contains("chat_turn_busy") {
                 json_response(
-                    json!({ "error": "Character activation is in progress" }),
+                    json!({ "error": error }),
                     StatusCode::SERVICE_UNAVAILABLE,
                 )
             } else {
@@ -2628,28 +1724,17 @@ async fn handle_line_webhook(
             image_urls,
             config.character_id.as_deref(),
             user_id.as_deref(),
-            None,
+            message.id.as_deref(),
         )
         .await
         {
-            Ok(mut reply) => {
-                let image_requested =
-                    !reply.image_prompts.is_empty() || reply.generated_image_count > 0;
-                if !reply.image_prompts.is_empty() {
-                    attach_generated_images_to_reply(&app, "line", &mut reply).await;
-                }
+            Ok(reply) => {
                 let mut reply_text = reply_text_with_translation(&reply);
-                if image_requested {
-                    let image_notice = if reply.generated_image_count == 0 {
-                        "Image generation was requested, but Kokoro Engine could not create the image. Please check the Kokoro Engine client."
-                    } else {
-                        "Image generated in Kokoro Engine. Please open the Kokoro Engine client to view it."
-                    };
-                    if reply_text.trim().is_empty() {
-                        reply_text = image_notice.to_string();
-                    } else {
-                        reply_text = format!("{}\n\n{}", reply_text, image_notice);
+                if reply.generated_image_count > 0 {
+                    if !reply_text.is_empty() {
+                        reply_text.push_str("\n\n");
                     }
+                    reply_text.push_str("Image generated in Kokoro Engine. Please open the Kokoro Engine client to view it.");
                 }
                 if let Err(error) = send_line_reply(&access_token, &reply_token, &reply_text).await
                 {
@@ -2658,6 +1743,7 @@ async fn handle_line_webhook(
             }
             Err(error) => {
                 tracing::error!(target: "bot::line", "failed to generate LINE reply: {}", error);
+                let _ = send_line_reply(&access_token, &reply_token, "Kokoro Engine could not complete this chat.").await;
             }
         }
     }
@@ -2981,7 +2067,7 @@ async fn handle_discord_message(
         image_urls,
         cfg.character_id.as_deref(),
         Some(&conversation_key),
-        None,
+        message.get("id").and_then(Value::as_str),
     )
     .await
     {
@@ -3016,23 +2102,7 @@ async fn handle_discord_message(
                     }
                 }
             }
-            let generated_images = generate_bot_images(app, "discord", &reply.image_prompts).await;
-            for image in generated_images {
-                if let Err(error) = send_discord_file_message(
-                    client,
-                    token,
-                    &channel_id,
-                    "",
-                    &image.file_name,
-                    &image.mime_type,
-                    image.data,
-                )
-                .await
-                {
-                    tracing::error!(target: "bot::discord", "failed to send Discord image: {}", error);
-                }
-            }
-            if cfg.send_voice_reply {
+            if cfg.send_voice_reply && !reply.reply.is_empty() {
                 match synthesize_bot_audio(app, &reply.reply).await {
                     Ok(Some(audio)) => {
                         if let Err(error) = send_discord_file_message(
@@ -3049,15 +2119,16 @@ async fn handle_discord_message(
                             tracing::error!(target: "bot::discord", "failed to send Discord voice reply: {}", error);
                         }
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::error!(target: "bot::discord", "failed to synthesize Discord voice reply: {}", error);
+                    outcome => {
+                        tracing::warn!(target: "bot::discord", "Discord voice reply unavailable: {outcome:?}");
+                        let _ = send_discord_message(client, token, &channel_id, "Kokoro Engine could not synthesize the voice reply.").await;
                     }
                 }
             }
         }
         Err(error) => {
             tracing::error!(target: "bot::discord", "failed to generate Discord reply: {}", error);
+            let _ = send_discord_message(client, token, &channel_id, "Kokoro Engine could not complete this chat.").await;
         }
     }
 }
@@ -3269,40 +2340,6 @@ mod tests {
     }
 
     #[test]
-    fn bot_parse_tool_call_tags_supports_explicit_and_short_forms() {
-        let (cleaned, calls) = parse_tool_call_tags(
-            "Hi [TOOL_CALL:store_memory|fact=likes tea] [play_cue|name=smile]",
-        );
-
-        assert_eq!(cleaned, "Hi");
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].name, "store_memory");
-        assert_eq!(
-            calls[0].args.get("fact").map(String::as_str),
-            Some("likes tea")
-        );
-        assert_eq!(calls[1].name, "play_cue");
-        assert_eq!(calls[1].args.get("name").map(String::as_str), Some("smile"));
-    }
-
-    #[test]
-    fn bot_extract_translate_tags_strips_and_returns_translation() {
-        let (cleaned, translation) = extract_translate_tags("Hello [TRANSLATE:こんにちは]");
-
-        assert_eq!(cleaned, "Hello");
-        assert_eq!(translation.as_deref(), Some("こんにちは"));
-    }
-
-    #[test]
-    fn bot_extract_image_prompt_tags_strips_and_collects_prompts() {
-        let (cleaned, prompts) =
-            extract_image_prompt_tags("Here [IMAGE_PROMPT:cat cafe] and [IMAGE_PROMPT: sunset]");
-
-        assert_eq!(cleaned, "Here and");
-        assert_eq!(prompts, vec!["cat cafe", "sunset"]);
-    }
-
-    #[test]
     fn bot_normalize_image_reference_accepts_urls_and_wraps_base64() {
         assert_eq!(
             normalize_image_reference("https://example.com/a.png", "image/png").as_deref(),
@@ -3326,44 +2363,6 @@ mod tests {
         config.allowed_channel_ids = vec!["123".to_string()];
         assert!(discord_message_allowed_by_scope(&config, "123", false));
         assert!(!discord_message_allowed_by_scope(&config, "999", false));
-    }
-
-    #[test]
-    fn bot_strip_control_tags_removes_platform_unsafe_tags() {
-        let cleaned = strip_control_tags(
-            "Hello [ACTION:wave] <emotion>happy</emotion> [IMAGE_PROMPT:cat] world",
-        );
-
-        assert_eq!(cleaned, "Hello  happy  world");
-    }
-
-    #[test]
-    fn bot_cleans_markdown_only_after_tool_rounds_are_merged() {
-        let mut merged = String::new();
-        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            merge_continuation_text(&mut merged, &cleaned);
-        }
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
-
-        merged.clear();
-        for round in ["**[TOOL_CALL:get_time|{}]", "answer**。"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            merge_continuation_text(&mut merged, &cleaned);
-        }
-
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
-
-        merged.clear();
-        for round in ["*[TOOL_CALL:get_time|{}]", "answer*。"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            merge_continuation_text(&mut merged, &cleaned);
-        }
-
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
     }
 
     #[test]

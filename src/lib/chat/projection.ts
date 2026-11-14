@@ -4,6 +4,11 @@ import { buildToolTraceItem, getToolEventStateUpdate, mergeToolTraceItems, strip
 
 export const isActiveTurn = (turn: ChatTurnSnapshot) => ["pending", "accepted", "streaming"].includes(turn.status);
 
+export function turnMatchesView(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
+  return turn.character_id === view.character_id && turn.conversation_id === view.conversation_id
+    && (turn.conversation_generation === undefined || turn.conversation_generation === view.generation);
+}
+
 const replyRevision = (turn: ChatTurnSnapshot) => turn.completion_revision ?? turn.revision;
 
 function isTurnAwaitingHistory(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
@@ -73,7 +78,7 @@ export function findFailurePromptIndex(view: ChatViewSnapshot, messages: readonl
 }
 
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
-  const turns = view.turns.filter(turn => turn.character_id === view.character_id && (!turn.conversation_id || turn.conversation_id === view.conversation_id));
+  const turns = view.turns.filter(turn => turnMatchesView(view, turn));
   const shownFailures = new Set<string>();
   let messages = projectSavedMessages(view).flatMap((message, index, saved) => {
     const scope = message.failureScope;
