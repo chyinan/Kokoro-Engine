@@ -93,7 +93,7 @@ const server = http.createServer(async (request, response) => {
   const hasTextToolFeedback = body.messages?.some(message => message.role === "system" && message.content?.startsWith?.("[Tool results]"));
   if ((name === "text-tool" || name === "text-tool-only") && !hasTextToolFeedback) {
     chunk({ content: "[TOOL_CALL:get_time]" });
-  } else if ((["tool", "native-tool-only"].includes(name) && !call.toolResult) || composerRound === 1) {
+  } else if ((["tool", "native-tool-only", "db-tool-save"].includes(name) && !call.toolResult) || composerRound === 1) {
     if (name !== "native-tool-only") {
       chunk({ content: composerRound === 1 ? "Partial reply before failure. " : "Draft before get_time. " });
     }
@@ -114,6 +114,8 @@ const server = http.createServer(async (request, response) => {
       });
     }
     if (!closed) chunk({ content: " completed." });
+  } else if (name === "db-canonical-output") {
+    chunk({ content: "**Formatted answer**\n\n" + "界".repeat(2300) + "\n\nComplete tail." });
   } else if (!["text-tool-only", "native-tool-only"].includes(name)) {
     const chunks = [`Controlled `, `reply `, `for `, `[case:${name}]`, ` completed.`];
     for (const text of chunks) {

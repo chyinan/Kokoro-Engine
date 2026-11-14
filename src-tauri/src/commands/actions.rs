@@ -427,6 +427,7 @@ fn hook_error_message(error: &KokoroError) -> String {
         | KokoroError::Unauthorized(message)
         | KokoroError::Internal(message)
         | KokoroError::Chat(message)
+        | KokoroError::ChatPersistence(message)
         | KokoroError::Validation(message) => message.clone(),
     }
 }

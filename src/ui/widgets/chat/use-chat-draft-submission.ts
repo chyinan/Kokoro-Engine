@@ -128,6 +128,8 @@ export function useChatDraftSubmission(
         const turn = turns.find(turn => turn.client_request_id === submission.requestId);
         if (turn?.user_message_id != null) {
             finishSubmission(submission.characterId, submission.requestId, true);
+        } else if (turn?.user_save_failed) {
+            finishSubmission(submission.characterId, submission.requestId, false);
         } else if (turn && !isActiveTurn(turn)) {
             reconcileSubmission(submission.characterId, submission.requestId);
         }

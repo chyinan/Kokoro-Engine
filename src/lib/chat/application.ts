@@ -177,6 +177,14 @@ export class ChatApplication {
     if (target) await this.io.cancel(target, reason);
     await this.refresh();
   }
+  async retryPersistence(id: string): Promise<StreamChatResponse> {
+    if (this.view.busy || this.mutation) throw new Error("history_mutation_busy");
+    try {
+      return await bridge.retryChatPersistence(id);
+    } finally {
+      void this.refresh().catch(() => {});
+    }
+  }
   approveTool(id: string) { return bridge.approveToolApproval(id); }
   rejectTool(id: string) { return bridge.rejectToolApproval(id, null); }
   async prepareCharacterSwitch(characterId: string) {

@@ -681,6 +681,7 @@ async fn handle_inbound_message(
         qq_config.character_id.as_deref(),
         Some(&key),
         Some(&session.orchestrator),
+        Some(&message.message_id),
     )
     .await?;
     if reply.trim().is_empty() {

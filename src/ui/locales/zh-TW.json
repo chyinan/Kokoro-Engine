@@ -1128,6 +1128,9 @@
     },
     "chat": {
         "speech_failed": "無法朗讀這則回覆：{{error}}",
+        "persistence_failed": "無法將這輪對話儲存至資料庫。",
+        "reply_unfinished": "未完成的回覆",
+        "retry_save": "重試儲存",
         "status": {
             "streaming": "生成中",
             "chat": "對話"

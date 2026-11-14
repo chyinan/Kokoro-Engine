@@ -1128,6 +1128,9 @@
     },
     "chat": {
         "speech_failed": "この返信を読み上げられませんでした：{{error}}",
+        "persistence_failed": "チャットをデータベースに保存できませんでした。",
+        "reply_unfinished": "未完了の返信",
+        "retry_save": "保存を再試行",
         "status": {
             "streaming": "生成中",
             "chat": "チャット"

@@ -130,6 +130,7 @@ interface MemoizedChatMessageProps {
     onToggleTranslation: (index: number) => void;
     onEdit: (target: ChatMessageTarget, newText: string) => void;
     onRegenerate: (target: ChatMessageTarget) => Promise<void>;
+    onRetryPersistence: (requestId: string) => Promise<void>;
     onContinueFrom: (target: ChatMessageTarget) => Promise<void>;
     onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
     onRejectTool: (index: number, tool: ToolTraceItem) => Promise<void>;
@@ -146,21 +147,27 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
     message, conversationId, generation, historyRevision, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
-    onPreviewImage,
+    onPreviewImage, onRetryPersistence,
 }: MemoizedChatMessageProps) {
+    const { t } = useTranslation();
     const target = conversationId !== null && message.id !== undefined
         ? { conversationId, generation, messageId: message.id }
         : undefined;
-    const editableTarget = message.failureScope ? undefined : target;
-    const retryTarget = target && (!message.failureScope || message.canRetryFailure)
+    const editableTarget = message.failureScope || message.unfinished ? undefined : target;
+    const retryTarget = target && !message.unfinished && (!message.failureScope || message.canRetryFailure)
         ? { ...target, historyRevision }
         : undefined;
+    const persistenceRequestId = message.canRetryPersistence ? message.clientRequestId : undefined;
     const isPresent = useIsPresent();
     const announceFailure = useFailureAnnouncement(isPresent && message.failureScope ? message.clientRequestId : undefined);
     if (message.failureScope && !isPresent) return null;
     return (
         <ChatMessage
-            message={message.failureScope ? { ...message, announceError: announceFailure } : message}
+            message={message.failureScope ? {
+                ...message,
+                announceError: announceFailure,
+                text: message.persistenceFailure ? t("chat.persistence_failed") : message.text,
+            } : message}
             index={globalIndex}
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
@@ -168,6 +175,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             editScope={editableTarget ? JSON.stringify([editableTarget.conversationId, editableTarget.generation, editableTarget.messageId]) : undefined}
             onEdit={editableTarget ? text => onEdit(editableTarget, text) : undefined}
             onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
+            onRetryPersistence={persistenceRequestId ? () => onRetryPersistence(persistenceRequestId) : undefined}
             onContinueFrom={editableTarget ? () => onContinueFrom({ ...editableTarget, historyRevision }) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
@@ -289,7 +297,10 @@ export default function ChatPanel({
     const dragCounterRef = useRef(0);
     const [error, setError] = useState<string | ChatRequestError | null>(null);
     const currentSelection = { characterId: activeCharacterId, conversationId: activeConversationId, generation: view.generation };
-    const requestError = error && typeof error !== "string" && !isSwitchingConversation && sameChatSelection(error, currentSelection) ? error : null;
+    const requestError = error && typeof error !== "string" && !isSwitchingConversation
+        && sameChatSelection(error, currentSelection)
+        && !projectedMessages.some(message => message.clientRequestId === error.requestId && message.persistenceFailure)
+        ? error : null;
     const [unreadCount, setUnreadCount] = useState(0);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -343,8 +354,12 @@ export default function ChatPanel({
     }, []);
 
     const reportError = useCallback((error: unknown) => setError(getAsyncErrorMessage(error)), []);
-    const reportRequestError = useCallback((error: unknown, requestId: string, origin: ChatErrorSelection) => {
+    const reportRequestError = useCallback(async (error: unknown, requestId: string, origin: ChatErrorSelection) => {
+        // A terminal backend result can arrive just before its diagnostic row
+        // reaches this panel. Let the inline error take the announcement first.
+        await chatApplication.refresh().catch(() => {});
         const current = chatApplication.getSnapshot();
+        if (projectMessages(current).some(message => message.clientRequestId === requestId && message.failureScope)) return;
         const selected = { characterId: current.character_id, conversationId: current.conversation_id, generation: current.generation };
         const turn = current.turns.find(turn => turn.client_request_id === requestId);
         // A first send may create the selected conversation while it is in flight.
@@ -393,7 +408,7 @@ export default function ChatPanel({
         submittingRef.current = true;
         try {
             const response = await chatApplication.send({
-                message: draftText.trim() || "(image attached)",
+                message: draftText.trim() ? draftText : "(image attached)",
                 images: draftImages.length ? draftImages : undefined, camera_frame: camera ?? undefined,
                 client_request_id: clientRequestId, character_id: character,
                 conversation_id: origin.conversationId ?? undefined,
@@ -402,7 +417,9 @@ export default function ChatPanel({
             });
             if (response.user_message_id != null) finishSubmission(character, clientRequestId, true);
         } catch (error) {
-            reportRequestError(error, clientRequestId, origin);
+            const failed = chatApplication.getSnapshot().turns.find(turn => turn.client_request_id === clientRequestId);
+            if (failed?.user_save_failed) finishSubmission(character, clientRequestId, false);
+            void reportRequestError(error, clientRequestId, origin);
         } finally {
             reconcileSubmission(character, clientRequestId);
             submittingRef.current = false;
@@ -911,8 +928,12 @@ export default function ChatPanel({
                 client_request_id: requestId,
                 allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
             });
-        } catch (error) { reportRequestError(error, requestId, origin); }
+        } catch (error) { void reportRequestError(error, requestId, origin); }
     }, [reportRequestError]);
+    const onRetryPersistence = useCallback(async (requestId: string) => {
+        try { await chatApplication.retryPersistence(requestId); }
+        catch (error) { reportError(error); }
+    }, [reportError]);
     const onContinueFrom = useCallback(async (target: ChatMessageTarget) => {
         try {
             await chatApplication.continueFrom(target);
@@ -1320,6 +1341,7 @@ export default function ChatPanel({
                                 onToggleTranslation={onToggleTranslation}
                                 onEdit={onEdit}
                                 onRegenerate={onRegenerate}
+                                onRetryPersistence={onRetryPersistence}
                                 onContinueFrom={onContinueFrom}
                                 onApproveTool={onApproveTool}
                                 onRejectTool={onRejectTool}

@@ -15,6 +15,7 @@ interface ChatMessageProps {
         translationPending?: boolean;
         isError?: boolean;
         announceError?: boolean;
+        unfinished?: boolean;
         speechError?: string;
         tools?: ToolTraceItem[];
         capturedAt?: string;
@@ -28,6 +29,7 @@ interface ChatMessageProps {
     editScope?: string;
     onEdit?: (newText: string) => void;
     onRegenerate?: () => void;
+    onRetryPersistence?: () => Promise<void>;
     onContinueFrom?: () => void;
     onApproveTool: (tool: ToolTraceItem) => void;
     onRejectTool: (tool: ToolTraceItem) => void;
@@ -177,6 +179,7 @@ export const ChatMessage = memo(function ChatMessage({
     editScope,
     onEdit,
     onRegenerate,
+    onRetryPersistence,
     onContinueFrom,
     onApproveTool,
     onRejectTool,
@@ -186,6 +189,7 @@ export const ChatMessage = memo(function ChatMessage({
     const [editingScope, setEditingScope] = useState<string>();
     const [editingText, setEditingText] = useState("");
     const [toolsExpanded, setToolsExpanded] = useState(false);
+    const [retryingSave, setRetryingSave] = useState(false);
     const isEditing = editScope !== undefined && editingScope === editScope;
     const announceError = msg.announceError ?? msg.isError;
 
@@ -383,6 +387,24 @@ export const ChatMessage = memo(function ChatMessage({
                         {t("chat.speech_failed", { error: msg.speechError })}
                     </span>
                 </div>
+            )}
+
+            {msg.unfinished && (
+                <p className="mt-2 text-xs text-slate-400">{t("chat.reply_unfinished")}</p>
+            )}
+            {onRetryPersistence && (
+                <button
+                    type="button"
+                    disabled={isStreaming || retryingSave}
+                    onClick={async () => {
+                        setRetryingSave(true);
+                        try { await onRetryPersistence(); }
+                        finally { setRetryingSave(false); }
+                    }}
+                    className="mt-2 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-slate-700/90 disabled:opacity-50"
+                >
+                    {t("chat.retry_save")}
+                </button>
             )}
 
             {!isEditing && msg.role === "kokoro" && msg.translationPending && !msg.translation && (
