@@ -5,8 +5,18 @@ import { act, createElement, forwardRef } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import ChatPanel from "../ChatPanel";
-import * as bridge from "../../../lib/kokoro-bridge";
-import { loadSavedCharacterDraft } from "./chat-draft-layout";
+import { chatViewFixture as chat } from "../../../lib/chat/view-test-fixture";
+import { recoverChatDraftSubmission, type ChatDraftSubmissionStatus } from "../../../lib/kokoro-bridge";
+import { deferred, turn } from "../../../lib/chat/__tests__/harness";
+import { setLatestCameraFrame } from "../../../lib/camera-frame-cache";
+import { listen } from "@tauri-apps/api/event";
+vi.mock("../../../lib/chat/application", async () => ({ chatApplication: (await import("../../../lib/chat/view-test-fixture")).chatViewFixture }));
+vi.mock("../../../lib/kokoro-bridge", async original => ({
+    ...(await original<typeof import("../../../lib/kokoro-bridge")>()),
+    setVisionTextInputFocused: vi.fn(async () => {}),
+    recoverChatDraftSubmission: vi.fn(),
+}));
+import { loadSavedCharacterDraft, loadSavedCharacterDraftImages, saveCharacterDraft, saveCharacterDraftImages } from "./chat-draft-layout";
 
 // Mock framer-motion
 vi.mock("framer-motion", () => ({
@@ -25,6 +35,7 @@ vi.mock("framer-motion", () => ({
         }),
     },
     AnimatePresence: ({ children }: any) => children,
+    useIsPresent: () => true,
 }));
 
 // Mock react-i18next
@@ -35,6 +46,7 @@ vi.mock("react-i18next", () => ({
 let capturedOnFinalTranscription: ((text: string) => void) | null = null;
 let capturedOnWakeWordDetected: ((text?: string) => void) | null = null;
 let voiceInputState = "idle";
+const startVoice = vi.fn();
 
 // Mock hooks
 vi.mock("../../hooks", () => ({
@@ -45,7 +57,7 @@ vi.mock("../../hooks", () => ({
             state: voiceInputState,
             volume: 0,
             partialText: "",
-            start: vi.fn(),
+            start: startVoice,
             stop: vi.fn(),
         };
     },
@@ -73,430 +85,253 @@ vi.mock("../../../core/services", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-describe("ChatPanel STT session switch draft preservation", () => {
+describe("ChatPanel draft preservation", () => {
     let container: HTMLDivElement;
     let root: ReturnType<typeof createRoot>;
-    let streamChatMock: ReturnType<typeof vi.fn>;
-
-    beforeEach(() => {
-        vi.clearAllMocks();
-        localStorage.clear();
-        sessionStorage.clear();
-        localStorage.setItem("kokoro_active_character_id", "char-1");
+    beforeEach(async () => {
+        vi.clearAllMocks(); chat.reset(); localStorage.clear(); sessionStorage.clear();
+        vi.mocked(recoverChatDraftSubmission).mockReset().mockResolvedValue("unsent");
         localStorage.setItem("kokoro_stt_enabled", "true");
         localStorage.setItem("kokoro_stt_auto_send", "true");
-
-        capturedOnFinalTranscription = null;
-        capturedOnWakeWordDetected = null;
-        voiceInputState = "idle";
-        streamChatMock = vi.fn(async () => ({ status: "completed" }));
-
-        vi.spyOn(bridge, "streamChat").mockImplementation(streamChatMock as any);
-        vi.spyOn(bridge, "loadConversation").mockImplementation(async (id: string) => ({
-            id,
-            character_id: "char-1",
-            title: `Conversation ${id}`,
-            topic: "",
-            pinned_state: "{}",
-            created_at: "2026-01-01T00:00:00Z",
-            updated_at: "2026-01-01T00:00:00Z",
-            messages: [],
-        }) as any);
-        vi.spyOn(bridge, "listConversations").mockImplementation(async () => [
-            {
-                id: "conv-1",
-                character_id: "char-1",
-                title: "Conversation 1",
-                topic: "",
-                pinned_state: "{}",
-                created_at: "2026-01-01T00:00:00Z",
-                updated_at: "2026-01-01T00:00:00Z",
-                messages: [],
-            },
-            {
-                id: "conv-2",
-                character_id: "char-1",
-                title: "Conversation 2",
-                topic: "",
-                pinned_state: "{}",
-                created_at: "2026-01-01T00:00:00Z",
-                updated_at: "2026-01-01T00:00:00Z",
-                messages: [],
-            },
-        ] as any);
-        vi.spyOn(bridge, "listCharacters").mockImplementation(async () => [
-            { id: "char-1", name: "Character 1", user_nickname: "User", persona: "", source_format: "manual", created_at: 0, updated_at: 0 },
-            { id: "char-2", name: "Character 2", user_nickname: "User", persona: "", source_format: "manual", created_at: 0, updated_at: 0 },
-        ] as any);
-        vi.spyOn(bridge, "setVisionTextInputFocused").mockImplementation(async () => undefined);
-        vi.spyOn(bridge, "synthesize").mockImplementation(async () => undefined);
-        vi.spyOn(bridge, "onChatTurnStart").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatTurnDelta").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatTurnFinish").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatTurnTextComplete").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatError").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatWarning").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatFailure").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatTurnTranslation").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onChatTurnTool").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onTelegramChatSync").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "onVisionObservation").mockImplementation(() => Promise.resolve(() => {}));
-        vi.spyOn(bridge, "cancelChatTurn").mockImplementation(async () => undefined);
-
-        container = document.createElement("div");
-        document.body.appendChild(container);
-        root = createRoot(container);
+        capturedOnFinalTranscription = null; capturedOnWakeWordDetected = null; voiceInputState = "idle";
+        container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+        await act(async () => root.render(createElement(ChatPanel)));
     });
+    afterEach(() => { setLatestCameraFrame(null); act(() => root.unmount()); vi.useRealTimers(); container.remove(); });
+    function record() {
+        const mic = container.querySelector<HTMLButtonElement>('button[aria-label="chat.input.mic.title.idle"]');
+        expect(mic).not.toBeNull(); act(() => mic!.click());
+    }
+    async function finish(text: string) { await act(async () => capturedOnFinalTranscription?.(text)); }
+    it("starts voice interrupt recognition only when idle with STT and auto-send enabled", async () => {
+        const listener = vi.mocked(listen).mock.calls.find(([name]) => name === "voice-interrupt-stt")?.[1];
+        expect(listener).toBeDefined();
+        const interrupt = () => act(() => listener!({ event: "voice-interrupt-stt", id: 1, payload: undefined }));
 
-    afterEach(() => {
-        act(() => {
-            root.unmount();
-        });
-        container.remove();
-        vi.restoreAllMocks();
-    });
-
-    it("preserves STT transcription in input and character draft when switching conversation for the same character", async () => {
-        let memoryStatusResolve: ((value: any) => void) | null = null;
-        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(() => {
-            return new Promise((resolve) => {
-                memoryStatusResolve = resolve;
-            });
-        });
-
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        expect(capturedOnFinalTranscription).toBeTypeOf("function");
-
-        // User speaks and STT produces final transcription
-        act(() => {
-            capturedOnFinalTranscription!("Hello transcribed text for conv-1");
-        });
-
-        // While ensureMemoryModelReady is waiting, user switches conversation for char-1 (from conv-1 to conv-2)
-        await act(async () => {
-            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-                detail: {
-                    runtime: { character_id: "char-1", character_name: "Character 1" },
-                    target_conversation_id: "conv-2",
-                },
-            }));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // Now memory check finishes
-        await act(async () => {
-            memoryStatusResolve?.({ installed: true });
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // Stream chat MUST NOT have been called because session changed
-        expect(streamChatMock).not.toHaveBeenCalled();
-
-        // But STT text MUST be preserved in input box and character draft
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        expect(textarea.value).toBe("Hello transcribed text for conv-1");
-
-        const savedDraft = loadSavedCharacterDraft("char-1");
-        expect(savedDraft).toBe("Hello transcribed text for conv-1");
-    });
-
-    it("preserves STT transcription in original character draft when switching to a different character", async () => {
-        let memoryStatusResolve: ((value: any) => void) | null = null;
-        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(() => {
-            return new Promise((resolve) => {
-                memoryStatusResolve = resolve;
-            });
-        });
-
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        expect(capturedOnFinalTranscription).toBeTypeOf("function");
-
-        // User speaks on char-1
-        act(() => {
-            capturedOnFinalTranscription!("Speech intended for char-1");
-        });
-
-        // User switches to char-2 while async memory check is in progress
-        await act(async () => {
-            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-                detail: {
-                    runtime: { character_id: "char-2", character_name: "Character 2" },
-                    target_conversation_id: "conv-char2",
-                },
-            }));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // Memory check resolves
-        await act(async () => {
-            memoryStatusResolve?.({ installed: true });
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // Must not call streamChat
-        expect(streamChatMock).not.toHaveBeenCalled();
-
-        // char-1's draft storage MUST contain the transcribed text
-        expect(loadSavedCharacterDraft("char-1")).toBe("Speech intended for char-1");
-
-        // char-2's input must NOT be polluted with char-1's text
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        expect(textarea.value).toBe("");
-    });
-
-    it("isolates non-auto-send transcription to original character draft when switching character during speech", async () => {
         localStorage.setItem("kokoro_stt_auto_send", "false");
+        interrupt();
+        expect(startVoice).not.toHaveBeenCalled();
 
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
+        localStorage.setItem("kokoro_stt_auto_send", "true");
+        localStorage.setItem("kokoro_stt_enabled", "false");
+        interrupt();
+        expect(startVoice).not.toHaveBeenCalled();
+
+        localStorage.setItem("kokoro_stt_enabled", "true");
+        await act(async () => chat.set({ busy: true }));
+        interrupt();
+        expect(startVoice).not.toHaveBeenCalled();
+
+        await act(async () => chat.set({ busy: false }));
+        interrupt();
+        expect(startVoice).toHaveBeenCalledExactlyOnceWith({
+            autoStopOnSilence: true,
+            voiceInterrupt: { isAllowed: expect.any(Function), onStarted: expect.any(Function) },
         });
-
-        // Mic toggle starts listening on char-1
-        const micBtn = container.querySelector('button[title="chat.input.mic.title.idle"]') as HTMLButtonElement;
-        expect(micBtn).not.toBeNull();
-        await act(async () => {
-            micBtn.click();
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // User switches to char-2 while recording
-        await act(async () => {
-            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-                detail: {
-                    runtime: { character_id: "char-2", character_name: "Character 2" },
-                    target_conversation_id: "conv-char2",
-                },
-            }));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // Transcription finishes for char-1's speech
-        await act(async () => {
-            capturedOnFinalTranscription!("Manual review speech for char-1");
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // Must be saved to char-1's draft, NOT char-2's input
-        expect(loadSavedCharacterDraft("char-1")).toBe("Manual review speech for char-1");
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        expect(textarea.value).toBe("");
+        const { isAllowed } = startVoice.mock.lastCall![0].voiceInterrupt;
+        expect(isAllowed()).toBe(true);
+        localStorage.setItem("kokoro_stt_auto_send", "false");
+        expect(isAllowed()).toBe(false);
     });
-
-    it("restores base draft correctly on empty transcription", async () => {
+    const draftText = "  draft with an image  ";
+    const draftImage = "data:image/png;base64,iVBORw0KGgo=";
+    async function loadImageDraft() {
+        saveCharacterDraft("draft-character", draftText);
+        saveCharacterDraftImages("draft-character", [draftImage]);
+        localStorage.setItem("kokoro_vision_enabled", "true");
         await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
+            chat.set({ character_id: "draft-character" });
+            window.dispatchEvent(new Event("kokoro-vision-settings-changed"));
         });
-
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        await act(async () => {
-            textarea.value = "Pre-existing draft";
-            textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        });
-
-        // Mic toggle starts listening and captures base draft
-        const micBtn = container.querySelector('button[title="chat.voiceInput"]') as HTMLButtonElement;
-        if (micBtn) {
-            act(() => {
-                micBtn.click();
-            });
-        }
-
-        // Empty transcription arrives
-        await act(async () => {
-            capturedOnFinalTranscription!("   ");
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        expect(textarea.value).toBe("Pre-existing draft");
+    }
+    async function send() {
+        const button = container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]');
+        expect(button).not.toBeNull();
+        await act(async () => button!.click());
+    }
+    it("keeps the unsent text and image when another window wins admission", async () => {
+        await loadImageDraft();
+        chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: A chat turn is already in progress" });
+        await send();
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: draftText.trim(), images: [draftImage] }));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
+        expect(loadSavedCharacterDraft("draft-character")).toBe(draftText);
+        expect(loadSavedCharacterDraftImages("draft-character")).toEqual([draftImage]);
     });
-
-    it("does not auto-send to new conversation when switching conversation for same character during mic recording", async () => {
-        let memoryStatusResolve: ((value: any) => void) | null = null;
-        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(() => {
-            return new Promise((resolve) => {
-                memoryStatusResolve = resolve;
-            });
-        });
-
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 1. User is on conv-1. Click mic to start recording
-        const micBtn = container.querySelector('button[title="chat.input.mic.title.idle"]') as HTMLButtonElement;
-        expect(micBtn).not.toBeNull();
-        await act(async () => {
-            micBtn.click();
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 2. WHILE recording is active, user switches to conv-2 for the same character
-        await act(async () => {
-            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-                detail: {
-                    runtime: { character_id: "char-1", character_name: "Character 1" },
-                    target_conversation_id: "conv-2",
-                },
-            }));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 3. User finishes speaking; final transcription arrives
-        await act(async () => {
-            capturedOnFinalTranscription!("Speech recorded while on conv-1");
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 4. Memory check resolves
-        await act(async () => {
-            memoryStatusResolve?.({ installed: true });
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // MUST NOT call streamChat because conversation was switched during recording!
-        expect(streamChatMock).not.toHaveBeenCalled();
-
-        // But STT text MUST be preserved in input box and character draft
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        expect(textarea.value).toBe("Speech recorded while on conv-1");
-        expect(loadSavedCharacterDraft("char-1")).toBe("Speech recorded while on conv-1");
+    it("sends the automatic camera frame separately from the selected image", async () => {
+        await loadImageDraft();
+        const cameraFrame = "data:image/jpeg;base64,Y2FtZXJh";
+        setLatestCameraFrame(cameraFrame);
+        await send();
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ images: [draftImage], camera_frame: cameraFrame }));
     });
+    it("drops a cached camera frame when vision is disabled before the settings notification", async () => {
+        await loadImageDraft();
+        setLatestCameraFrame("data:image/jpeg;base64,Y2FtZXJh");
+        localStorage.setItem("kokoro_vision_enabled", "false");
 
-    it("does not auto-send when switching conversation for same character during wake-word recording", async () => {
-        let memoryStatusResolve: ((value: any) => void) | null = null;
-        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockImplementation(() => {
-            return new Promise((resolve) => {
-                memoryStatusResolve = resolve;
-            });
-        });
+        await send();
 
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        expect(capturedOnWakeWordDetected).toBeTypeOf("function");
-
-        // 1. Wake word detected while on conv-1, starts recording
-        await act(async () => {
-            capturedOnWakeWordDetected!();
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 2. While recording, user switches to conv-2 for the same character
-        await act(async () => {
-            window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-                detail: {
-                    runtime: { character_id: "char-1", character_name: "Character 1" },
-                    target_conversation_id: "conv-2",
-                },
-            }));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 3. Speech completes and final transcription arrives
-        await act(async () => {
-            capturedOnFinalTranscription!("Wake-word speech from conv-1");
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // 4. Memory check resolves
-        await act(async () => {
-            memoryStatusResolve?.({ installed: true });
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        // MUST NOT call streamChat because session changed!
-        expect(streamChatMock).not.toHaveBeenCalled();
-
-        // Preserved in input and draft
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        expect(textarea.value).toBe("Wake-word speech from conv-1");
-        expect(loadSavedCharacterDraft("char-1")).toBe("Wake-word speech from conv-1");
-    });
-
-    it("keeps STT transcription as a draft while Continue is deleting history", async () => {
-        let finishDelete: (() => void) | null = null;
-        vi.mocked(bridge.loadConversation).mockResolvedValueOnce({
-            id: "conv-1",
-            character_id: "char-1",
-            title: "Conversation 1",
-            topic: "",
-            pinned_state: "{}",
-            created_at: "2026-09-23",
-            updated_at: "2026-09-23",
-            messages: [
-                { id: 501, role: "user", content: "first question", created_at: "2026-09-23" },
-                { id: 502, role: "assistant", content: "first answer", created_at: "2026-09-23" },
-                { id: 503, role: "user", content: "second question", created_at: "2026-09-23" },
-                { id: 504, role: "assistant", content: "second answer", created_at: "2026-09-23" },
-            ],
-        } as any);
-        vi.spyOn(bridge, "deleteLastMessages").mockImplementation(() => new Promise(resolve => {
-            finishDelete = resolve;
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
+            message: draftText.trim(), images: undefined, camera_frame: undefined,
         }));
-
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 8; i++) await Promise.resolve();
-        });
-
-        const continueButton = container.querySelector<HTMLButtonElement>(
-            'button[title="chat.actions.continue_from"]',
-        );
-        await act(async () => continueButton?.click());
-        expect(bridge.deleteLastMessages).toHaveBeenCalledOnce();
-
-        await act(async () => {
-            capturedOnFinalTranscription!("Keep this STT draft");
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
-
-        const textarea = container.querySelector('textarea[data-onboarding-id="chat-input"]') as HTMLTextAreaElement;
-        expect(streamChatMock).not.toHaveBeenCalled();
-        expect(textarea.value).toBe("Keep this STT draft");
-
-        await act(async () => finishDelete?.());
     });
+    it("clears a submitted draft at persistence, before the generation finishes", async () => {
+        await loadImageDraft();
+        const response = deferred<Awaited<ReturnType<typeof chat.send>>>();
+        chat.send.mockImplementationOnce(() => response.promise);
+        await send();
+        const requestId = chat.send.mock.lastCall?.[0].client_request_id;
+        expect(requestId).toBeTruthy();
+        const accepted = { ...turn(requestId!, 2, "accepted"), character_id: "draft-character", conversation_id: "conv-1", user_message_id: null, images: [draftImage] };
+        await act(async () => chat.set({ revision: 2, busy: true, turns: [accepted] }));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        await act(async () => chat.set({ revision: 3, turns: [{ ...accepted, revision: 3, user_message_id: 10 }] }));
+        expect(container.querySelector("textarea")?.value).toBe("");
+        expect(loadSavedCharacterDraftImages("draft-character")).toEqual([]);
+        await act(async () => response.resolve({ conversation_id: "conv-1", status: "completed", text: "reply" }));
+    });
+    async function closeWhileSending() {
+        await loadImageDraft();
+        chat.send.mockReturnValueOnce(new Promise(() => {}));
+        await send();
+        const requestId = chat.send.mock.lastCall?.[0].client_request_id;
+        expect(requestId).toBeTruthy();
+        act(() => root.unmount());
+        root = createRoot(container);
+        return requestId!;
+    }
+    it("does not restore a sent draft when a new window starts with only the saved user row", async () => {
+        const requestId = await closeWhileSending();
+        sessionStorage.clear();
+        chat.set({ turns: [], messages: [{ id: 10, role: "user", content: draftText.trim(), created_at: "now" }] });
+        const recovery = deferred<ChatDraftSubmissionStatus>();
+        vi.mocked(recoverChatDraftSubmission).mockReturnValueOnce(recovery.promise);
 
-    it("auto-sends correctly when conversation does not switch during mic recording", async () => {
-        vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({ installed: true } as any);
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(recoverChatDraftSubmission).toHaveBeenCalledWith("draft-character", requestId);
+        expect(container.querySelector("textarea")?.value).toBe("");
+        await act(async () => recovery.resolve("persisted"));
+        expect(container.querySelector("textarea")?.value).toBe("");
+        expect(loadSavedCharacterDraft("draft-character")).toBe("");
+        expect(chat.send).toHaveBeenCalledOnce();
+    });
+    it("clears the sent attachment when the reopened window sees the request bind", async () => {
+        const requestId = await closeWhileSending();
+        vi.mocked(recoverChatDraftSubmission).mockResolvedValueOnce("pending");
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(container.querySelector("textarea")?.value).toBe("");
+        expect(container.querySelector('img[alt="pending"]')).toBeNull();
 
-        await act(async () => {
-            root.render(createElement(ChatPanel));
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
+        await act(async () => chat.set({ turns: [{ ...turn(requestId, 3), character_id: "draft-character", user_message_id: 10 }] }));
+        expect(loadSavedCharacterDraft("draft-character")).toBe("");
+        expect(loadSavedCharacterDraftImages("draft-character")).toEqual([]);
+    });
+    it("keeps a newer draft and attachment when recovering a submitted draft", async () => {
+        await closeWhileSending();
+        const newImage = "data:image/png;base64,bmV3";
+        saveCharacterDraft("draft-character", "new unsent text");
+        saveCharacterDraftImages("draft-character", [draftImage, newImage]);
+        vi.mocked(recoverChatDraftSubmission).mockResolvedValueOnce("persisted");
 
-        // Click mic to record
-        const micBtn = container.querySelector('button[title="chat.input.mic.title.idle"]') as HTMLButtonElement;
-        await act(async () => {
-            micBtn.click();
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(container.querySelector("textarea")?.value).toBe("new unsent text");
+        expect(loadSavedCharacterDraftImages("draft-character")).toEqual([newImage]);
+    });
+    it("restores a submitted draft if its request ends before saving the user message", async () => {
+        const requestId = await closeWhileSending();
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        vi.mocked(recoverChatDraftSubmission).mockResolvedValueOnce("pending");
+        await act(async () => root.render(createElement(ChatPanel)));
 
-        // Final transcription arrives without any conversation switch
-        await act(async () => {
-            capturedOnFinalTranscription!("Send this message");
-            for (let i = 0; i < 5; i++) await Promise.resolve();
-        });
+        await act(async () => chat.set({ turns: [{ ...turn(requestId, 3, "error"), character_id: "draft-character", user_message_id: null }] }));
+        await act(async () => vi.advanceTimersByTimeAsync(750));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
+    });
+    it("clears an unsent marker before allowing the recovered draft to be submitted again", async () => {
+        const requestId = await closeWhileSending();
+        const recovery = deferred<ChatDraftSubmissionStatus>();
+        vi.mocked(recoverChatDraftSubmission).mockReturnValueOnce(recovery.promise);
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(container.querySelector("textarea")?.disabled).toBe(true);
+        expect(chat.send).toHaveBeenCalledOnce();
 
-        expect(streamChatMock).toHaveBeenCalledTimes(1);
-        expect(streamChatMock).toHaveBeenCalledWith(
-            expect.objectContaining({
-                message: "Send this message",
-                conversation_id: "conv-1",
-            })
-        );
+        await act(async () => recovery.resolve("unsent"));
+        expect(container.querySelector("textarea")?.value).toBe(draftText);
+        expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
+        expect(localStorage.getItem("kokoro_chat_submission_draft-character")).toBeNull();
+        expect(sessionStorage.getItem("kokoro_chat_submission_draft-character")).toBeNull();
+        await act(async () => root.unmount());
+        root = createRoot(container);
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(recoverChatDraftSubmission).toHaveBeenCalledExactlyOnceWith("draft-character", requestId);
+        expect(container.querySelector("textarea")?.disabled).toBe(false);
+
+        await send();
+        expect(chat.send).toHaveBeenCalledTimes(2);
+        expect(chat.send.mock.lastCall?.[0].client_request_id).not.toBe(requestId);
+    });
+    it("keeps the composer blocked through a failed lookup and recovers persistence without a turn event", async () => {
+        await closeWhileSending();
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        vi.mocked(recoverChatDraftSubmission)
+            .mockRejectedValueOnce(new Error("database temporarily unavailable"))
+            .mockResolvedValueOnce("pending")
+            .mockResolvedValueOnce("persisted");
+        await act(async () => root.render(createElement(ChatPanel)));
+        expect(container.querySelector("textarea")?.disabled).toBe(true);
+        await act(async () => vi.advanceTimersByTimeAsync(750));
+        expect(container.querySelector("textarea")?.disabled).toBe(true);
+        await act(async () => vi.advanceTimersByTimeAsync(750));
+        expect(container.querySelector("textarea")?.disabled).toBe(false);
+        expect(loadSavedCharacterDraft("draft-character")).toBe("");
+        expect(chat.send).toHaveBeenCalledOnce();
+    });
+    it("auto-sends through the application when the recording session stays current", async () => {
+        record(); await finish("spoken words");
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: "spoken words", character_id: "char-1", conversation_id: "conv-1" }));
+    });
+    it("keeps an auto-sent transcription in the input if admission fails", async () => {
+        chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+        record(); await finish("spoken words");
+        expect(container.querySelector("textarea")?.value).toBe("spoken words");
+        expect(loadSavedCharacterDraft("char-1")).toBe("spoken words");
+    });
+    it.each(["conv-2", null])("preserves transcription and its saved draft after same-character switch to %s", async conversation_id => {
+        record(); await act(async () => chat.set({ conversation_id, generation: 2 })); await finish("belongs to the old session");
+        expect(chat.send).not.toHaveBeenCalled();
+        expect(container.querySelector("textarea")?.value).toBe("belongs to the old session");
+        expect(loadSavedCharacterDraft("char-1")).toBe("belongs to the old session");
+    });
+    it("preserves the old character draft and does not populate the new character", async () => {
+        record(); await act(async () => chat.set({ character_id: "char-2", conversation_id: "conv-2", generation: 2 })); await finish("char one speech");
+        expect(chat.send).not.toHaveBeenCalled();
+        expect(loadSavedCharacterDraft("char-1")).toBe("char one speech");
+        expect(container.querySelector("textarea")?.value).toBe("");
+    });
+    it("protects A to B to A using generation even when IDs match again", async () => {
+        record(); await act(async () => chat.set({ generation: 3 })); await finish("old generation");
+        expect(chat.send).not.toHaveBeenCalled(); expect(loadSavedCharacterDraft("char-1")).toBe("old generation");
+    });
+    it("keeps transcription as a draft while a history mutation is busy", async () => {
+        record(); await act(async () => chat.set({ busy: true })); await finish("during deletion");
+        expect(chat.send).not.toHaveBeenCalled(); expect(loadSavedCharacterDraft("char-1")).toBe("during deletion");
+    });
+    it("keeps manual-review speech as a saved draft", async () => {
+        localStorage.setItem("kokoro_stt_auto_send", "false");
+        await act(async () => window.dispatchEvent(new Event("kokoro-stt-settings-changed")));
+        record(); await finish("review me"); expect(chat.send).not.toHaveBeenCalled();
+        expect(loadSavedCharacterDraft("char-1")).toBe("review me");
+    });
+    it("wake-word recording captures the original session", async () => {
+        await act(async () => capturedOnWakeWordDetected?.());
+        await act(async () => chat.set({ conversation_id: "conv-2", generation: 2 }));
+        await finish("wake speech"); expect(chat.send).not.toHaveBeenCalled();
+        expect(loadSavedCharacterDraft("char-1")).toBe("wake speech");
+    });
+    it("empty transcription restores the draft without submitting", async () => {
+        record(); await finish("   "); expect(chat.send).not.toHaveBeenCalled();
     });
 });

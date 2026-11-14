@@ -122,17 +122,24 @@ pub struct LocalTtsPreset {
 
 #[async_trait]
 pub trait ActivationRuntimeBackend: Send + Sync {
+    #[must_use = "await or poll this future to capture the current character runtime"]
     async fn snapshot(&self) -> Result<BackendRuntimeSnapshot, KokoroError>;
+    #[must_use = "await or poll this future to apply the prepared character runtime"]
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
+    #[must_use = "await or poll this future to restore the previous character runtime"]
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError>;
+    #[must_use = "await or poll this future to synchronize the conversation history"]
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
         let _ = conversation_id;
         Ok(())
     }
+    #[must_use = "await or poll this future to update the runtime degraded state"]
     async fn set_degraded(&self, reason: Option<String>) {
         let _ = reason;
     }
+    #[must_use = "await or poll this future to clear the runtime degraded state"]
     async fn clear_degraded(&self) {}
+    #[must_use = "await or poll this future to acquire the character activation lock"]
     async fn lock_activation(&self) -> Result<Box<dyn std::any::Any + Send>, KokoroError> {
         Ok(Box::new(()))
     }

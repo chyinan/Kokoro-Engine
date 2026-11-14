@@ -1,5 +1,7 @@
 // pattern: Imperative Shell
+use crate::ai::context::AIOrchestrator;
 use crate::stt::stream::{AudioBuffer, SAMPLE_RATE};
+use crate::stt::SttService;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
@@ -22,7 +24,8 @@ const SILERO_VAD_MODEL_NAME: &str = "silero_vad.onnx";
 enum WorkerCommand {
     Start {
         auto_stop_on_silence: bool,
-        response: SyncSender<Result<(), String>>,
+        only_when_chat_idle: bool,
+        response: SyncSender<Result<bool, String>>,
     },
     Stop {
         response: SyncSender<Result<(), String>>,
@@ -214,27 +217,20 @@ impl NativeFrameProcessor {
 }
 
 pub fn start_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<(), String> {
-    let tx = mic_state.ensure_worker(app)?;
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
-    tx.send(WorkerCommand::Start {
-        auto_stop_on_silence: false,
-        response: response_tx,
-    })
-    .map_err(|_| "Native microphone worker is unavailable".to_string())?;
-    response_rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
+    start_native_mic_with_options(app, mic_state, false, false).map(|_| ())
 }
 
 pub fn start_native_mic_with_options(
     app: &AppHandle,
     mic_state: &NativeMicState,
     auto_stop_on_silence: bool,
-) -> Result<(), String> {
+    only_when_chat_idle: bool,
+) -> Result<bool, String> {
     let tx = mic_state.ensure_worker(app)?;
     let (response_tx, response_rx) = mpsc::sync_channel(1);
     tx.send(WorkerCommand::Start {
         auto_stop_on_silence,
+        only_when_chat_idle,
         response: response_tx,
     })
     .map_err(|_| "Native microphone worker is unavailable".to_string())?;
@@ -255,6 +251,14 @@ pub fn stop_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<()
         .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
 }
 
+fn start_interrupt(
+    state: &AIOrchestrator,
+    stt: &SttService,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    stt.with_interrupt_enabled(|| state.start_if_chat_idle(|| start().map(|()| true)))
+}
+
 fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
     std::thread::spawn(move || {
         let mut stream: Option<(Stream, NativeFrameProcessorHandle)> = None;
@@ -263,26 +267,50 @@ fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
             match command {
                 WorkerCommand::Start {
                     auto_stop_on_silence,
+                    only_when_chat_idle,
                     response,
                 } => {
-                    let result = if stream.is_some() {
-                        Ok(())
-                    } else {
-                        match build_native_input_stream(&app, auto_stop_on_silence) {
-                            Ok((new_stream, processor)) => {
-                                if let Err(err) = new_stream.play() {
-                                    drop(new_stream);
-                                    processor.stop();
-                                    Err(format!("Failed to start microphone stream: {err}"))
-                                } else {
-                                    stream = Some((new_stream, processor));
-                                    Ok(())
-                                }
-                            }
-                            Err(err) => Err(err),
+                    if stream.is_some() {
+                        let _ = response.send(Ok(!only_when_chat_idle));
+                        continue;
+                    }
+                    let result = (|| {
+                        let state = only_when_chat_idle.then(|| app.state::<AIOrchestrator>());
+                        if state.as_ref().is_some_and(|state| state.is_chat_busy()) {
+                            return Ok(false);
                         }
-                    };
-                    let _ = response.send(result);
+                        let stt = only_when_chat_idle.then(|| app.state::<SttService>());
+                        if let Some(stt) = &stt {
+                            if !stt.with_interrupt_enabled(|| Ok(true))? {
+                                return Ok(false);
+                            }
+                        }
+                        let (new_stream, processor) =
+                            build_native_input_stream(&app, auto_stop_on_silence)?;
+                        let play = || {
+                            new_stream.play().map_err(|error| {
+                                format!("Failed to start microphone stream: {error}")
+                            })
+                        };
+                        let started = match (state, stt) {
+                            (Some(state), Some(stt)) => start_interrupt(&state, &stt, || {
+                                app.state::<AudioBuffer>().discard()?;
+                                play()
+                            })?,
+                            _ => {
+                                play()?;
+                                true
+                            }
+                        };
+                        if started {
+                            stream = Some((new_stream, processor));
+                        }
+                        Ok(started)
+                    })();
+                    if let Err(mpsc::SendError(Ok(true))) = response.send(result) {
+                        // The caller timed out while the device was initializing.
+                        stream.take();
+                    }
                 }
                 WorkerCommand::Stop { response } => {
                     if let Some((input_stream, processor)) = stream.take() {
@@ -301,6 +329,111 @@ fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stt::SttConfig;
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn interrupt_cannot_start_while_an_unannounced_chat_owns_execution() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let stt = SttService::init_from_config(&SttConfig {
+            auto_send: true,
+            ..SttConfig::default()
+        })
+        .await;
+        let pet_turn = state.try_acquire_chat_turn("pet-before-ack").await.unwrap();
+        let started = tokio::task::spawn_blocking(move || {
+            start_interrupt(&state, &stt, || panic!("microphone must not start"))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!started);
+        drop(pet_turn);
+    }
+
+    #[tokio::test]
+    async fn interrupt_rechecks_stt_settings_after_device_preparation() {
+        let state = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stt_config.json");
+        let enabled = SttConfig {
+            auto_send: true,
+            ..SttConfig::default()
+        };
+        let stt = SttService::init_from_config(&enabled).await;
+        let mut providers_off = enabled.clone();
+        for provider in &mut providers_off.providers {
+            provider.enabled = false;
+        }
+
+        for disabled in [
+            SttConfig {
+                auto_send: false,
+                ..enabled.clone()
+            },
+            providers_off,
+        ] {
+            stt.save_and_reload(&path, enabled.clone()).await.unwrap();
+            let (preparing, preparation_started) = oneshot::channel();
+            let (finish_setup, prepared) = mpsc::sync_channel(1);
+            let mic_state = state.clone();
+            let mic_stt = stt.clone();
+            let mic = tokio::task::spawn_blocking(move || {
+                assert!(mic_stt.with_interrupt_enabled(|| Ok(true)).unwrap());
+                preparing.send(()).unwrap();
+                prepared.recv_timeout(Duration::from_secs(5)).unwrap();
+                start_interrupt(&mic_state, &mic_stt, || {
+                    panic!("settings now forbid capture")
+                })
+            });
+            preparation_started.await.unwrap();
+            stt.save_and_reload(&path, disabled).await.unwrap();
+            finish_setup.send(()).unwrap();
+            assert!(!mic.await.unwrap().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn pet_chat_arriving_during_mic_start_waits_and_is_admitted() {
+        let state = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let stt = SttService::init_from_config(&SttConfig {
+            auto_send: true,
+            ..SttConfig::default()
+        })
+        .await;
+        let (playing, play_started) = oneshot::channel();
+        let (finish_play, played) = mpsc::sync_channel(1);
+        let mic_state = state.clone();
+        let mic = tokio::task::spawn_blocking(move || {
+            start_interrupt(&mic_state, &stt, || {
+                playing.send(()).unwrap();
+                played.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            })
+        });
+        play_started.await.unwrap();
+        assert!(!state.is_chat_busy());
+        let mut pet_turn = std::pin::pin!(state.try_acquire_chat_turn("pet-during-mic-start"));
+        poll_fn(|cx| {
+            assert!(pet_turn.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        finish_play.send(()).unwrap();
+        assert!(mic.await.unwrap().unwrap());
+        let guard = pet_turn.await.unwrap();
+        assert_eq!(
+            guard.context().unwrap().client_request_id,
+            "pet-during-mic-start"
+        );
+    }
 }
 
 fn build_native_input_stream(
@@ -535,7 +668,7 @@ fn create_voice_activity_detector_from_path(
 }
 
 fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
-    let app_data_dir = dirs_next::data_dir()
+    let app_data_dir = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("stt")

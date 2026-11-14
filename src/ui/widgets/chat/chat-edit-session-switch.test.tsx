@@ -1,198 +1,507 @@
-// @vitest-environment jsdom
-// pattern: Imperative Shell
-
-import { act, createElement, forwardRef, type ComponentProps, type HTMLAttributes } from "react";
-import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import ChatPanel from "../ChatPanel";
-import type { ChatMessage } from "../ChatMessage";
+// @vitest-environment node
+// History ownership moved from Panel closures to captured application commands.
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as bridge from "../../../lib/kokoro-bridge";
+import { harness, deferred, turn } from "../../../lib/chat/__tests__/harness";
+import { projectMessages } from "../../../lib/chat/projection";
+import type { ChatViewSnapshot } from "../../../lib/kokoro-bridge";
+const messages = [
+  { id: 101, role: "user", content: "original A", created_at: "now" },
+  { id: 102, role: "assistant", content: "answer A", created_at: "now" },
+  { id: 103, role: "user", content: "later A", created_at: "now" },
+];
+const editTarget = { conversationId: "conversation-a", generation: 3, messageId: 101 };
+const answerTarget = { ...editTarget, messageId: 102 };
+const persistedTurnMessages = [
+  ...messages.slice(0, 2),
+  { ...messages[2], metadata: '{"client_request_id":"new"}' },
+  { id: 104, role: "assistant", content: "new answer", created_at: "now", metadata: '{"turn_id":"turn_new"}' },
+];
+afterEach(() => vi.restoreAllMocks());
 
-vi.mock("framer-motion", () => ({
-  motion: {
-    div: forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(({ children, className, onClick }, ref) =>
-      createElement("div", { ref, className, onClick }, children)),
-    button: forwardRef<HTMLButtonElement, ComponentProps<"button">>(
-      ({ children, onClick, disabled, title, "aria-label": ariaLabel }, ref) =>
-        createElement("button", { ref, onClick, disabled, title, "aria-label": ariaLabel }, children)),
-  },
-  AnimatePresence: ({ children }: { children: React.ReactNode }) => children,
-}));
+describe("application history command session ownership", () => {
+  it("cancels a true character switch by request id, but not a same-character runtime update", async () => {
+    const h = harness();
+    h.set({ revision: 2, busy: true, turns: [turn("active", 2)] });
+    await h.app.prepareCharacterSwitch("character-a"); expect(h.io.cancel).not.toHaveBeenCalled();
+    await h.app.prepareCharacterSwitch("character-b"); expect(h.io.cancel).toHaveBeenCalledWith("active", "character_switched");
+  });
+  it("a delayed delete response cannot clear a newly selected conversation", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteConversation").mockReturnValue(deletion.promise);
+    const clear = vi.spyOn(bridge, "clearHistory").mockResolvedValue(undefined);
+    const running = h.app.deleteConversation("conversation-a");
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "B", created_at: "now" }] });
+    deletion.resolve(); await running;
+    expect(remove).toHaveBeenCalledWith("conversation-a"); expect(clear).not.toHaveBeenCalled();
+    expect(h.app.getSnapshot().conversation_id).toBe("conversation-b");
+    expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ text: "B" }]);
+  });
+  it("a delayed edit remains scoped to its original message and never overwrites another selection", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const edit = deferred<bridge.EditConversationMessageResponse>();
+    const invoke = vi.spyOn(bridge, "editConversationMessage").mockReturnValue(edit.promise);
+    const running = h.app.edit(editTarget, "edited A");
+    expect(invoke).toHaveBeenCalledWith({ conversation_id: "conversation-a", conversation_generation: 3, message_id: 101, new_content: "edited A" });
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "original B", created_at: "now" }] });
+    await h.app.refresh(); edit.resolve({ message_id: 101, updated_content: "edited A" }); await running;
+    expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ id: 201, text: "original B" }]);
+  });
+  it("drops a stale save after switching away and after returning to the same conversation", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const invoke = vi.spyOn(bridge, "editConversationMessage").mockResolvedValue({ message_id: 101, updated_content: "edited A" });
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ ...messages[0], id: 201, content: "original B" }] });
+    await h.app.refresh();
+    await h.app.edit(editTarget, "edited A");
+    h.set({ conversation_id: "conversation-a", generation: 5, messages });
+    await h.app.refresh();
+    await h.app.edit(editTarget, "edited A");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it("reads edited history even while a pre-edit poll is still in flight", async () => {
+    const h = harness(); h.set({ messages });
+    const before = await h.app.refresh();
+    const stale = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(stale.promise);
+    const poll = h.app.refresh();
+    vi.spyOn(bridge, "editConversationMessage").mockImplementation(async () => {
+      h.set({ messages: [{ ...messages[0], content: "edited A" }, ...messages.slice(1)] });
+      return { message_id: 101, updated_content: "edited A" };
+    });
+    const editing = h.app.edit(editTarget, "edited A");
+    await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(3));
+    await editing;
+    stale.resolve(before); await poll;
+    expect(projectMessages(h.app.getSnapshot())[0]?.text).toBe("edited A");
+  });
+  it("restores the new selection before returning when a pre-switch poll is still in flight", async () => {
+    const h = harness(); h.set({ messages });
+    const before = await h.app.refresh();
+    const loadStarted = deferred<void>();
+    const load = deferred<bridge.LoadedConversation>();
+    vi.spyOn(bridge, "loadConversation").mockImplementation(() => { loadStarted.resolve(); return load.promise; });
+    const switching = h.app.selectConversation("conversation-b");
+    await loadStarted.promise;
+    const stale = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(stale.promise);
+    const poll = h.app.refresh();
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [] });
+    load.resolve({ topic: "", pinned_state: "", messages: [] });
+    await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(4));
+    await switching;
+    stale.resolve(before); await poll;
+    expect(h.app.getSnapshot()).toMatchObject({ conversation_id: "conversation-b", generation: 4, messages: [], busy: false });
+  });
+  it("clearing restores the authoritative empty selection before a new send", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    vi.spyOn(bridge, "clearHistory").mockImplementation(async () => { h.set({ conversation_id: null, generation: 4, messages: [] }); });
+    await h.app.clear(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+    await h.app.send({ message: "new", conversation_id: h.app.getSnapshot().conversation_id ?? undefined });
+    expect(h.io.send).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: undefined }));
+  });
+  it("a failed clear preserves visible history and releases mutation busy state", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    vi.spyOn(bridge, "clearHistory").mockRejectedValue(new Error("database locked"));
+    await expect(h.app.clear()).rejects.toThrow("database locked");
+    expect(projectMessages(h.app.getSnapshot())).toHaveLength(3); expect(h.app.getSnapshot().busy).toBe(false);
+  });
+  it("blocks send and a second history mutation while continuation deletion is pending", async () => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const deletion = deferred<void>(); vi.spyOn(bridge, "deleteLastMessages").mockReturnValue(deletion.promise);
+    const running = h.app.continueFrom(answerTarget);
+    expect(h.app.getSnapshot().busy).toBe(true);
+    await expect(h.app.send({ message: "overlap" })).rejects.toThrow("history_mutation_busy");
+    await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow("history_mutation_busy");
+    expect(h.io.send).not.toHaveBeenCalled();
+    deletion.resolve(); await running; expect(h.app.getSnapshot().busy).toBe(false);
+  });
+  it.each([false, true])("waits for full history before truncating (selection changes: %s)", async selectionChanges => {
+    const h = harness();
+    const earlier = messages.slice(0, 2);
+    const completed = { ...turn("new", 2, "completed"), user_message_id: 103, assistant_message_id: 104 };
+    h.set({ revision: 1, messages: earlier });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      const stale = deferred<ChatViewSnapshot>();
+      const read = deferred<ChatViewSnapshot>();
+      vi.mocked(h.io.read).mockReturnValueOnce(stale.promise).mockReturnValueOnce(read.promise);
+      h.emit(completed);
+      expect(projectMessages(h.app.getSnapshot()).map(message => message.id)).toEqual([101, 102, 104]);
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      const continuing = h.app.continueFrom(answerTarget);
 
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock("../../hooks", () => ({
-  VoiceState: { Idle: "idle", Listening: "listening", Processing: "processing", Speaking: "speaking", Error: "error" },
-  useVoiceInput: () => ({ state: "idle", volume: 0, partialText: "", start: vi.fn(), stop: vi.fn() }),
-  useWakeWord: () => ({ state: "idle", isListening: false, start: vi.fn(), stop: vi.fn() }),
-  useTypingReveal: () => ({ pushDelta: vi.fn(), flush: vi.fn(), reset: vi.fn() }),
-}));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
-  emit: vi.fn(async () => {}),
-}));
-vi.mock("../../../core/services", () => ({ audioPlayer: { isPlaying: false } }));
-vi.mock("../ChatMessage", () => ({
-  ChatMessage: ({ message, onEdit }: ComponentProps<typeof ChatMessage>) =>
-    createElement("article", { "data-message-id": "id" in message ? String(message.id) : undefined },
-      createElement("span", null, message.text),
-      createElement("button", { "data-edit-message": true, onClick: () => onEdit("edited in A") }, "Edit")),
-}));
+      expect(remove).not.toHaveBeenCalled();
+      const saved = {
+        ...cached,
+        revision: 2,
+        generation: selectionChanges ? 5 : cached.generation,
+        turns: [completed],
+        conversation_history_revision: 3,
+        messages: persistedTurnMessages,
+      };
+      h.set(saved);
+      read.resolve(saved);
+      stale.resolve(cached);
+      await continuing;
+      if (selectionChanges) expect(remove).not.toHaveBeenCalled();
+      else expect(remove).toHaveBeenCalledExactlyOnceWith(2, "conversation-a", 104, { generation: 3, historyRevision: 3, keepThroughId: 102 });
+    } finally {
+      stop();
+    }
+  });
+  it.each([["cancelled", 1, 103], ["error", 2, 104]] as const)("waits for persisted history when %s arrives before the refresh", async (status, count, tail) => {
+    const h = harness();
+    const earlier = messages.slice(0, 2);
+    const streaming = { ...turn("new", 2), user_message_id: 103 };
+    h.set({ revision: 2, messages: earlier, busy: true, turns: [streaming] });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      const stale = deferred<ChatViewSnapshot>();
+      const read = deferred<ChatViewSnapshot>();
+      vi.mocked(h.io.read).mockReturnValueOnce(stale.promise).mockReturnValueOnce(read.promise);
+      const refreshing = h.app.refresh();
+      const terminal = { ...streaming, revision: 3, status };
+      h.emit(terminal);
+      expect(h.app.getSnapshot().busy).toBe(false);
 
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-
-function conversation(id: string): bridge.Conversation {
-  return { id, character_id: "char-1", title: id, topic: "", pinned_state: "{}", created_at: "2026-09-12", updated_at: "2026-09-12" };
-}
-
-describe("ChatPanel edit result session ownership", () => {
-  let container: HTMLDivElement;
-  let root: ReturnType<typeof createRoot>;
-  let finishEdit: (result: bridge.EditConversationMessageResponse) => void;
-
-  beforeEach(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-    localStorage.setItem("kokoro_active_character_id", "char-1");
-    vi.spyOn(bridge, "listConversations").mockResolvedValue([conversation("conv-A"), conversation("conv-B")]);
-    vi.spyOn(bridge, "loadConversation").mockImplementation(async id => ({
-      ...conversation(id),
-      messages: [{ id: id === "conv-A" ? 101 : 201, role: "user", content: id === "conv-A" ? "original A" : "original B", created_at: "2026-09-12" }],
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      const continuing = h.app.continueFrom(answerTarget);
+      const savedMessages = status === "error"
+        ? [...persistedTurnMessages.slice(0, 3), { ...persistedTurnMessages[3], content: "partial answer" }]
+        : persistedTurnMessages.slice(0, 3);
+      const saved = { ...cached, revision: 3, conversation_history_revision: 4, busy: false, messages: savedMessages, turns: [terminal] };
+      h.set(saved);
+      stale.resolve(cached);
+      await refreshing;
+      expect(remove).not.toHaveBeenCalled();
+      read.resolve(saved);
+      await continuing;
+      expect(remove).toHaveBeenCalledExactlyOnceWith(count, "conversation-a", tail, { generation: 3, historyRevision: 4, keepThroughId: 102 });
+    } finally {
+      stop();
+    }
+  });
+  it.each([false, true])("preserves a later pet turn completed during the click's history read (hidden: %s)", async hidden => {
+    const h = harness();
+    const earlier = messages.slice(0, 2);
+    h.set({ messages: earlier, revision: 1 });
+    const stop = h.app.subscribe(() => {});
+    try {
+      const cached = await h.app.refresh();
+      const terminal = { ...turn("new", 2, "completed"), completion_revision: 2, user_message_id: 103, assistant_message_id: 104 };
+      const pet = { ...turn("pet", 4, "completed"), completion_revision: 4, hidden, user_message_id: hidden ? null : 105, assistant_message_id: 106 };
+      const stale = deferred<ChatViewSnapshot>();
+      const read = deferred<ChatViewSnapshot>();
+      vi.mocked(h.io.read).mockReturnValueOnce(stale.promise).mockReturnValueOnce(read.promise);
+      h.emit(terminal);
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      const continuing = h.app.continueFrom(answerTarget);
+      const rejected = expect(continuing).rejects.toThrow("Conversation history changed before deletion");
+      const saved = {
+        ...cached, revision: 4, conversation_history_revision: 5, turns: [terminal, pet],
+        messages: [
+          ...persistedTurnMessages,
+          ...(hidden ? [] : [{ id: 105, role: "user", content: "pet prompt", created_at: "now", metadata: '{"client_request_id":"pet"}' }]),
+          { id: 106, role: "assistant", content: "pet reply", created_at: "now", metadata: '{"turn_id":"turn_pet"}' },
+        ],
+      };
+      h.set(saved);
+      h.emit(pet);
+      read.resolve(saved);
+      stale.resolve(cached);
+      await rejected;
+      expect(remove).not.toHaveBeenCalled();
+      expect(h.app.getSnapshot().messages).toEqual(saved.messages);
+    } finally {
+      stop();
+    }
+  });
+  it("does not truncate a pet reply already in SQLite when its terminal event arrives after the click", async () => {
+    const h = harness();
+    const pet = { ...turn("pet", 3, "completed"), completion_revision: 3, hidden: true, user_message_id: null, assistant_message_id: 103 };
+    h.set({
+      revision: 1,
+      messages: [...messages.slice(0, 2), { ...messages[2], role: "assistant", metadata: '{"turn_id":"turn_pet"}' }],
+    });
+    await h.app.refresh();
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    const continuing = h.app.continueFrom(answerTarget);
+    const saved = { ...h.app.getSnapshot(), busy: false, revision: 3, turns: [pet] };
+    h.set(saved);
+    read.resolve(saved);
+    await expect(continuing).rejects.toThrow("Conversation history changed before deletion");
+    expect(remove).not.toHaveBeenCalled();
+  });
+  it.each([editTarget, answerTarget])("keeps trailing legacy tool results for the retained reply (selected $messageId)", async target => {
+    const h = harness();
+    const tool = { id: 103, role: "tool", content: "kept result", metadata: '{"turn_id":"kept"}', created_at: "now" };
+    h.set({ messages: [
+      messages[0], { ...messages[1], metadata: '{"turn_id":"kept"}' }, tool,
+      { ...tool, id: 104, content: "later result", metadata: '{"turn_id":"later"}' },
+    ] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom(target);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 102, { generation: 3, historyRevision: 1, keepThroughId: 103 });
+  });
+  it.each(["persisted owner", "journal owner", "legacy rows"])(
+    "continues from a prompt with only native tool results (%s)", async ownership => {
+      const h = harness();
+      const owner = ownership === "persisted owner" ? { user_message_id: 101 } : {};
+      const toolOnly = { ...turn("tool_only", 2, "completed"), text: "", user_message_id: 101 };
+      const ownedRows = [
+        { ...messages[1], content: "", metadata: JSON.stringify({ type: "assistant_tool_calls", turn_id: toolOnly.turn_id, ...owner }) },
+        { ...messages[2], role: "tool", content: "kept result", metadata: JSON.stringify({ type: "tool_result", turn_id: toolOnly.turn_id, ...owner }) },
+      ];
+      h.set({
+        revision: 2,
+        messages: [messages[0], ...ownedRows, { ...messages[1], id: 104, content: "later hidden reply", metadata: '{"turn_id":"turn_hidden"}' }],
+        turns: ownership === "journal owner" ? [toolOnly] : [],
+      });
+      await h.app.refresh();
+      const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+      await h.app.continueFrom(editTarget);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(1, "conversation-a", 104, { generation: 3, historyRevision: 1, keepThroughId: 103 });
+    },
+  );
+  it.each([true, false])("does not retain a hidden tool-only turn after an unanswered prompt (saved owner: %s)", async savedOwner => {
+    const h = harness();
+    const hidden = { ...turn("hidden", 2, "completed"), text: "", hidden: true, user_message_id: null };
+    h.set({
+      revision: 2,
+      messages: [messages[0],
+        { ...messages[1], content: "", metadata: JSON.stringify({ type: "assistant_tool_calls", turn_id: hidden.turn_id, ...(savedOwner ? { user_message_id: null } : {}) }) },
+        { ...messages[2], role: "tool", content: "later result", metadata: JSON.stringify({ turn_id: hidden.turn_id }) },
+      ],
+      turns: savedOwner ? [] : [hidden],
+    });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom(editTarget);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(0, "conversation-a", 101, { generation: 3, historyRevision: 1, keepThroughId: 101 });
+  });
+  it.each([
+    { selected: "desktop prompt", selectedId: 101, telegramId: 102, callId: 103 },
+    { selected: "desktop prompt with a saved draft", selectedId: 101, telegramId: 103, callId: 104, replyId: 102 },
+    { selected: "desktop reply", selectedId: 102, telegramId: 103, callId: 104, replyId: 102 },
+    { selected: "interleaved Telegram prompt", selectedId: 103, telegramId: 103, callId: 102, telegramAnswerId: 104 },
+    { selected: "interleaved Telegram reply", selectedId: 104, telegramId: 103, callId: 102, telegramAnswerId: 104 },
+  ])("refuses to split a desktop tool exchange when continuing from the $selected", async ({
+    selectedId, telegramId, callId, replyId, telegramAnswerId = 106,
+  }) => {
+    const h = harness();
+    // Telegram writes a plain user row into the same history while the desktop
+    // turn is generating. Only the native tool rows record their prompt ID.
+    const rows = [
+      messages[0],
+      { id: telegramId, role: "user", content: "Telegram question", created_at: "now" },
+      { id: callId, role: "assistant", content: "", created_at: "now",
+        metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
+      { id: 105, role: "tool", content: "desktop tool result", created_at: "now",
+        metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
+      { id: telegramAnswerId, role: "assistant", content: "Telegram answer", created_at: "now" },
+    ];
+    if (replyId !== undefined) {
+      rows.push({ id: replyId, role: "assistant", content: "desktop answer", created_at: "now",
+        metadata: '{"turn_id":"desktop"}' });
+    }
+    rows.sort((left, right) => left.id - right.id);
+    h.set({ messages: rows });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await expect(h.app.continueFrom({ ...editTarget, messageId: selectedId })).rejects.toThrow("history_turns_interleaved");
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.app.getSnapshot()).toMatchObject({ busy: false, messages: rows });
+  });
+  it.each([
+    { ordering: "desktop reply before its tools", replyId: 103, callId: 104, resultId: 105 },
+    { ordering: "desktop reply after its tools", replyId: 105, callId: 103, resultId: 104 },
+    { ordering: "desktop reply with only journal ownership", replyId: 103 },
+    { ordering: "desktop reply linked by journal message ID", replyId: 103, omitTurnId: true },
+  ])("preserves the Telegram reply when the candidate is a $ordering", async ({
+    replyId, callId, resultId, omitTurnId,
+  }) => {
+    const h = harness();
+    const desktop = { ...turn("desktop", 2, "completed"), user_message_id: 101, assistant_message_id: replyId };
+    const telegramAnswer = { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" };
+    const rows = [
+      messages[0],
+      { id: 102, role: "user", content: "Telegram question", created_at: "now" },
+      { id: replyId, role: "assistant", content: "desktop answer", created_at: "now",
+        metadata: omitTurnId ? undefined : JSON.stringify({ turn_id: desktop.turn_id }) },
+      telegramAnswer,
+    ];
+    if (callId !== undefined && resultId !== undefined) {
+      rows.push(
+        { id: callId, role: "assistant", content: "", created_at: "now",
+          metadata: JSON.stringify({ type: "assistant_tool_calls", turn_id: desktop.turn_id, user_message_id: 101 }) },
+        { id: resultId, role: "tool", content: "desktop tool result", created_at: "now",
+          metadata: JSON.stringify({ type: "tool_result", turn_id: desktop.turn_id, user_message_id: 101 }) },
+      );
+    }
+    rows.sort((left, right) => left.id - right.id);
+    h.set({ messages: rows, revision: 2, turns: callId === undefined ? [desktop] : [] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await expect(h.app.continueFrom({ ...editTarget, messageId: 102 })).rejects.toThrow("history_turns_interleaved");
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.app.getSnapshot()).toMatchObject({ busy: false, messages: rows });
+  });
+  it.each([
+    { messageId: 101, count: 3, keepThroughId: 104 },
+    { messageId: 105, count: 1, keepThroughId: 106 },
+  ])("continues from $messageId when Telegram writes after the desktop tool exchange", async ({
+    messageId, count, keepThroughId,
+  }) => {
+    const h = harness();
+    h.set({ messages: [
+      messages[0],
+      { ...messages[1], metadata: '{"turn_id":"desktop"}' },
+      { id: 103, role: "assistant", content: "", created_at: "now",
+        metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
+      { id: 104, role: "tool", content: "desktop tool result", created_at: "now",
+        metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
+      { id: 105, role: "user", content: "Telegram question", created_at: "now" },
+      { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" },
+      { id: 107, role: "user", content: "later question", created_at: "now" },
+    ] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom({ ...editTarget, messageId });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(count, "conversation-a", 107, {
+      generation: 3, historyRevision: 1, keepThroughId,
+    });
+  });
+  it("can continue from a vision context row before its own tool turn", async () => {
+    const h = harness();
+    h.set({ messages: [
+      { id: 100, role: "context", content: "camera context", created_at: "now", metadata: '{"turn_id":"desktop"}' },
+      messages[0],
+      { id: 102, role: "assistant", content: "", created_at: "now",
+        metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
+      { id: 103, role: "tool", content: "desktop tool result", created_at: "now",
+        metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
+    ] });
+    await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom({ ...editTarget, messageId: 100 });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(1, "conversation-a", 101, {
+      generation: 3, historyRevision: 1, keepThroughId: 100,
+    });
+  });
+  it("regenerates from a restored turn with the selected image and without the original camera frame", async () => {
+    const h = harness();
+    const images = ["http://127.0.0.1:1234/vision/test.png"];
+    const cameraFrame = "data:image/jpeg;base64,Y2FtZXJh";
+    await h.app.refresh();
+    const completion = h.pending();
+    const sending = h.app.send({ message: "original A", images, camera_frame: cameraFrame, client_request_id: "image-turn" });
+    expect(projectMessages(h.app.getSnapshot())).toEqual([
+      { role: "user", text: "original A", images, clientRequestId: "image-turn" },
+    ]);
+    h.set({ revision: 2, messages: [{ ...messages[0], metadata: JSON.stringify({ client_request_id: "image-turn" }) }, messages[1]], turns: [{ ...turn("image-turn", 2, "completed"), user_message_id: 101, images }] });
+    completion.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer A" });
+    await sending;
+    const reopened = h.newWindow(); await reopened.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    const replacement = h.pending();
+    const running = reopened.continueFrom(answerTarget, true, { allow_image_gen: true });
+    await vi.waitFor(() => expect(h.io.send).toHaveBeenCalledTimes(2));
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      message: "original A", images, regenerate: true, conversation_id: "conversation-a",
+      character_id: "character-a", conversation_generation: 3, allow_image_gen: true,
+      regenerate_reply: { assistant_message_id: 102, expected_tail_message_id: 102, expected_history_revision: 1 },
     }));
-    vi.spyOn(bridge, "editConversationMessage").mockImplementation(() => new Promise(resolve => { finishEdit = resolve; }));
-    vi.spyOn(bridge, "listCharacters").mockResolvedValue([]);
-    vi.spyOn(bridge, "setVisionTextInputFocused").mockResolvedValue(undefined);
-    vi.spyOn(bridge, "cancelChatTurn").mockResolvedValue(undefined);
-    vi.spyOn(bridge, "onChatTurnAcknowledged").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnStart").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnDelta").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnFinish").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnTextComplete").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatError").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatWarning").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatFailure").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnTranslation").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onChatTurnTool").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onTelegramChatSync").mockResolvedValue(() => {});
-    vi.spyOn(bridge, "onVisionObservation").mockResolvedValue(() => {});
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    expect(vi.mocked(h.io.send).mock.lastCall?.[0]).not.toHaveProperty("camera_frame");
+    expect(projectMessages(reopened.getSnapshot()).map(message => message.id)).toEqual([101, 102]);
+    replacement.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer B" });
+    await running;
+  });
+  it.each([{ conversation_id: "conversation-b" }, { character_id: "character-b" }, { generation: 5 }])("does not regenerate if the selection changes during the history read to %o", async selection => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+    const running = h.app.continueFrom(answerTarget, true);
+    h.set(selection);
+    read.resolve({ ...h.app.getSnapshot(), ...selection });
+    await running;
+    expect(h.io.send).not.toHaveBeenCalled();
+  });
+  it("rejects regeneration when a pet turn finishes after the click and before the history read", async () => {
+    const h = harness();
+    h.set({ messages: messages.slice(0, 2) });
+    const before = await h.app.refresh();
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+    const running = h.app.continueFrom(answerTarget, true);
+    const after = {
+      ...before, busy: false, revision: 2, conversation_history_revision: 3,
+      messages: [...messages, { id: 104, role: "assistant", content: "pet reply", created_at: "now" }],
+    };
+    h.set(after);
+    read.resolve(after);
+
+    await expect(running).rejects.toThrow("Conversation history changed before retry");
+    expect(h.io.send).not.toHaveBeenCalled();
+    expect(projectMessages(h.app.getSnapshot()).map(message => message.id)).toEqual([101, 102, 103, 104]);
+  });
+  it("rejects a regeneration click on a rendered history older than the application snapshot", async () => {
+    const h = harness();
+    h.set({ messages, conversation_history_revision: 2 });
+    await h.app.refresh();
+
+    await expect(h.app.continueFrom({ ...answerTarget, historyRevision: 1 }, true)).rejects.toThrow("Conversation history changed before retry");
+    expect(h.io.send).not.toHaveBeenCalled();
+  });
+  it.each(["chat_turn_busy", "Conversation history changed before retry"])("leaves the saved reply visible when regeneration is rejected with %s", async error => {
+    const h = harness(); h.set({ messages }); await h.app.refresh();
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    vi.mocked(h.io.send).mockRejectedValueOnce(new Error(error));
+    await expect(h.app.continueFrom(answerTarget, true)).rejects.toThrow(error);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).toHaveBeenCalledOnce();
+    expect(projectMessages(h.app.getSnapshot()).map(message => message.id)).toEqual([101, 102, 103]);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-    act(() => root.unmount());
-    container.remove();
-    vi.restoreAllMocks();
-    localStorage.clear();
-    sessionStorage.clear();
+  it("retries a saved failure from its exact prompt after the journal is gone", async () => {
+    const h = harness();
+    const diagnostic = {
+      id: 104, role: "system", content: "second model round failed", created_at: "now",
+      metadata: JSON.stringify({ type: "failure_event", user_message_id: 101,
+        event: { character_id: "character-a", conversation_id: "conversation-a", turn_id: "failed" } }),
+    };
+    // Includes both a partial reply and a nearer but unrelated user row.
+    h.set({ messages: [...messages, diagnostic] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).find(message => message.id === diagnostic.id)).toMatchObject({ canRetryFailure: true });
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom({ ...answerTarget, messageId: diagnostic.id }, true);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      message: "original A", regenerate: true, conversation_id: "conversation-a", conversation_generation: 3,
+      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: diagnostic.id, expected_history_revision: 1 },
+    }));
   });
 
-  it("does not apply a delayed edit response to the same position in another conversation", async () => {
-    await act(async () => root.render(createElement(ChatPanel)));
-    expect(container.querySelector("article")?.textContent).toContain("original A");
-
-    await act(async () => container.querySelector<HTMLButtonElement>("[data-edit-message]")?.click());
-    expect(bridge.editConversationMessage).toHaveBeenCalledWith({
-      conversation_id: "conv-A", message_id: 101, new_content: "edited in A",
-    });
-
-    await act(async () => {
-      window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-        detail: { runtime: { character_id: "char-1", character_name: "Character" }, target_conversation_id: "conv-B" },
-      }));
-    });
-    expect(container.querySelector("article")?.textContent).toContain("original B");
-    expect(container.querySelector("article")?.getAttribute("data-message-id")).toBe("201");
-
-    await act(async () => finishEdit({ message_id: 101, updated_content: "edited in A" }));
-
-    expect(container.querySelector("article")?.textContent).toContain("original B");
-    expect(container.querySelector("article")?.getAttribute("data-message-id")).toBe("201");
-  });
-
-  it("sends without the previous conversation id after clearing history", async () => {
-    vi.spyOn(bridge, "clearHistory").mockResolvedValue(undefined);
-    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({
-      installed: true, repo_id: "test", download_url: "", install_dir: "", model_path: "", required_files: [], missing_files: [],
-    });
-    vi.spyOn(bridge, "streamChat").mockImplementation(() => new Promise(() => {}));
-    await act(async () => root.render(createElement(ChatPanel)));
-    expect(container.querySelector("article")?.textContent).toContain("original A");
-    await act(async () => container.querySelector<HTMLButtonElement>('[title="chat.actions.clear"]')?.click());
-    const confirm = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "chat.actions.confirm_clear_button");
-    expect(confirm).toBeDefined();
-    await act(async () => confirm?.click());
-    expect(bridge.clearHistory).toHaveBeenCalledOnce();
-    expect(container.querySelector("article")).toBeNull();
-
-    const input = container.querySelector("textarea");
-    expect(input).not.toBeNull();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "first new message");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(bridge.streamChat).toHaveBeenCalledOnce();
-    expect(vi.mocked(bridge.streamChat).mock.calls[0][0].conversation_id).toBeUndefined();
-  });
-
-  it("edits a locally sent message by its scoped visible index when the user id handshake is late", async () => {
-    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({
-      installed: true, repo_id: "test", download_url: "", install_dir: "", model_path: "", required_files: [], missing_files: [],
-    });
-    vi.spyOn(bridge, "streamChat").mockRejectedValue(new Error("provider failed after user message persistence"));
-    vi.mocked(bridge.editConversationMessage).mockResolvedValue({
-      message_id: 302,
-      updated_content: "edited in A",
-    });
-    vi.useFakeTimers();
-
-    await act(async () => root.render(createElement(ChatPanel)));
-    const input = container.querySelector("textarea");
-    expect(input).not.toBeNull();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "本地直发消息");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    const localMessage = container.querySelectorAll("article")[1];
-    expect(localMessage?.textContent).toContain("本地直发消息");
-    await act(async () => localMessage?.querySelector<HTMLButtonElement>("[data-edit-message]")?.click());
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(650);
-    });
-
-    expect(bridge.editConversationMessage).toHaveBeenCalledWith({
-      conversation_id: "conv-A",
-      visible_index: 1,
-      new_content: "edited in A",
-    });
-    expect(container.querySelectorAll("article")[1]?.textContent).toContain("edited in A");
-  });
-
-  it("does not send a draft after the session changes during send preparation", async () => {
-    vi.spyOn(bridge, "getMemoryEmbeddingModelStatus").mockResolvedValue({ installed: true } as any);
-    vi.spyOn(bridge, "streamChat").mockImplementation(() => new Promise(() => {}));
-
-    await act(async () => root.render(createElement(ChatPanel)));
-    const input = container.querySelector("textarea");
-    expect(input).not.toBeNull();
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "draft from A");
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
-        detail: { runtime: { character_id: "char-1", character_name: "Character" }, target_conversation_id: "conv-B" },
-      }));
-      await new Promise(resolve => setTimeout(resolve, 0));
-      for (let i = 0; i < 5; i++) await Promise.resolve();
-    });
-    expect(container.querySelector("article")?.textContent).toContain("original B");
-    expect(bridge.streamChat).not.toHaveBeenCalled();
+  it.each([null, undefined, 999])("cannot retry a failure with no matching prompt (%s)", async userMessageId => {
+    const h = harness();
+    const diagnostic = {
+      id: 104, role: "system", content: "model failed", created_at: "now",
+      metadata: JSON.stringify({ type: "failure_event", user_message_id: userMessageId,
+        event: { character_id: "character-a", conversation_id: "conversation-a", turn_id: "turn_failed" } }),
+    };
+    h.set({ messages: [...messages, diagnostic], turns: userMessageId === null
+      ? [{ ...turn("failed", 2, "error"), hidden: true, user_message_id: null }] : [] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot()).find(message => message.id === diagnostic.id)).toMatchObject({ canRetryFailure: false });
+    const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
+    await h.app.continueFrom({ ...answerTarget, messageId: diagnostic.id }, true);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.io.send).not.toHaveBeenCalled();
   });
 });

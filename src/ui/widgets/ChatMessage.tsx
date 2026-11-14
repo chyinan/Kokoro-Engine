@@ -1,18 +1,21 @@
 import { useState, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
-import { Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
+import { AlertCircle, Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 
 interface ChatMessageProps {
     message: {
+        id?: number;
         role: "user" | "kokoro" | "tool" | "context";
         text: string;
         images?: string[];
         translation?: string;
         translationPending?: boolean;
         isError?: boolean;
+        announceError?: boolean;
+        speechError?: string;
         tools?: ToolTraceItem[];
         capturedAt?: string;
         source?: string;
@@ -22,9 +25,10 @@ interface ChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: () => void;
-    onEdit: (newText: string) => void;
-    onRegenerate: () => void;
-    onContinueFrom: () => void;
+    editScope?: string;
+    onEdit?: (newText: string) => void;
+    onRegenerate?: () => void;
+    onContinueFrom?: () => void;
     onApproveTool: (tool: ToolTraceItem) => void;
     onRejectTool: (tool: ToolTraceItem) => void;
     onPreviewImage?: (url: string) => void;
@@ -170,6 +174,7 @@ export const ChatMessage = memo(function ChatMessage({
     isStreaming,
     isTranslationExpanded,
     onToggleTranslation,
+    editScope,
     onEdit,
     onRegenerate,
     onContinueFrom,
@@ -178,23 +183,25 @@ export const ChatMessage = memo(function ChatMessage({
     onPreviewImage,
 }: ChatMessageProps) {
     const { t } = useTranslation();
-    const [isEditing, setIsEditing] = useState(false);
+    const [editingScope, setEditingScope] = useState<string>();
     const [editingText, setEditingText] = useState("");
     const [toolsExpanded, setToolsExpanded] = useState(false);
+    const isEditing = editScope !== undefined && editingScope === editScope;
+    const announceError = msg.announceError ?? msg.isError;
 
     const handleStartEdit = () => {
-        setIsEditing(true);
+        setEditingScope(editScope);
         setEditingText(msg.text);
     };
 
     const handleSaveEdit = () => {
-        if (!editingText.trim()) return;
-        onEdit(editingText);
-        setIsEditing(false);
+        if (!isEditing || !editingText.trim()) return;
+        onEdit?.(editingText);
+        setEditingScope(undefined);
     };
 
     const handleCancelEdit = () => {
-        setIsEditing(false);
+        setEditingScope(undefined);
         setEditingText("");
     };
 
@@ -246,6 +253,7 @@ export const ChatMessage = memo(function ChatMessage({
 
     return (
         <motion.div
+            data-chat-message-id={msg.id}
             initial={{ opacity: 0, y: 10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             transition={{ duration: 0.3 }}
@@ -315,13 +323,13 @@ export const ChatMessage = memo(function ChatMessage({
                 </div>
             ) : (
                 <>
-                    <div className="whitespace-pre-wrap break-words">
+                    <div key={announceError ? "alert" : "message"} role={announceError ? "alert" : undefined} className={clsx("whitespace-pre-wrap break-words", msg.isError && "text-red-300")}>
                         {msg.text}
                     </div>
 
                     {/* 错误消息的重试按钮 */}
-                    {!isStreaming && msg.isError && (
-                        <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {!isStreaming && msg.isError && onRegenerate && (
+                        <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                             <button
                                 onClick={onRegenerate}
                                 className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-red-400 hover:text-red-300 hover:bg-slate-700/90 transition-colors shadow-lg"
@@ -333,7 +341,7 @@ export const ChatMessage = memo(function ChatMessage({
                     )}
 
                     {/* 悬停显示的操作按钮 */}
-                    {!isStreaming && !msg.isError && msg.role !== "tool" && (
+                    {!isStreaming && !msg.isError && msg.role !== "tool" && onContinueFrom && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             {/* 从这里继续按钮 */}
                             <button
@@ -345,16 +353,16 @@ export const ChatMessage = memo(function ChatMessage({
                             </button>
 
                             {/* 编辑按钮 */}
-                            <button
+                            {onEdit && <button
                                 onClick={handleStartEdit}
                                 className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
                                 title={t("chat.actions.edit")}
                             >
                                 <Edit2 size={12} strokeWidth={1.5} />
-                            </button>
+                            </button>}
 
                             {/* 重新生成按钮（仅 kokoro 消息） */}
-                            {msg.role === "kokoro" && (
+                            {msg.role === "kokoro" && onRegenerate && (
                                 <button
                                     onClick={onRegenerate}
                                     className="p-1.5 rounded-md bg-slate-800/90 backdrop-blur-sm text-slate-400 hover:text-[var(--color-accent)] hover:bg-slate-700/90 transition-colors shadow-lg"
@@ -366,6 +374,15 @@ export const ChatMessage = memo(function ChatMessage({
                         </div>
                     )}
                 </>
+            )}
+
+            {!isEditing && msg.speechError && (
+                <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-red-300">
+                    <AlertCircle size={12} className="mt-0.5 shrink-0" />
+                    <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                        {t("chat.speech_failed", { error: msg.speechError })}
+                    </span>
+                </div>
             )}
 
             {!isEditing && msg.role === "kokoro" && msg.translationPending && !msg.translation && (

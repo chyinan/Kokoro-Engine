@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -657,6 +658,7 @@ mod tests {
             Some("conv-tail"),
             &switch_lock(),
             Some(expected_tail),
+            None,
         )
         .await
         .unwrap();
@@ -671,6 +673,7 @@ mod tests {
             Some("conv-tail"),
             &switch_lock(),
             Some(expected_tail),
+            None,
         )
         .await;
         assert!(matches!(stale_result, Err(KokoroError::Validation(_))));
@@ -682,6 +685,64 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(remaining, 1, "A stale retry must not delete the remaining history");
+    }
+
+    #[tokio::test]
+    async fn test_versioned_history_deletion_checks_generation_and_same_tail_writes() {
+        let pool = setup_test_context_db().await;
+        sqlx::raw_sql(include_str!("../../migrations/0014_conversation_message_revision.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO conversations (id, character_id, title, created_at, updated_at)
+                VALUES ('conv', 'char-1', 'Test', 'now', 'now');
+             INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at)
+                VALUES (1, 'conv', 'assistant', 'Keep', NULL, 'now'),
+                       (2, 'conv', 'tool', 'Result for kept reply', '{\"turn_id\":\"kept\"}', 'now'),
+                       (3, 'conv', 'tool', 'Pet tool result', '{\"turn_id\":\"pet\"}', 'now');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let history = Arc::new(Mutex::new(VecDeque::new()));
+        let current_conv = Arc::new(Mutex::new(Some("conv".to_string())));
+        let generation = AtomicU64::new(3);
+        let lock = switch_lock();
+        for (expected_generation, revision) in [(2, 3), (3, 2), (3, 3)] {
+            let result = delete_last_messages_inner_with_expected_tail(
+                0,
+                &pool,
+                &history,
+                &current_conv,
+                2000,
+                None,
+                Some("conv"),
+                &lock,
+                Some(1),
+                Some((
+                    &generation,
+                    HistoryDeletionTarget {
+                        generation: expected_generation,
+                        history_revision: revision,
+                        keep_through_id: 2,
+                    },
+                )),
+            )
+            .await;
+            let remaining: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM conversation_messages ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            if (expected_generation, revision) == (3, 3) {
+                result.unwrap();
+                assert_eq!(remaining, [1, 2]);
+            } else {
+                assert!(matches!(result, Err(KokoroError::Validation(_))));
+                assert_eq!(remaining, [1, 2, 3]);
+            }
+        }
     }
 
     #[tokio::test]
@@ -818,7 +879,7 @@ struct MemorySystemConfig {
 }
 
 fn memory_config_path() -> std::path::PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("memory_system_config.json")
@@ -900,7 +961,7 @@ pub async fn set_user_language(
 }
 
 pub(crate) fn jailbreak_prompt_path() -> std::path::PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("jailbreak_prompt.json")
@@ -953,7 +1014,7 @@ pub async fn set_proactive_enabled(
     );
 
     // Persist to disk
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let path = app_data.join("proactive_enabled.json");
@@ -986,6 +1047,12 @@ pub async fn get_memory_enabled(state: State<'_, AIOrchestrator>) -> Result<bool
 
 #[tauri::command]
 pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
+
     state.clear_history().await;
     Ok(())
 }
@@ -993,7 +1060,7 @@ pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), Kokor
 /// 判断消息是否为前端/用户视角的可见消息。
 /// 不可见技术消息包括：
 /// 1. `role == "tool"`
-/// 2. `metadata.type` 为 `"assistant_tool_calls" | "tool_result" | "translation_instruction"`
+/// 2. `metadata.type` 为 `"assistant_tool_calls" | "tool_result" | "translation_instruction" | "invalid_failure_event"`
 pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> bool {
     if role == "tool" {
         return false;
@@ -1001,7 +1068,7 @@ pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> 
     let technical_type = meta.and_then(|v| v.get("type")).and_then(|t| t.as_str());
     !matches!(
         technical_type,
-        Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
+        Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result") | Some("invalid_failure_event")
     )
 }
 
@@ -1035,8 +1102,21 @@ pub async fn delete_last_messages_inner(
         expected_conversation_id,
         conversation_switch_lock,
         None,
+        None,
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDeletionTarget {
+    generation: u64,
+    history_revision: i64,
+    keep_through_id: i64,
+}
+
+fn changed_history_before_deletion() -> KokoroError {
+    KokoroError::Validation("Conversation history changed before deletion".into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1050,8 +1130,9 @@ async fn delete_last_messages_inner_with_expected_tail(
     expected_conversation_id: Option<&str>,
     conversation_switch_lock: &Arc<Mutex<()>>,
     expected_tail_message_id: Option<i64>,
+    expected_history: Option<(&AtomicU64, HistoryDeletionTarget)>,
 ) -> Result<(), KokoroError> {
-    if count == 0 {
+    if count == 0 && expected_history.is_none() {
         return Ok(());
     }
 
@@ -1061,6 +1142,13 @@ async fn delete_last_messages_inner_with_expected_tail(
     let _switch_guard = conversation_switch_lock.lock().await;
 
     let conv_id = current_conversation_id.lock().await.clone();
+    if expected_history.as_ref().is_some_and(|(generation, expected)| {
+        expected_conversation_id.is_none()
+            || conv_id.as_deref() != expected_conversation_id
+            || generation.load(Ordering::SeqCst) != expected.generation
+    }) {
+        return Err(changed_history_before_deletion());
+    }
     // 竞态防护：调用方声明了发起删除时所属的会话。若后端当前会话已在删除 IPC 在途期间
     // 被切换（如用户点选了另一会话，load_conversation 会更新 current_conversation_id），
     // 则放弃删除，防止误删新会话的消息。
@@ -1076,12 +1164,20 @@ async fn delete_last_messages_inner_with_expected_tail(
         }
     }
     if let Some(ref conversation_id) = conv_id {
+        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some((_, expected)) = &expected_history {
+            let revision =
+                crate::chat::retry::conversation_message_revision(&mut tx, conversation_id).await?;
+            if revision != Some(expected.history_revision) {
+                return Err(changed_history_before_deletion());
+            }
+        }
         // 读取该会话的所有行（id, role, metadata），按 id 升序排列
         let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
             "SELECT id, role, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
         )
         .bind(conversation_id)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
@@ -1102,14 +1198,18 @@ async fn delete_last_messages_inner_with_expected_tail(
                     expected_tail,
                     actual_tail
                 );
-                return Err(KokoroError::Validation(
-                    "Conversation history changed before deletion".to_string(),
-                ));
+                return Err(changed_history_before_deletion());
             }
         }
 
         let total_visible = visible_indices.len();
-        let ids_to_delete: Vec<i64> = if count >= total_visible {
+        let ids_to_delete: Vec<i64> = if let Some((_, expected)) = &expected_history {
+            let keep_through = rows
+                .iter()
+                .position(|row| row.0 == expected.keep_through_id)
+                .ok_or_else(changed_history_before_deletion)?;
+            rows[keep_through + 1..].iter().map(|row| row.0).collect()
+        } else if count >= total_visible {
             // 如果要删除的可见条数 >= 当前总可见条数，则删除该会话的所有消息（包括不可见技术行）
             rows.iter().map(|(id, _, _)| *id).collect()
         } else {
@@ -1124,11 +1224,6 @@ async fn delete_last_messages_inner_with_expected_tail(
         };
 
         if !ids_to_delete.is_empty() {
-            // 用事务保证原子性，避免崩溃导致部分删除
-            let mut tx = db
-                .begin()
-                .await
-                .map_err(|e| KokoroError::Database(e.to_string()))?;
             for id in &ids_to_delete {
                 sqlx::query("DELETE FROM conversation_messages WHERE id = ?")
                     .bind(id)
@@ -1136,9 +1231,6 @@ async fn delete_last_messages_inner_with_expected_tail(
                     .await
                     .map_err(|e| KokoroError::Database(e.to_string()))?;
             }
-            tx.commit()
-                .await
-                .map_err(|e| KokoroError::Database(e.to_string()))?;
             tracing::info!(
                 target: "ai",
                 "Deleted {} DB row(s) for {} visible message(s)",
@@ -1152,9 +1244,10 @@ async fn delete_last_messages_inner_with_expected_tail(
             "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
         )
         .bind(conversation_id)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
+        tx.commit().await?;
 
         let mut hist = history.lock().await;
         let count = crate::ai::context::sync_history_window(&mut hist, remaining_rows, max_chars);
@@ -1195,8 +1288,15 @@ pub async fn delete_last_messages(
     count: usize,
     expected_conversation_id: Option<String>,
     expected_tail_message_id: Option<i64>,
+    expected_history: Option<HistoryDeletionTarget>,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
+
     let max_chars = *state.max_message_chars.lock().await;
     delete_last_messages_inner_with_expected_tail(
         count,
@@ -1208,6 +1308,7 @@ pub async fn delete_last_messages(
         expected_conversation_id.as_deref(),
         &state.conversation_switch_lock,
         expected_tail_message_id,
+        expected_history.map(|expected| (state.conversation_generation.as_ref(), expected)),
     )
     .await
 }
@@ -1226,6 +1327,11 @@ pub async fn end_session(
     request: EndSessionRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
     if !state.is_memory_enabled() {
         state.clear_history().await;
         return Ok(());

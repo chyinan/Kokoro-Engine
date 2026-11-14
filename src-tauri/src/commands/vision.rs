@@ -41,7 +41,7 @@ pub async fn save_vision_config(
     state: State<'_, VisionWatcher>,
     config: VisionConfig,
 ) -> Result<(), KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("vision_config.json");

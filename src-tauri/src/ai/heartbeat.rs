@@ -225,6 +225,8 @@ async fn trigger_proactive_message(
         trigger_type, instruction
     );
 
+    crate::commands::chat::submit_proactive(app_handle.clone(), full_instruction.clone());
+
     let _ = app_handle.emit(
         "proactive-trigger",
         serde_json::json!({

@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "speech_failed": "無法朗讀這則回覆：{{error}}",
         "status": {
             "streaming": "生成中",
             "chat": "對話"
@@ -1156,6 +1157,7 @@
             "new_messages": "有新訊息 ↓"
         },
         "errors": {
+            "history_turns_interleaved": "不同輪次的訊息交錯，從這裡繼續可能會刪除部分回覆。",
             "image_too_large": "圖片過大 (最大 5MB)",
             "only_images": "僅支援圖片檔案",
             "upload_failed": "圖片上傳失敗",

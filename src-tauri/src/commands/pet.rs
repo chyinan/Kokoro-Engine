@@ -50,7 +50,7 @@ impl Default for PetConfig {
 }
 
 fn app_data_dir() -> std::path::PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
 }

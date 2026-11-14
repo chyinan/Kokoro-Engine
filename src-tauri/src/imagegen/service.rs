@@ -43,7 +43,7 @@ impl Drop for GenerationGuard {
 impl ImageGenService {
     pub async fn init_from_config(config: &ImageGenSystemConfig) -> Self {
         // Determine output directory
-        let app_data = dirs_next::data_dir()
+        let app_data = crate::utils::paths::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("com.chyin.kokoro");
         let output_dir = app_data.join("generated_images");

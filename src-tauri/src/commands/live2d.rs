@@ -601,7 +601,7 @@ fn discover_model_profile(
 }
 
 fn active_model_state_path() -> PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("active_live2d_model.json")
@@ -616,7 +616,7 @@ pub fn load_active_live2d_model_path() -> Option<String> {
 
 pub fn load_active_live2d_profile() -> Option<Live2dModelProfile> {
     let model_path = load_active_live2d_model_path()?;
-    let models_dir = dirs_next::data_dir()
+    let models_dir = crate::utils::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("live2d_models");

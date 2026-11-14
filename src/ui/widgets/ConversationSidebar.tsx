@@ -6,13 +6,13 @@ import { clsx } from "clsx";
 import { Plus, Trash2, History, X, Check, Pencil, Pin } from "lucide-react";
 import { 
     listConversations, 
-    deleteConversation, 
     renameConversation, 
     updateConversationState,
     getConversationDisplayTitle, 
     hasPinnedConversationState 
 } from "../../lib/kokoro-bridge";
 import type { Conversation } from "../../lib/kokoro-bridge";
+import { chatApplication } from "../../lib/chat/application";
 import { useTranslation } from "react-i18next";
 
 type ConversationSidebarProps = {
@@ -162,10 +162,7 @@ export default function ConversationSidebar({
         const id = deletingConv.id;
         setDeletingConv(null);
         try {
-            await deleteConversation(id);
-            if (activeConversationId === id) {
-                await onSelectConversation(null);
-            }
+            await chatApplication.deleteConversation(id);
             await refresh();
         } catch (err) {
             console.error("[ConversationSidebar] Failed to delete conversation:", err);

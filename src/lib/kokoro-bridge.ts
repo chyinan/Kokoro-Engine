@@ -173,11 +173,13 @@ export async function deleteLastMessages(
     count: number,
     expectedConversationId?: string | null,
     expectedTailMessageId?: number | null,
+    expectedHistory?: { generation: number; historyRevision: number; keepThroughId: number },
 ): Promise<void> {
     return invoke("delete_last_messages", {
         count,
         expectedConversationId: expectedConversationId ?? null,
         expectedTailMessageId: expectedTailMessageId ?? null,
+        expectedHistory: expectedHistory ?? null,
     });
 }
 
@@ -282,6 +284,8 @@ export interface ChatRequest {
     model?: string;
     allow_image_gen?: boolean;
     images?: string[];
+    /** One-shot camera context, never included in chat snapshots. */
+    camera_frame?: string;
     character_id?: string;
     /** If true, the user instruction is hidden; non-empty assistant replies may still be saved. */
     hidden?: boolean;
@@ -289,11 +293,16 @@ export interface ChatRequest {
     client_request_id?: string;
     /** If true, this turn is regenerating an assistant reply for the last user message. */
     regenerate?: boolean;
+    retry_failure?: { diagnostic_message_id: number; expected_tail_message_id: number; expected_history_revision?: number };
+    regenerate_reply?: { assistant_message_id: number; expected_tail_message_id: number; expected_history_revision: number };
     /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
     conversation_id?: string | null;
+    conversation_generation?: number;
 }
 
 export interface StreamChatResponse {
+    /** Final canonical text, available even if every event was lost. */
+    text?: string;
     conversation_id: string;
     user_message_id?: number | null;
     assistant_message_id?: number | null;
@@ -305,12 +314,72 @@ export async function streamChat(request: ChatRequest): Promise<StreamChatRespon
     return invoke<StreamChatResponse>("stream_chat", { request });
 }
 
+export interface ChatTurnSnapshot {
+    revision: number;
+    completion_revision?: number;
+    client_request_id: string;
+    turn_id: string | null;
+    character_id: string | null;
+    conversation_id: string | null;
+    conversation_generation?: number;
+    user_message_id: number | null;
+    assistant_message_id: number | null;
+    message: string;
+    images: string[];
+    hidden: boolean;
+    reusing_saved_prompt?: boolean;
+    status: "pending" | "accepted" | "streaming" | "completed" | "cancelled" | "rejected" | "error";
+    text: string;
+    translation: string | null;
+    tools: ChatTurnToolEvent[];
+    error: string | null;
+    preparation_timed_out?: boolean;
+    speech_error?: string;
+}
+export interface ChatViewVersion {
+    revision: number;
+    history_revision: number;
+    generation: number;
+    busy: boolean;
+}
+export interface ChatViewSnapshot extends ChatViewVersion {
+    character_id: string;
+    conversation_id: string | null;
+    conversation_history_revision: number | null;
+    messages: ConversationMessage[];
+    turns: ChatTurnSnapshot[];
+}
+export function getChatRuntimeSnapshot(): Promise<ChatTurnSnapshot[]> {
+    return invoke("get_chat_runtime_snapshot");
+}
+export function getChatView(): Promise<ChatViewSnapshot>;
+export function getChatView(knownVersion: ChatViewVersion): Promise<ChatViewSnapshot | null>;
+export function getChatView(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null> {
+    return invoke("get_chat_view", knownVersion ? { knownVersion } : undefined);
+}
+export type ChatDraftSubmissionStatus = "pending" | "persisted" | "unsent";
+
+export function recoverChatDraftSubmission(characterId: string, clientRequestId: string): Promise<ChatDraftSubmissionStatus> {
+    return invoke("recover_chat_draft_submission", { characterId, clientRequestId });
+}
+export function onChatRuntimeChanged(callback: (snapshot: ChatTurnSnapshot) => void): Promise<UnlistenFn> {
+    return listen<ChatTurnSnapshot>("chat-runtime-changed", event => callback(event.payload));
+}
+
+export function finishChatPlayback(requestId: string, error?: string): Promise<void> {
+    return invoke("finish_chat_playback", { requestId, error });
+}
+
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
     return invoke("cancel_chat_turn", { turnId, reason: reason ?? null });
 }
 
 export async function isChatBusy(): Promise<boolean> {
     return invoke<boolean>("is_chat_busy");
+}
+
+export function startNativeMic(autoStopOnSilence: boolean, onlyWhenChatIdle: boolean): Promise<boolean> {
+    return invoke("start_native_mic", { autoStopOnSilence, onlyWhenChatIdle });
 }
 
 export function isChatTurnBusyError(error: unknown): boolean {
@@ -499,6 +568,7 @@ export interface ToolTraceItem {
     tool: string;
     toolName?: string;
     toolId?: string;
+    toolTraceId?: string;
     text: string;
     isError?: boolean;
     source?: "builtin" | "mcp";
@@ -516,6 +586,7 @@ export interface ChatTurnToolEvent {
     tool: string;
     tool_name?: string;
     tool_id?: string;
+    tool_trace_id?: string;
     source?: "builtin" | "mcp";
     server_name?: string;
     needs_feedback?: boolean;
@@ -1443,6 +1514,7 @@ export interface LoadedConversation {
 
 export interface EditConversationMessageRequest {
     conversation_id?: string;
+    conversation_generation?: number;
     message_id?: number;
     visible_index?: number;
     new_content: string;

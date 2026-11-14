@@ -98,6 +98,10 @@ export class AudioStreamManager {
         this.audioElement.onended = () => {
             this.finishPlaybackState();
         };
+        this.audioElement.onerror = () => {
+            if (!this.objectUrl || this.audioElement.getAttribute("src") !== this.objectUrl) return;
+            this.failPlayback(this.audioElement.error?.message || "Failed to decode or play streaming audio.");
+        };
     }
 
     public async resume() {
@@ -195,6 +199,11 @@ export class AudioStreamManager {
         return this._isPlaying;
     }
 
+    public get hasPendingMediaPlayback(): boolean {
+        // The provider can finish before MediaSource opens or play() settles.
+        return this.mediaSource !== null && !this.audioElement.ended;
+    }
+
     public stop() {
         // Invalidate pending resume/decode operations before tearing down playback.
         this.playbackGeneration++;
@@ -260,11 +269,8 @@ export class AudioStreamManager {
     }
 
     private ensureMpegStream() {
-        if (this.mediaSource || !("MediaSource" in window)) {
-            return;
-        }
-
-        if (!MediaSource.isTypeSupported("audio/mpeg")) {
+        if (this.mediaSource) return;
+        if (!("MediaSource" in window) || !MediaSource.isTypeSupported("audio/mpeg")) {
             throw new Error("MediaSource audio/mpeg is not supported in this environment");
         }
 
@@ -274,32 +280,40 @@ export class AudioStreamManager {
         this.audioElement.src = this.objectUrl;
 
         mediaSource.addEventListener("sourceopen", () => {
-            if (!this.mediaSource || this.sourceBuffer) {
+            if (this.mediaSource !== mediaSource || this.sourceBuffer) {
                 return;
             }
 
-            this.sourceBuffer = this.mediaSource.addSourceBuffer("audio/mpeg");
-            this.sourceBuffer.mode = "sequence";
-            this.sourceBuffer.addEventListener("updateend", () => {
+            try {
+                this.sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
+                this.sourceBuffer.mode = "sequence";
+                this.sourceBuffer.addEventListener("error", () => {
+                    if (this.mediaSource === mediaSource) this.failPlayback("Failed to decode streaming audio data.");
+                });
+                this.sourceBuffer.addEventListener("updateend", () => {
+                    if (this.mediaSource === mediaSource) this.flushAppendQueue();
+                });
                 this.flushAppendQueue();
-            });
-            this.flushAppendQueue();
+            } catch (error) {
+                this.failPlayback(error instanceof Error ? error.message : String(error));
+            }
         }, { once: true });
     }
 
     private async queueWavChunk(chunk: Uint8Array, generation: number, sequence: number) {
+        let decoded: AudioBuffer;
         try {
             const buffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
-            const decoded = await this.audioContext.decodeAudioData(buffer);
-            if (generation !== this.playbackGeneration) return;
-            this.wavQueue.set(sequence, decoded);
-            this.playNextWav();
+            decoded = await this.audioContext.decodeAudioData(buffer);
         } catch (error) {
             if (generation !== this.playbackGeneration) return;
             console.error("[Audio] Failed to decode WAV chunk:", error);
-            this.broadcastPlaybackError("Failed to decode WAV audio.");
-            this.stop();
+            this.failPlayback("Failed to decode WAV audio.");
+            return;
         }
+        if (generation !== this.playbackGeneration) return;
+        this.wavQueue.set(sequence, decoded);
+        this.playNextWav();
     }
 
     private async queuePcmChunk(
@@ -421,7 +435,11 @@ export class AudioStreamManager {
             this.broadcastAnalysis({ amplitude: 0, lowFreqEnergy: 0, highFreqEnergy: 0 });
         };
 
-        source.start();
+        try {
+            source.start();
+        } catch (error) {
+            this.failPlayback(error instanceof Error ? error.message : String(error));
+        }
     }
 
     private flushAppendQueue() {
@@ -444,8 +462,7 @@ export class AudioStreamManager {
             this.startPlaybackIfNeeded();
         } catch (error) {
             console.error("[Audio] Failed to append streaming chunk:", error);
-            this.broadcastPlaybackError("Failed to append streaming audio data.");
-            this.stop();
+            this.failPlayback("Failed to append streaming audio data.");
         }
     }
 
@@ -455,10 +472,17 @@ export class AudioStreamManager {
         }
 
         this.playbackStarted = true;
+        const generation = this.playbackGeneration;
         this.audioElement.play().catch(error => {
-            console.warn("[Audio] Autoplay blocked or playback failed:", error);
-            this.playbackStarted = false;
+            if (generation !== this.playbackGeneration) return;
+            this.failPlayback(error instanceof Error ? error.message : String(error));
         });
+    }
+
+    private failPlayback(message: string): void {
+        const generation = this.playbackGeneration;
+        this.broadcastPlaybackError(message);
+        if (generation === this.playbackGeneration) this.stop();
     }
 
     private tryEndStream() {

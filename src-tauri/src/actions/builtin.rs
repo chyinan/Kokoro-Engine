@@ -194,11 +194,12 @@ impl ActionHandler for PlayCueAction {
             )));
         }
 
-        // Emit cue event to frontend
-        let _ = ctx.app.emit(
+        let _ = crate::chat::runtime::emit_chat_event(
+            &ctx.app,
             "chat-cue",
             serde_json::json!({ "cue": cue, "source": "builtin-play-cue" }),
-        );
+        )
+        .await;
 
         Ok(ActionResult::ok(format!("Cue triggered: {}", cue)))
     }

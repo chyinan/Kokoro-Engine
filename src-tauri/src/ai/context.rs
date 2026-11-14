@@ -88,10 +88,12 @@ pub fn is_vision_context_message(message: &Message) -> bool {
 
 pub fn is_memory_candidate_message(message: &Message) -> bool {
     !is_vision_context_message(message)
+        && message.metadata.as_ref().and_then(|meta| meta.get("type")).and_then(|kind| kind.as_str())
+            != Some("invalid_failure_event")
 }
 
 pub fn is_summary_candidate_message(message: &Message) -> bool {
-    !is_vision_context_message(message)
+    is_memory_candidate_message(message)
 }
 
 fn latest_vision_context_index(messages: &[Message]) -> Option<usize> {
@@ -110,7 +112,7 @@ fn should_include_message_for_llm_history(
         .and_then(|meta| meta.get("type"))
         .and_then(|value| value.as_str());
 
-    if matches!(technical_type, Some("translation_instruction")) {
+    if matches!(technical_type, Some("translation_instruction") | Some("invalid_failure_event")) {
         return false;
     }
 
@@ -484,7 +486,9 @@ pub struct AIOrchestrator {
     /// Concurrency gate to block chat turns during character activation and recovery.
     pub activation_gate: Arc<ActivationGate>,
     /// Global lock ensuring only one chat turn (stream_chat) executes on this orchestrator at a time.
-    pub chat_turn_lock: Arc<tokio::sync::Mutex<Option<ActiveChatTurnContext>>>,
+    chat_turn_lock: Arc<Mutex<Option<ActiveChatTurnContext>>>,
+    /// Serializes chat admission with the instant an interrupt opens the mic.
+    chat_admission: Mutex<()>,
 }
 
 impl AIOrchestrator {
@@ -494,9 +498,8 @@ impl AIOrchestrator {
         Self::with_connect_options(options).await
     }
 
-    /// Test-only constructor that can disable SQLite foreign key enforcement
-    /// so failure paths (orphan inserts, missing parent tables) can be
-    /// exercised deterministically. Production always runs with FK ON.
+    /// Test-only constructor for exercising orphan inserts with SQLite foreign
+    /// keys disabled. Production always runs with FK ON.
     #[cfg(test)]
     async fn new_for_tests_with_foreign_keys(db_url: &str, fk_on: bool) -> Result<Self> {
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?
@@ -566,6 +569,7 @@ impl AIOrchestrator {
             runtime_degraded: Arc::new(Mutex::new(None)),
             activation_gate: Arc::new(ActivationGate::default()),
             chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            chat_admission: Mutex::new(()),
         })
     }
 
@@ -604,6 +608,7 @@ impl AIOrchestrator {
             runtime_degraded: self.runtime_degraded.clone(),
             activation_gate: self.activation_gate.clone(),
             chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            chat_admission: Mutex::new(()),
         }
     }
 
@@ -640,10 +645,13 @@ impl AIOrchestrator {
         Ok(guard)
     }
 
-    pub fn try_acquire_chat_turn(
+    pub async fn try_acquire_chat_turn(
         &self,
         client_request_id: &str,
     ) -> Result<ChatTurnExecutionGuard, String> {
+        // Wait only for a mic start already in progress. A running chat still
+        // rejects concurrent turns immediately, as before.
+        let _admission = self.chat_admission.lock().await;
         let mut guard = self
             .chat_turn_lock
             .clone()
@@ -658,6 +666,20 @@ impl AIOrchestrator {
 
     pub fn is_chat_busy(&self) -> bool {
         self.chat_turn_lock.try_lock().is_err()
+    }
+
+    /// Called from the microphone worker after device/VAD preparation.
+    pub(crate) fn start_if_chat_idle(
+        &self,
+        start: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let Ok(_admission) = self.chat_admission.try_lock() else {
+            return Ok(false);
+        };
+        if self.is_chat_busy() {
+            return Ok(false);
+        }
+        start()
     }
 
     pub fn is_activating(&self) -> bool {
@@ -1130,7 +1152,7 @@ impl AIOrchestrator {
 
     /// Persist conversation_id to disk for hot-reload recovery.
     pub fn persist_conversation_id(id: Option<&str>) {
-        let app_data = dirs_next::data_dir()
+        let app_data = crate::utils::paths::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro");
         let _ = std::fs::create_dir_all(&app_data);
@@ -1143,7 +1165,7 @@ impl AIOrchestrator {
 
     /// Persist the active character ID to disk so Telegram can read it.
     pub fn persist_active_character_id(id: &str) {
-        let app_data = dirs_next::data_dir()
+        let app_data = crate::utils::paths::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro");
         let _ = std::fs::create_dir_all(&app_data);
@@ -1156,7 +1178,7 @@ impl AIOrchestrator {
 
     /// Load the persisted active character ID from disk.
     pub fn load_active_character_id() -> Option<String> {
-        let path = dirs_next::data_dir()
+        let path = crate::utils::paths::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("com.chyin.kokoro")
             .join("active_character_id.json");
@@ -1165,18 +1187,21 @@ impl AIOrchestrator {
         v["character_id"].as_str().map(|s| s.to_string())
     }
 
-    /// Insert a streaming assistant draft into the DB for a specific conversation. Returns the row id for later update.
+    /// Insert the draft with its turn identity so history and live views can merge it.
     pub async fn persist_streaming_draft(
         &self,
         conversation_id: &str,
         content: &str,
+        turn_id: &str,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
+        let metadata = serde_json::json!({ "turn_id": turn_id, "streaming_draft": true });
         let result = sqlx::query(
-            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, NULL, ?)"
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, 'assistant', ?, ?, ?)"
         )
         .bind(conversation_id)
         .bind(content)
+        .bind(metadata.to_string())
         .bind(&now)
         .execute(&self.db)
         .await?;
@@ -1184,14 +1209,14 @@ impl AIOrchestrator {
         Ok(result.last_insert_rowid())
     }
 
-    /// Update a streaming draft row with final content and metadata.
+    /// Update the draft content, preserving its identity until final metadata is supplied.
     pub async fn update_streaming_draft(
         &self,
         row_id: i64,
         content: &str,
         metadata: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = ? WHERE id = ?")
+        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = COALESCE(?, metadata) WHERE id = ?")
             .bind(content)
             .bind(metadata)
             .bind(row_id)
@@ -1222,14 +1247,12 @@ impl AIOrchestrator {
     /// Delete the DB rows left behind by a cancelled or failed chat turn:
     /// - rows whose metadata carries the turn's `turn_id` and a technical `type`
     ///   (`assistant_tool_calls` | `tool_result`);
-    /// - `extra_row_ids` whose metadata is still NULL (unfinalized streaming drafts).
+    /// - unfinalized assistant drafts in `extra_row_ids` matching the turn, including
+    ///   legacy drafts whose metadata is NULL.
     ///
-    /// A row passed via `extra_row_ids` with non-NULL metadata (e.g. a finalized
-    /// assistant message) or belonging to a different conversation is never removed,
-    /// so a fully generated answer or another conversation's message cannot be
-    /// deleted through this path. All deletes run atomically in a single transaction
-    /// with conditional matching (`conversation_id` and `metadata IS NULL`). When the
-    /// turn's conversation is still the active one and rows were deleted, the in-memory
+    /// Draft deletes check conversation, role, and metadata in the same statement
+    /// so a finalized answer or another conversation's message is preserved. When the
+    /// turn's conversation is still active and rows were deleted, the in-memory
     /// history is resynced from the authoritative DB rows so technical rows cannot leak
     /// into the next turn's prompt composition. Returns the number of actually deleted rows.
     pub async fn delete_turn_artifacts(
@@ -1290,14 +1313,16 @@ impl AIOrchestrator {
             .collect();
 
         for row_id in unique_extra_ids {
-            // Only unfinalized drafts (metadata still NULL) belonging to this conversation
-            // may be removed by id. An atomic conditional DELETE prevents check-then-delete
-            // race conditions with concurrent finalization and blocks cross-conversation leakage.
             let result = sqlx::query(
-                "DELETE FROM conversation_messages WHERE id = ? AND conversation_id = ? AND metadata IS NULL",
+                "DELETE FROM conversation_messages
+                 WHERE id = ? AND conversation_id = ? AND role = 'assistant'
+                   AND (metadata IS NULL OR CASE WHEN json_valid(metadata) THEN
+                       json_type(metadata, '$.streaming_draft') = 'true'
+                       AND json_extract(metadata, '$.turn_id') = ? END)",
             )
             .bind(row_id)
             .bind(conversation_id)
+            .bind(turn_id)
             .execute(&mut *tx)
             .await?;
             total_deleted += result.rows_affected() as usize;
@@ -1928,6 +1953,28 @@ impl AIOrchestrator {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn invalid_imported_failures_never_enter_model_or_memory_context() {
+        let message = Message {
+            role: "system".into(), content: "foreign diagnostic".into(),
+            metadata: Some(serde_json::json!({ "type": "invalid_failure_event" })),
+        };
+        assert!(!is_memory_candidate_message(&message));
+        assert!(!is_summary_candidate_message(&message));
+        assert!(!should_include_message_for_llm_history(&message, 0, None, "full"));
+        let ordinary = Message { role: "user".into(), content: "saved prompt".into(), metadata: None };
+        assert!(is_memory_candidate_message(&ordinary));
+        assert!(is_summary_candidate_message(&ordinary));
+        assert!(should_include_message_for_llm_history(&ordinary, 0, None, "full"));
+        let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_memory_enabled(false).await;
+        orchestrator.push_history_message(ordinary).await;
+        orchestrator.push_history_message(message).await;
+        let (prompt, _) = orchestrator.compose_prompt("hello", false, None, true, "default").await.unwrap();
+        assert!(prompt.iter().any(|message| message.content == "saved prompt"));
+        assert!(prompt.iter().all(|message| message.content != "foreign diagnostic"));
+    }
+
     async fn setup_test_orchestrator() -> AIOrchestrator {
         AIOrchestrator::new("sqlite::memory:")
             .await
@@ -2232,15 +2279,14 @@ mod tests {
         insert_test_conversation(&orchestrator, "conv-1").await;
         *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
 
-        // Insert a draft row that has been finalized (metadata is non-NULL)
-        let finalized_row_id = insert_conversation_row(
-            &orchestrator,
-            "conv-1",
-            "assistant",
-            "final answer",
-            Some(r#"{"turn_id":"turn-a","model":"gpt"}"#),
-        )
-        .await;
+        let finalized_row_id = orchestrator
+            .persist_streaming_draft("conv-1", "partial answer", "turn-a")
+            .await
+            .unwrap();
+        orchestrator
+            .update_streaming_draft(finalized_row_id, "final answer", Some(r#"{"turn_id":"turn-a"}"#))
+            .await
+            .unwrap();
 
         let deleted = orchestrator
             .delete_turn_artifacts("conv-1", "turn-a", &[finalized_row_id])
@@ -2260,9 +2306,10 @@ mod tests {
         insert_test_conversation(&orchestrator, "conv-1").await;
         *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
 
-        let draft_id =
-            insert_conversation_row(&orchestrator, "conv-1", "assistant", "draft message", None)
-                .await;
+        let draft_id = orchestrator
+            .persist_streaming_draft("conv-1", "draft message", "turn-a")
+            .await
+            .unwrap();
         let tool_id = insert_conversation_row(
             &orchestrator,
             "conv-1",
@@ -3119,18 +3166,18 @@ mod tests {
 
     #[tokio::test]
     async fn persist_message_propagates_conversation_metadata_update_failure() {
-        // FK enforcement is disabled so the message INSERT succeeds even
-        // though the conversations table is gone; only the metadata UPDATE
-        // fails, which is exactly the error path this test targets.
-        let orchestrator =
-            AIOrchestrator::new_for_tests_with_foreign_keys("sqlite::memory:", false)
-                .await
-                .expect("FK-off test orchestrator should build");
+        let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-err").await;
-        sqlx::query("DROP TABLE conversations")
-            .execute(&orchestrator.db)
-            .await
-            .unwrap();
+        // Fail the metadata update after the message insert and its history
+        // revision trigger have succeeded inside the same transaction.
+        sqlx::query(
+            "CREATE TRIGGER reject_conversation_metadata_update
+             BEFORE UPDATE OF title, updated_at ON conversations
+             BEGIN SELECT RAISE(ABORT, 'test metadata update failure'); END",
+        )
+        .execute(&orchestrator.db)
+        .await
+        .unwrap();
 
         let err = orchestrator
             .add_message_with_metadata_for_conversation(
@@ -3161,6 +3208,13 @@ mod tests {
             orphan_count, 0,
             "failed transaction must roll back the message row"
         );
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT message_revision FROM conversations WHERE id = 'conv-err'",
+        )
+        .fetch_one(&orchestrator.db)
+        .await
+        .unwrap();
+        assert_eq!(revision, 0, "the history revision must roll back too");
     }
 
     #[tokio::test]
@@ -3310,7 +3364,7 @@ mod tests {
             .unwrap();
 
         let row_id = orchestrator
-            .persist_streaming_draft("conv-A", "draft chunk 1")
+            .persist_streaming_draft("conv-A", "draft chunk 1", "turn-a")
             .await
             .expect("persist_streaming_draft should succeed");
         assert!(row_id > 0);
@@ -3318,15 +3372,23 @@ mod tests {
         // Global current_conversation_id must remain None!
         assert_eq!(*orchestrator.current_conversation_id.lock().await, None);
 
-        // Verify message was inserted into conv-A
-        let (role, content): (String, String) =
-            sqlx::query_as("SELECT role, content FROM conversation_messages WHERE id = ?")
-                .bind(row_id)
-                .fetch_one(&orchestrator.db)
-                .await
-                .unwrap();
+        orchestrator
+            .update_streaming_draft(row_id, "draft chunk 2", None)
+            .await
+            .unwrap();
+        let (role, content, metadata): (String, String, String) = sqlx::query_as(
+            "SELECT role, content, metadata FROM conversation_messages WHERE id = ? AND conversation_id = 'conv-A'",
+        )
+        .bind(row_id)
+        .fetch_one(&orchestrator.db)
+        .await
+        .unwrap();
         assert_eq!(role, "assistant");
-        assert_eq!(content, "draft chunk 1");
+        assert_eq!(content, "draft chunk 2");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+            serde_json::json!({ "turn_id": "turn-a", "streaming_draft": true })
+        );
     }
 
     #[tokio::test]
@@ -3514,6 +3576,7 @@ mod tests {
         // First turn acquires lock successfully
         let guard1 = orchestrator
             .try_acquire_chat_turn("req_1")
+            .await
             .expect("first turn should acquire lock");
         assert!(orchestrator.is_chat_busy());
         assert_eq!(guard1.context().unwrap().client_request_id, "req_1");
@@ -3521,6 +3584,7 @@ mod tests {
         // Concurrent turn while guard1 is held must be rejected immediately
         let err = orchestrator
             .try_acquire_chat_turn("req_2")
+            .await
             .expect_err("second turn must fail while first is active");
         assert!(err.contains("chat_turn_busy"));
 
@@ -3531,6 +3595,7 @@ mod tests {
         // Subsequent turn can now acquire cleanly
         let guard2 = orchestrator
             .try_acquire_chat_turn("req_3")
+            .await
             .expect("subsequent turn should acquire lock after release");
         assert!(orchestrator.is_chat_busy());
         assert_eq!(guard2.context().unwrap().client_request_id, "req_3");

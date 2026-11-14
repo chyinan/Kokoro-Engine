@@ -77,6 +77,10 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 [features]
 stress = []
 
+[patch.crates-io]
+# Explicit D-Bus return types for Rust 1.100's never-type fallback.
+screenshots = { path = "vendor/screenshots" }
+
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"

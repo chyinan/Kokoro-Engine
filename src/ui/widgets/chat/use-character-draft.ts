@@ -34,6 +34,7 @@ export interface UseCharacterChatDraftResult {
     readonly pendingImages: string[];
     readonly setPendingImages: (value: string[] | ((prev: string[]) => string[])) => void;
     readonly clearDraft: () => void;
+    readonly consumeSentDraft: (characterId: string, text: string, images: string[]) => void;
     /** 仅清空图片草稿并记录墓碑(如关闭 vision 时),清空之前发起的在途上传随后将被丢弃。 */
     readonly clearDraftImages: () => void;
     /** 捕获当前草稿上下文(角色/代次/列表版本),供异步上传在首个 await 之前快照。 */
@@ -240,7 +241,7 @@ export function useCharacterChatDraft(
         [debounceMs, imageStorage]
     );
 
-    // Clear draft immediately (called on submit or auto-send)
+    // Clear draft and invalidate uploads started before the clear.
     const clearDraft = useCallback(() => {
         if (debounceTimerRef.current !== null) {
             clearTimeout(debounceTimerRef.current);
@@ -261,6 +262,27 @@ export function useCharacterChatDraft(
         pendingImagesRef.current = [];
         setPendingImagesState([]);
     }, [imageStorage, storage]);
+
+    const consumeSentDraft = useCallback((targetCharId: string, text: string, images: string[]) => {
+        if (targetCharId !== activeCharacterIdRef.current) return;
+        const textMatches = inputRef.current === text;
+        if (textMatches && haveSameImageList(pendingImagesRef.current, images)) {
+            clearDraft();
+            return;
+        }
+        // Keep text and attachments added while the request was waiting to bind.
+        if (textMatches) setInput("");
+        if (images.length) setPendingImages(previous => {
+            const sent = [...images];
+            return previous.filter(url => {
+                const index = sent.indexOf(url);
+                if (index < 0) return true;
+                sent.splice(index, 1);
+                return false;
+            });
+        });
+        flushDraft();
+    }, [clearDraft, flushDraft, setInput, setPendingImages]);
 
     // 仅清空图片草稿并记录墓碑(如关闭 vision):在途上传清空后返回将被丢弃
     const clearDraftImages = useCallback(() => {
@@ -334,6 +356,7 @@ export function useCharacterChatDraft(
         pendingImages,
         setPendingImages,
         clearDraft,
+        consumeSentDraft,
         clearDraftImages,
         getImageDraftContext,
         appendPendingImage,

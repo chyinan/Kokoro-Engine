@@ -1,0 +1,44 @@
+{
+  "identifier": "com.chyin.kokoro.chat-validation",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kokoro Chat Validation",
+        "create": false,
+        "url": "index.html"
+      },
+      {
+        "label": "pet",
+        "title": "Kokoro Chat Validation Pet",
+        "url": "src/windows/pet.html",
+        "width": 450,
+        "height": 500,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "capabilities": [
+        "default",
+        "pet",
+        "bubble",
+        {
+          "identifier": "chat-validation",
+          "windows": [
+            "main",
+            "pet",
+            "bubble"
+          ],
+          "permissions": [
+            "core:webview:allow-create-webview-window",
+            "core:window:allow-destroy",
+            "core:window:allow-hide",
+            "core:window:allow-show",
+            "core:window:allow-is-visible"
+          ]
+        }
+      ]
+    }
+  }
+}

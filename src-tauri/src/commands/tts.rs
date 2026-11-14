@@ -91,7 +91,7 @@ pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), KokoroE
 /// Return the current TTS config from disk.
 #[command]
 pub async fn get_tts_config() -> Result<TtsSystemConfig, KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("tts_config.json");
@@ -104,7 +104,7 @@ pub async fn save_tts_config(
     state: State<'_, TtsService>,
     config: TtsSystemConfig,
 ) -> Result<(), KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("tts_config.json");

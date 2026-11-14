@@ -116,6 +116,19 @@ function dependencies(
 }
 
 describe("character activation shell", () => {
+  it("awaits application cancellation inside the serialized owner before preparing a true switch", async () => {
+    let finish!: () => void;
+    const beforeCharacterActivation = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    const deps = dependencies({ beforeCharacterActivation });
+    const service = createCharacterActivationService(deps);
+    const activation = service.activateCharacter("new-character");
+    await Promise.resolve(); await Promise.resolve();
+    expect(beforeCharacterActivation).toHaveBeenCalledWith("new-character");
+    expect(deps.prepareCharacterActivation).not.toHaveBeenCalled();
+    finish(); await activation;
+    expect(deps.prepareCharacterActivation).toHaveBeenCalledWith("new-character");
+    await service.recoverCommittedRuntime(); expect(beforeCharacterActivation).toHaveBeenCalledTimes(1);
+  });
   it("prepares before snapshotting and applying the complete frontend runtime", async () => {
     const calls: Array<string> = [];
     const deps = dependencies({

@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "speech_failed": "この返信を読み上げられませんでした：{{error}}",
         "status": {
             "streaming": "生成中",
             "chat": "チャット"
@@ -1156,6 +1157,7 @@
             "new_messages": "新着メッセージ ↓"
         },
         "errors": {
+            "history_turns_interleaved": "複数のターンのメッセージが混在しています。ここから続けると、返信の一部が削除される可能性があります。",
             "image_too_large": "画像が大きすぎます (最大 5MB)",
             "only_images": "画像ファイルのみ対応しています",
             "upload_failed": "画像のアップロードに失敗しました",

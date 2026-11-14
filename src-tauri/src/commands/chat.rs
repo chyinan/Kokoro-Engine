@@ -18,6 +18,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::retry::{FailureRetry, Regeneration, RegenerationPlan, ReplyRegeneration};
 use crate::chat::tags::{
     extract_translate_tags, find_safe_emit_boundary, merge_continuation_text,
     merge_round_tool_calls, parse_tool_call_tags, strip_leaked_tags, strip_translate_tags,
@@ -43,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{command, Emitter, Manager, State, Window};
+use tauri::{command, Emitter, Manager, State};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -52,7 +53,7 @@ use uuid::Uuid;
 const FAILURE_EVENTS_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn failure_events_log_path() -> PathBuf {
-    dirs_next::data_dir()
+    crate::utils::paths::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.chyin.kokoro")
         .join("failure_events.jsonl")
@@ -102,23 +103,28 @@ async fn append_failure_event_jsonl(
 async fn persist_failure_event_to_conversation(
     state: &AIOrchestrator,
     failure_event: &crate::error::FailureEvent,
+    user_message_id: Option<i64>,
+    keep_through_message_id: Option<i64>,
 ) -> Result<(), KokoroError> {
-    let conversation_id = match state.current_conversation_id.lock().await.clone() {
-        Some(id) => id,
-        None => return Ok(()),
+    let Some(conversation_id) = failure_event.conversation_id.as_deref() else {
+        return Ok(());
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "type": "failure_event",
         "event": failure_event,
-    })
-    .to_string();
+        "user_message_id": user_message_id,
+    });
+    if let Some(id) = keep_through_message_id {
+        metadata["keep_through_message_id"] = id.into();
+    }
+    let metadata = metadata.to_string();
 
     sqlx::query(
         "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)"
     )
-    .bind(&conversation_id)
+    .bind(conversation_id)
     .bind("system")
     .bind(&failure_event.message)
     .bind(&metadata)
@@ -129,7 +135,7 @@ async fn persist_failure_event_to_conversation(
 
     sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
         .bind(&now)
-        .bind(&conversation_id)
+        .bind(conversation_id)
         .execute(&state.db)
         .await
         .map_err(KokoroError::from)?;
@@ -141,11 +147,13 @@ async fn emit_and_persist_failure_event(
     app: &tauri::AppHandle,
     state: &AIOrchestrator,
     failure_event: crate::error::FailureEvent,
+    user_message_id: Option<i64>,
+    keep_through_message_id: Option<i64>,
 ) -> Result<(), KokoroError> {
-    app.emit("chat-failure", failure_event.clone())
+    crate::chat::runtime::emit_chat_event(app, "chat-failure", failure_event.clone()).await
         .map_err(|error| KokoroError::Chat(error.to_string()))?;
 
-    persist_failure_event_to_conversation(state, &failure_event).await?;
+    persist_failure_event_to_conversation(state, &failure_event, user_message_id, keep_through_message_id).await?;
 
     if let Err(error) = append_failure_event_jsonl(&failure_event).await {
         tracing::error!(
@@ -214,7 +222,7 @@ pub struct TurnCancellationState {
     finished_tx: tokio::sync::broadcast::Sender<String>,
 }
 
-const TURN_CANCELLED_BY_USER_MESSAGE: &str = "turn cancelled by user";
+pub(crate) const TURN_CANCELLED_BY_USER_MESSAGE: &str = "turn cancelled by user";
 
 impl Default for TurnCancellationState {
     fn default() -> Self {
@@ -337,10 +345,7 @@ impl TurnCancellationState {
                 return v.reason.is_some();
             }
         }
-        if inner.tombstones.contains_key(turn_id) {
-            return true;
-        }
-        false
+        inner.tombstones.contains_key(turn_id)
     }
 
     async fn has_turn(&self, turn_id: &str) -> bool {
@@ -1086,13 +1091,24 @@ pub async fn cancel_chat_turn(
     turn_id: String,
     reason: Option<String>,
     cancel_state: State<'_, Arc<TurnCancellationState>>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
     approval_state: State<'_, Arc<PendingToolApprovalState>>,
 ) -> Result<(), String> {
     if let Some(resolved_turn_id) = cancel_state.resolve_turn_id(&turn_id).await {
         approval_state.cancel_turn(&resolved_turn_id).await;
     }
     approval_state.cancel_turn(&turn_id).await;
-    cancel_chat_turn_inner(turn_id, reason, cancel_state.inner().clone()).await
+    let outcome = runtime.outcome(&turn_id);
+    cancel_chat_turn_inner(turn_id, reason, cancel_state.inner().clone()).await?;
+    if let Some(mut outcome) = outcome {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if outcome.borrow().is_some() { return Ok::<(), String>(()); }
+                outcome.changed().await.map_err(|_| "chat worker stopped".to_string())?;
+            }
+        }).await.map_err(|_| "chat_cancel_pending: cleanup is still running; retry after the terminal state".to_string())??;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1136,7 +1152,7 @@ pub async fn set_context_settings(
         .await;
 
     // Persist to disk
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let _ = std::fs::create_dir_all(&app_data);
@@ -1152,7 +1168,7 @@ pub async fn set_context_settings(
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
 pub struct ChatRequest {
     pub message: String,
     pub api_key: Option<String>,
@@ -1160,6 +1176,8 @@ pub struct ChatRequest {
     pub model: Option<String>,
     pub allow_image_gen: Option<bool>,
     pub images: Option<Vec<String>>,
+    /// One-shot vision context, excluded from the journal and history previews.
+    pub camera_frame: Option<String>,
     pub character_id: Option<String>,
     /// If true, the user instruction is hidden. Non-empty assistant replies may
     /// still be saved, while proactive no-op responses persist nothing.
@@ -1172,14 +1190,22 @@ pub struct ChatRequest {
     /// If true, this turn is regenerating an assistant reply for the last user message.
     #[serde(default)]
     pub regenerate: bool,
+    /// Validate and truncate the failed turn under this request's execution guard.
+    pub retry_failure: Option<FailureRetry>,
+    /// Validate and replace a saved assistant reply under the same execution guard.
+    pub regenerate_reply: Option<ReplyRegeneration>,
     /// Optional target conversation ID. If specified, backend strictly validates that this request
     /// belongs to this conversation; if unspecified, it binds to the active conversation at entry.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub conversation_generation: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct StreamChatResponse {
+    #[serde(default)]
+    pub text: String,
     pub conversation_id: String,
     pub user_message_id: Option<i64>,
     #[serde(default)]
@@ -1569,25 +1595,13 @@ fn rejected_tool_trace_payload_for_test(
     rejected_tool_trace_payload(outcome, turn_id, error, approval_request_id)
 }
 
-fn emit_tool_trace_event(
+async fn emit_tool_trace_event(
     app: &tauri::AppHandle,
-    turn_id: &str,
-    outcome: &crate::actions::ToolExecutionOutcome,
-) {
-    match &outcome.result {
-        Ok(result) => {
-            let _ = app.emit(
-                "chat-turn-tool",
-                tool_success_payload(outcome, turn_id, result),
-            );
-        }
-        Err(error) => {
-            let _ = app.emit(
-                "chat-turn-tool",
-                tool_error_payload(outcome, turn_id, error),
-            );
-        }
-    }
+    tool_trace_id: &str,
+    mut payload: serde_json::Value,
+) -> Result<(), tauri::Error> {
+    payload["tool_trace_id"] = serde_json::Value::String(tool_trace_id.to_owned());
+    crate::chat::runtime::emit_chat_event(app, "chat-turn-tool", payload).await
 }
 
 async fn execute_single_tool_after_approval(
@@ -1740,6 +1754,7 @@ struct ToolApprovalExecutionContext<'a> {
     tool_settings_state: &'a std::sync::Arc<RwLock<ToolSettings>>,
     character_id: &'a str,
     turn_id: &'a str,
+    tool_trace_id: &'a str,
     cancel_state: &'a TurnCancellationState,
 }
 
@@ -1776,8 +1791,8 @@ async fn wait_for_tool_approval_and_execute(
         return Err(KokoroError::Chat(e));
     }
 
-    ctx.app
-        .emit("chat-turn-tool", requested_payload.clone())
+    emit_tool_trace_event(ctx.app, ctx.tool_trace_id, requested_payload)
+        .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     let decision = wait_for_tool_approval_decision(
@@ -1992,21 +2007,7 @@ pub(crate) async fn resolve_trailing_visible_user_message(
     .await?;
 
     for (id, role, content, metadata) in rows {
-        if role == "tool" {
-            continue;
-        }
-        let technical_type = metadata
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|v| {
-                v.get("type")
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.to_string())
-            });
-        if matches!(
-            technical_type.as_deref(),
-            Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result")
-        ) {
+        if !super::context::is_visible_message_raw(&role, metadata.as_deref()) {
             continue;
         }
 
@@ -2040,6 +2041,79 @@ pub(crate) fn resolve_turn_user_message_id(
     }
 }
 
+#[tauri::command]
+pub fn finish_chat_playback(
+    window: tauri::Window,
+    request_id: String,
+    error: Option<String>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+) {
+    if let Some(snapshot) = runtime.finish_playback(&request_id, window.label(), error) {
+        let _ = window.app_handle().emit("chat-runtime-changed", snapshot);
+    }
+}
+
+#[tauri::command]
+pub fn get_chat_runtime_snapshot(runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>) -> Vec<crate::chat::runtime::ChatTurnSnapshot> {
+    runtime.snapshots()
+}
+
+#[tauri::command]
+pub async fn get_chat_view(
+    state: State<'_, AIOrchestrator>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+    known_version: Option<crate::chat::runtime::ChatViewVersion>,
+) -> Result<Option<crate::chat::runtime::ChatViewSnapshot>, KokoroError> {
+    crate::chat::runtime::get_chat_view(&state, &runtime, known_version).await
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatDraftSubmissionStatus {
+    Pending,
+    Persisted,
+    Unsent,
+}
+
+#[tauri::command]
+pub async fn recover_chat_draft_submission(
+    state: State<'_, AIOrchestrator>,
+    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+    character_id: String,
+    client_request_id: String,
+) -> Result<ChatDraftSubmissionStatus, KokoroError> {
+    recover_chat_draft_submission_inner(&state.db, &runtime, &character_id, &client_request_id).await
+}
+
+async fn recover_chat_draft_submission_inner(
+    db: &sqlx::SqlitePool,
+    runtime: &crate::chat::runtime::ChatRuntimeState,
+    character_id: &str,
+    client_request_id: &str,
+) -> Result<ChatDraftSubmissionStatus, KokoroError> {
+    let pending = runtime.recover_draft_admission(character_id, client_request_id);
+    let persisted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM conversation_messages AS message
+            JOIN conversations AS conversation ON conversation.id = message.conversation_id
+            WHERE conversation.character_id = ? AND message.role = 'user' AND message.metadata IS NOT NULL
+              AND (CASE WHEN json_valid(message.metadata)
+                        THEN json_extract(message.metadata, '$.client_request_id') END) = ?
+        )",
+    )
+    .bind(character_id)
+    .bind(client_request_id)
+    .fetch_one(db)
+    .await?;
+    Ok(if persisted {
+        ChatDraftSubmissionStatus::Persisted
+    } else if pending {
+        ChatDraftSubmissionStatus::Pending
+    } else {
+        ChatDraftSubmissionStatus::Unsent
+    })
+}
+
 // ── Stream Chat Command ────────────────────────────────────
 
 async fn validate_conversation_character_id(
@@ -2067,6 +2141,7 @@ struct PreparedChatTurn {
     conversation_id: Option<String>,
     user_message_id: Option<i64>,
     bound_generation: u64,
+    regeneration: Option<RegenerationPlan>,
     selected_vision_observation: Option<crate::vision::context::VisionObservation>,
     prompt_messages: Vec<crate::ai::context::Message>,
     llm_config: crate::llm::llm_config::LlmConfig,
@@ -2078,10 +2153,71 @@ struct PreparedChatTurn {
     memory_target_language: String,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The IPC future only waits on the application task; dropping a WebView cannot
+/// drop execution. Every producer enters this same idempotent admission path.
 #[tauri::command]
-pub async fn stream_chat(
-    window: Window,
+pub async fn stream_chat(app: tauri::AppHandle, request: ChatRequest) -> Result<StreamChatResponse, KokoroError> {
+    submit_chat(app, request).await
+}
+
+pub async fn submit_chat(app: tauri::AppHandle, mut request: ChatRequest) -> Result<StreamChatResponse, KokoroError> {
+    // Own the gate through journal completion, including before the worker is
+    // polled. Import must not invalidate a turn which can still write or finish.
+    let database_operation_guard = crate::ai::context::try_acquire_database_operation_read_guard()
+        .map_err(|error| KokoroError::Chat(error.into()))?;
+    ensure_client_request_id(&mut request.client_request_id);
+    let request_id = request.client_request_id.clone().unwrap();
+    let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().inner().clone();
+    let (created, mut outcome) = runtime.begin(&request).map_err(KokoroError::Chat)?;
+    if created {
+        let execution_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _database_operation_guard = database_operation_guard;
+            let app = execution_app;
+            // Catch panics as an explicit terminal error, so reconnect never leaves
+            // a request permanently pending after a worker failure.
+            let execution = execute_chat(app.clone(), request,
+                app.state(), app.state(), app.state(), app.state(), app.state(),
+                app.state(), app.state(), app.state(), app.state(), app.state());
+            let execution = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(execution)).await
+                .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())));
+            let mut result = match execution {
+                Err(KokoroError::Chat(ref message)) if is_turn_cancelled_error_message(message) =>
+                    runtime.cancelled_response(&request_id).ok_or_else(|| message.clone()),
+                other => other.map_err(|error| error.to_string()),
+            };
+            if let Ok(response) = &mut result {
+                if response.status.as_deref() != Some("cancelled") {
+                    if let Some(text) = runtime.turn_text(&request_id) { response.text = text; }
+                }
+            }
+            if let Some(snapshot) = runtime.complete(&request_id, result) {
+                let _ = app.emit("chat-runtime-changed", snapshot);
+            }
+        });
+    }
+    loop {
+        if let Some(result) = outcome.borrow().clone() { return result.map_err(KokoroError::Chat); }
+        outcome.changed().await.map_err(|_| KokoroError::Chat("chat worker stopped".into()))?;
+    }
+}
+
+pub fn submit_proactive(app: tauri::AppHandle, instruction: String) {
+    if app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().is_playing(&app) { return; }
+    tauri::async_runtime::spawn(async move {
+        let character_id = app.state::<AIOrchestrator>().character_id.lock().await.clone();
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "message": instruction, "hidden": true, "character_id": character_id,
+            "client_request_id": format!("proactive_{}", Uuid::new_v4())
+        })).expect("proactive request");
+        if let Err(error) = submit_chat(app, request).await {
+            tracing::debug!(target: "chat", "proactive request ended: {error}");
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_chat(
     app: tauri::AppHandle,
     request: ChatRequest,
     state: State<'_, AIOrchestrator>,
@@ -2115,9 +2251,21 @@ pub async fn stream_chat(
         .clone()
         .unwrap_or_else(|| "default".to_string());
 
+    let current_character_id = state.character_id.lock().await.clone();
+    if request.character_id.as_ref().is_some_and(|id| id != &current_character_id) {
+        return Err(KokoroError::Chat("Character changed while request was in-flight".into()));
+    }
+    request.character_id = Some(current_character_id.clone());
+
     let _turn_execution_guard = state
         .try_acquire_chat_turn(&client_request_id)
+        .await
         .map_err(KokoroError::Chat)?;
+
+    let speech = app.state::<crate::characters::activation::ActivationCoordinator>()
+        .get_committed(&state.db).await.ok().flatten()
+        .filter(|committed| committed.runtime.character_id == current_character_id)
+        .map(|committed| committed.runtime.tts);
 
     let assistant_turn_id = uuid::Uuid::new_v4().to_string();
     cancel_state
@@ -2137,13 +2285,15 @@ pub async fn stream_chat(
         return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
     }
 
-    app.emit(
+    crate::chat::runtime::emit_chat_event(&app,
         "chat-turn-acknowledged",
         serde_json::json!({
             "turn_id": assistant_turn_id,
             "client_request_id": client_request_id,
+            "character_id": current_character_id,
+            "conversation_id": request.conversation_id,
         }),
-    )
+    ).await
     .unwrap_or_else(|e| {
         tracing::warn!(
             target: "chat",
@@ -2165,6 +2315,23 @@ pub async fn stream_chat(
         let requested_conversation_id = request.conversation_id.clone();
         let (initial_conversation_id, initial_generation) =
             state.conversation_state_snapshot().await;
+        if request.conversation_generation.is_some_and(|generation| generation != initial_generation) {
+            return Err(KokoroError::Chat("Conversation changed while request was in-flight".into()));
+        }
+        #[cfg(debug_assertions)]
+        let lifecycle_hold = if std::env::var_os("KOKORO_TEST_DATA_ROOT").is_some()
+            && std::env::var_os("KOKORO_CHAT_LIFECYCLE_TEST_PREPARATION").is_some()
+        {
+            request.message.strip_prefix("[case:lifecycle-hold-preparation-")
+                .and_then(|phase| phase.strip_suffix(']'))
+        } else {
+            None
+        };
+        #[cfg(debug_assertions)]
+        if lifecycle_hold.is_some_and(|phase| phase != "after-selection")
+        {
+            std::future::pending::<()>().await;
+        }
         // Keep shared character_id in sync for modules that still read it (heartbeat)
         state.set_character_id(char_id.clone()).await;
 
@@ -2205,7 +2372,7 @@ pub async fn stream_chat(
                 request.message.chars().count(),
                 is_question,
             );
-            let _ = app.emit("chat-typing", &typing_params);
+            let _ = crate::chat::runtime::emit_chat_event(&app, "chat-typing", &typing_params).await;
         }
 
         // 1. Select current-turn vision context before any user-message persistence.
@@ -2217,7 +2384,7 @@ pub async fn stream_chat(
         // 2. Update History with User Message under conversation_switch_lock
         let system_provider = llm_state.system_provider().await;
 
-        let (conversation_id, user_message_id, history_snapshot, bound_generation) = {
+        let (conversation_id, user_message_id, history_snapshot, bound_generation, regeneration) = 'bind: {
             let _switch_guard = state.conversation_switch_lock.lock().await;
             let current_conv_id = state.current_conversation_id.lock().await.clone();
             let current_generation = state.current_conversation_generation();
@@ -2260,6 +2427,42 @@ pub async fn stream_chat(
 
             let bound_generation = initial_generation;
 
+            let regeneration = match (&request.retry_failure, &request.regenerate_reply) {
+                (Some(retry), None) => Some(Regeneration::Failure(retry)),
+                (None, Some(reply)) => Some(Regeneration::Reply(reply)),
+                (None, None) => None,
+                (Some(_), Some(_)) => return Err(KokoroError::Validation("Conflicting regeneration targets".into())),
+            };
+            if let Some(regeneration) = regeneration {
+                let conversation = current_conv_id.as_deref()
+                    .filter(|id| requested_conversation_id.as_deref() == Some(*id))
+                    .filter(|_| request.conversation_generation == Some(current_generation) && request.regenerate && !request.hidden)
+                    .ok_or_else(|| KokoroError::Validation("Invalid regeneration scope".into()))?;
+                let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
+                let plan = RegenerationPlan::prepare(&state, &runtime, regeneration, &char_id, conversation, &request.message).await?;
+                let history = plan.prompt_history(&request.message);
+                break 'bind (current_conv_id, Some(plan.user_message_id), history, bound_generation, Some(plan));
+            }
+
+            let trailing_visible_user = if request.regenerate {
+                if let Some(cid) = current_conv_id.as_deref() {
+                    match resolve_trailing_visible_user_message(&state.db, cid).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            tracing::warn!(
+                                "[stream_chat] Failed to query trailing visible message for '{}': {}",
+                                cid,
+                                e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let resolved_conv_id = if let Some(cid) = current_conv_id {
                 Some(cid)
             } else if request.hidden {
@@ -2291,30 +2494,25 @@ pub async fn stream_chat(
 
                 *state.current_conversation_id.lock().await = Some(new_id.clone());
                 state.bump_conversation_generation();
+                // Selection changes before the cancellable user-row write. A
+                // timeout in that gap belongs to the newly selected conversation.
+                if let Ok(mut recorded) = active_conv_id_for_prep.lock() {
+                    *recorded = Some(new_id.clone());
+                }
+                let _ = crate::chat::runtime::emit_chat_event(&app, "chat-turn-scope", serde_json::json!({
+                    "client_request_id": client_request_id,
+                    "turn_id": assistant_turn_id,
+                    "conversation_id": new_id,
+                    "conversation_generation": state.current_conversation_generation(),
+                })).await;
                 if state.persist_conversation_selection {
                     crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
                 }
-                Some(new_id)
-            };
-
-            let trailing_visible_user = if request.regenerate {
-                if let Some(ref cid) = resolved_conv_id {
-                    match resolve_trailing_visible_user_message(&state.db, cid).await {
-                        Ok(res) => res,
-                        Err(e) => {
-                            tracing::warn!(
-                                "[stream_chat] Failed to query trailing visible message for '{}': {}",
-                                cid,
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
+                #[cfg(debug_assertions)]
+                if lifecycle_hold == Some("after-selection") {
+                    std::future::pending::<()>().await;
                 }
-            } else {
-                None
+                Some(new_id)
             };
 
             let has_trailing_user = trailing_visible_user.is_some();
@@ -2332,7 +2530,7 @@ pub async fn stream_chat(
                         observation,
                         &char_id,
                         active_conv_id,
-                        None,
+                        Some(&assistant_turn_id),
                     )
                     .await;
                 }
@@ -2341,7 +2539,7 @@ pub async fn stream_chat(
                     .add_message_with_metadata_for_conversation_locked(
                         "user".to_string(),
                         request.message.clone(),
-                        None,
+                        Some(serde_json::json!({ "client_request_id": client_request_id }).to_string()),
                         &char_id,
                         active_conv_id,
                         Some(system_provider.clone()),
@@ -2377,11 +2575,23 @@ pub async fn stream_chat(
                 (cid, mid)
             };
 
+            // Bind persisted identity before releasing the same lock used by
+            // get_chat_view. A subscriber joining during prompt preparation must
+            // not project a second optimistic user beside this SQLite row.
+            let _ = crate::chat::runtime::emit_chat_event(&app, "chat-turn-bound", serde_json::json!({
+                "client_request_id": client_request_id,
+                "turn_id": assistant_turn_id,
+                "character_id": char_id,
+                "conversation_id": cid,
+                "conversation_generation": state.current_conversation_generation(),
+                "user_message_id": mid,
+            })).await;
+
             // 在释放会话切换锁前截取不可变历史快照，确保后续 prompt 组装使用与本次请求会话严格对齐的历史消息
             let history_snapshot: Vec<crate::ai::context::Message> =
                 state.history.lock().await.iter().cloned().collect();
 
-            (cid, mid, history_snapshot, bound_generation)
+            (cid, mid, history_snapshot, bound_generation, None)
         };
 
         if let Ok(mut guard) = active_conv_id_for_prep.lock() {
@@ -2498,7 +2708,7 @@ pub async fn stream_chat(
         // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
         for warning in compose_warnings {
             tracing::warn!("[compose_prompt] {}", warning);
-            let _ = app.emit("chat-warning", &warning);
+            let _ = crate::chat::runtime::emit_chat_event(&app, "chat-warning", &warning).await;
         }
 
         Ok(PreparedChatTurn {
@@ -2506,6 +2716,7 @@ pub async fn stream_chat(
             conversation_id,
             user_message_id,
             bound_generation,
+            regeneration,
             selected_vision_observation,
             prompt_messages,
             llm_config,
@@ -2531,7 +2742,7 @@ pub async fn stream_chat(
                 .lock()
                 .ok()
                 .and_then(|g| g.clone());
-            let _ = app.emit(
+            let _ = crate::chat::runtime::emit_chat_event(&app,
                 "chat-turn-finish",
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
@@ -2540,7 +2751,7 @@ pub async fn stream_chat(
                     "conversation_id": recorded_conv_id,
                     "assistant_message_id": serde_json::Value::Null,
                 }),
-            );
+            ).await;
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
         }
         _ = tokio::time::sleep(chat_turn_preparation_timeout()) => {
@@ -2555,16 +2766,17 @@ pub async fn stream_chat(
                 .lock()
                 .ok()
                 .and_then(|g| g.clone());
-            let _ = app.emit(
+            let _ = crate::chat::runtime::emit_chat_event(&app,
                 "chat-turn-finish",
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "status": "error",
+                    "stage": "preparation_timeout",
                     "client_request_id": client_request_id,
                     "conversation_id": recorded_conv_id,
                     "assistant_message_id": serde_json::Value::Null,
                 }),
-            );
+            ).await;
             return Err(KokoroError::Chat(format!(
                 "Turn preparation timed out after {}s",
                 chat_turn_preparation_timeout().as_secs()
@@ -2580,6 +2792,7 @@ pub async fn stream_chat(
         mut conversation_id,
         user_message_id,
         bound_generation,
+        regeneration,
         selected_vision_observation,
         prompt_messages,
         llm_config,
@@ -2688,7 +2901,15 @@ pub async fn stream_chat(
         return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
     }
 
-    app.emit(
+    let keep_through_message_id = regeneration.as_ref()
+        .filter(|plan| plan.keep_through_message_id != plan.user_message_id)
+        .map(|plan| plan.keep_through_message_id);
+    if let Some(regeneration) = regeneration {
+        let conversation = conversation_id.as_deref().ok_or_else(|| KokoroError::Validation("Missing regeneration conversation".into()))?;
+        regeneration.commit(&state, conversation, bound_generation, cancel_rx.as_ref()).await?;
+    }
+
+    crate::chat::runtime::emit_chat_event(&app,
         "chat-turn-start",
         serde_json::json!({
             "turn_id": assistant_turn_id,
@@ -2696,7 +2917,7 @@ pub async fn stream_chat(
             "conversation_id": conversation_id,
             "user_message_id": user_message_id,
         }),
-    )
+    ).await
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     // For hidden messages (touch/proactive interactions), the user message
@@ -2717,36 +2938,32 @@ pub async fn stream_chat(
         }
     }
 
-    // Attach images to the last user message if present
-    if let Some(images) = &request.images {
-        if !images.is_empty() {
-            // Find the last message with role "user"
-            if let Some(last_user_msg) = client_messages
-                .iter_mut()
-                .rfind(|m| crate::llm::messages::is_user_message(&m.message))
-            {
-                let text_content = extract_message_text(&last_user_msg.message);
+    // Attach the selected images and one-shot camera context to the current user message.
+    let images = request.images.as_deref().unwrap_or_default();
+    let camera_frame = request.camera_frame.take();
+    let image_count = images.len() + usize::from(camera_frame.is_some());
+    if image_count > 0 {
+        if let Some(last_user_msg) = client_messages
+            .iter_mut()
+            .rfind(|m| crate::llm::messages::is_user_message(&m.message))
+        {
+            let text_content = extract_message_text(&last_user_msg.message);
+            let mut processed_images = Vec::with_capacity(image_count);
 
-                // Process images: convert local URLs to base64
-                let mut processed_images = Vec::with_capacity(images.len());
+            if !images.is_empty() {
                 let vision_server_guard = vision_server.lock().await;
                 let port = vision_server_guard.port;
                 let upload_dir = vision_server_guard.upload_dir.clone();
                 drop(vision_server_guard);
-
                 for img_url in images {
                     let mut final_url = img_url.clone();
-                    // Check if local
                     if img_url.contains(&format!("http://127.0.0.1:{}", port)) {
-                        // Extract filename
                         if let Some(filename) = img_url.split("/vision/").nth(1) {
                             let file_path = upload_dir.join(filename);
                             if let Ok(file_content) = tokio::fs::read(&file_path).await {
-                                // Convert to base64
                                 use base64::Engine as _;
                                 let b64 =
                                     base64::engine::general_purpose::STANDARD.encode(&file_content);
-                                // Detect mime type
                                 let mime = crate::vision::server::detect_image_mime(&file_content)
                                     .unwrap_or("image/png".to_string());
                                 final_url = format!("data:{};base64,{}", mime, b64);
@@ -2755,16 +2972,16 @@ pub async fn stream_chat(
                     }
                     processed_images.push(final_url);
                 }
-
-                // Create multimodal content
-                replace_user_message_with_images(
-                    &mut last_user_msg.message,
-                    text_content,
-                    processed_images,
-                )
-                .map_err(KokoroError::Chat)?;
-                tracing::info!(target: "chat", "[Chat] Attached {} images to user message", images.len());
             }
+
+            processed_images.extend(camera_frame);
+            replace_user_message_with_images(
+                &mut last_user_msg.message,
+                text_content,
+                processed_images,
+            )
+            .map_err(KokoroError::Chat)?;
+            tracing::info!(target: "chat", "[Chat] Attached {} images to user message", image_count);
         }
     }
 
@@ -2853,7 +3070,7 @@ pub async fn stream_chat(
                     Some(char_id.clone()),
                     None,
                 );
-                emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                 stream_failure_message = Some(err_msg);
                 stream_failed = true;
                 break;
@@ -2875,7 +3092,7 @@ pub async fn stream_chat(
                             Some(char_id.clone()),
                             None,
                         );
-                        emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                         stream_failure_message = Some(err_msg);
                         stream_failed = true;
                         break;
@@ -2947,7 +3164,7 @@ pub async fn stream_chat(
                         Some(char_id.clone()),
                         None,
                     );
-                    emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                    emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                     break;
                 }
                 StreamPollResult::StreamEnded => {
@@ -2971,7 +3188,7 @@ pub async fn stream_chat(
                             Some(char_id.clone()),
                             None,
                         );
-                        emit_and_persist_failure_event(&app, &state, failure_event).await?;
+                        emit_and_persist_failure_event(&app, &state, failure_event, user_message_id, keep_through_message_id).await?;
                     } else {
                         tracing::error!(
                             target: "chat",
@@ -3002,7 +3219,7 @@ pub async fn stream_chat(
                         )
                         .await
                         .map_err(KokoroError::Chat)?;
-                        app.emit("chat-turn-delta", payload)
+                        crate::chat::runtime::emit_chat_event(&app, "chat-turn-delta", payload).await
                             .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     }
                 }
@@ -3046,7 +3263,7 @@ pub async fn stream_chat(
                             None => {
                                 if let Some(ref cid) = conversation_id {
                                     match state
-                                        .persist_streaming_draft(cid, &draft_content)
+                                        .persist_streaming_draft(cid, &draft_content, &assistant_turn_id)
                                         .await
                                     {
                                         Ok(id) => {
@@ -3084,7 +3301,7 @@ pub async fn stream_chat(
                 )
                 .await
                 .map_err(KokoroError::Chat)?;
-                app.emit("chat-turn-delta", payload)
+                crate::chat::runtime::emit_chat_event(&app, "chat-turn-delta", payload).await
                     .map_err(|e| KokoroError::Chat(e.to_string()))?;
             }
         }
@@ -3149,7 +3366,7 @@ pub async fn stream_chat(
                         // First round: insert draft row
                         if let Some(ref cid) = conversation_id {
                             match state
-                                .persist_streaming_draft(cid, &draft_content)
+                                .persist_streaming_draft(cid, &draft_content, &assistant_turn_id)
                                 .await
                             {
                                 Ok(id) => {
@@ -3199,7 +3416,7 @@ pub async fn stream_chat(
             .await
             .map_err(KokoroError::Chat)?;
         let execution_outcomes = match execute_tool_calls_with_cancellation(
-            window.app_handle(),
+            &app,
             &_action_registry.inner().clone(),
             &tool_settings_state.inner().clone(),
             &char_id,
@@ -3235,7 +3452,9 @@ pub async fn stream_chat(
             .any(|outcome| outcome.needs_feedback);
         let has_native_tool_calls = tool_calls.iter().any(|tc| tc.tool_call_id.is_some());
 
-        for outcome in execution_outcomes {
+        for (index, outcome) in execution_outcomes.into_iter().enumerate() {
+            // Scope the trace to this turn. Providers can omit or reuse their call IDs.
+            let tool_trace_id = format!("{round}:{index}");
             ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
                 .await
                 .map_err(KokoroError::Chat)?;
@@ -3281,6 +3500,7 @@ pub async fn stream_chat(
                         tool_settings_state: &tool_settings_state.inner().clone(),
                         character_id: &char_id,
                         turn_id: &assistant_turn_id,
+                        tool_trace_id: &tool_trace_id,
                         cancel_state: cancel_state.inner().as_ref(),
                     };
                     let (resolved_result, resolved_payload) = wait_for_tool_approval_and_execute(
@@ -3300,7 +3520,7 @@ pub async fn stream_chat(
                     ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
                         .await
                         .map_err(KokoroError::Chat)?;
-                    app.emit("chat-turn-tool", resolved_payload)
+                    emit_tool_trace_event(&app, &tool_trace_id, resolved_payload).await
                         .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     ensure_turn_not_cancelled(cancel_state.inner().as_ref(), &assistant_turn_id)
                         .await
@@ -3308,14 +3528,16 @@ pub async fn stream_chat(
                     resolved_result
                 } else {
                     tracing::error!(target: "tools", "[ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
+                    let payload = tool_error_payload(&outcome, &assistant_turn_id, error);
+                    let _ = emit_tool_trace_event(&app, &tool_trace_id, payload).await;
                     outcome.result.clone()
                 }
             } else {
                 if let Ok(success) = &outcome.result {
                     tracing::info!(target: "tools", "[ToolCall] {} => {}", outcome.tool_name(), success.message);
+                    let payload = tool_success_payload(&outcome, &assistant_turn_id, success);
+                    let _ = emit_tool_trace_event(&app, &tool_trace_id, payload).await;
                 }
-                emit_tool_trace_event(&app, &assistant_turn_id, &outcome);
                 outcome.result.clone()
             };
 
@@ -3345,10 +3567,10 @@ pub async fn stream_chat(
                 };
                 let tool_result_msg = tool_result_message(tool_call_id.clone(), message_text);
                 tool_result_messages.push(tool_result_msg.clone());
-                persisted_native_tool_results.push((
-                    tool_metadata_value(&outcome, tool_call_id, &assistant_turn_id),
-                    tool_result_msg,
-                ));
+                let mut metadata = tool_metadata_value(&outcome, tool_call_id, &assistant_turn_id);
+                metadata["tool_trace_id"] = serde_json::Value::String(tool_trace_id);
+                metadata["user_message_id"] = serde_json::json!(user_message_id);
+                persisted_native_tool_results.push((metadata, tool_result_msg));
             }
         }
 
@@ -3356,6 +3578,7 @@ pub async fn stream_chat(
             let mut assistant_tool_call_metadata_value = serde_json::json!({
                 "type": "assistant_tool_calls",
                 "turn_id": assistant_turn_id,
+                "user_message_id": user_message_id,
                 "tool_calls": continuation_tool_calls,
             });
             if !round_reasoning_content.trim().is_empty() {
@@ -3523,7 +3746,7 @@ pub async fn stream_chat(
                 cleanup_turn_artifacts(&state, cid, &assistant_turn_id, None).await;
             }
             // Flush typewriter/reveal buffer in frontend
-            let _ = app.emit(
+            let _ = crate::chat::runtime::emit_chat_event(&app,
                 "chat-turn-text-complete",
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
@@ -3531,10 +3754,10 @@ pub async fn stream_chat(
                     "translation_pending": false,
                     "translation": serde_json::Value::Null,
                 }),
-            );
+            ).await;
         }
 
-        app.emit(
+        crate::chat::runtime::emit_chat_event(&app,
             "chat-turn-finish",
             serde_json::json!({
                 "turn_id": assistant_turn_id,
@@ -3543,7 +3766,7 @@ pub async fn stream_chat(
                 "conversation_id": conversation_id,
                 "assistant_message_id": finish_draft_row_id,
             }),
-        )
+        ).await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
         let err_msg = stream_failure_message
@@ -3598,7 +3821,7 @@ pub async fn stream_chat(
                 cleanup_turn_artifacts(&state, cid, &assistant_turn_id, draft_row_id).await;
             }
         }
-        app.emit(
+        crate::chat::runtime::emit_chat_event(&app,
             "chat-turn-text-complete",
             serde_json::json!({
                 "turn_id": assistant_turn_id,
@@ -3606,9 +3829,9 @@ pub async fn stream_chat(
                 "translation_pending": false,
                 "translation": serde_json::Value::Null,
             }),
-        )
+        ).await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
-        app.emit(
+        crate::chat::runtime::emit_chat_event(&app,
             "chat-turn-finish",
             serde_json::json!({
                 "turn_id": assistant_turn_id,
@@ -3617,7 +3840,7 @@ pub async fn stream_chat(
                 "conversation_id": conversation_id,
                 "assistant_message_id": draft_row_id,
             }),
-        )
+        ).await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
         return Ok(None);
     }
@@ -3663,7 +3886,7 @@ pub async fn stream_chat(
         && !resp_lang.is_empty()
         && user_lang != resp_lang;
 
-    app.emit(
+    crate::chat::runtime::emit_chat_event(&app,
         "chat-turn-text-complete",
         serde_json::json!({
             "turn_id": assistant_turn_id,
@@ -3675,7 +3898,7 @@ pub async fn stream_chat(
                 serde_json::Value::String(all_translations.join(" "))
             },
         }),
-    )
+    ).await
     .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
     // Fallback translation: if main LLM missed the [TRANSLATE:...] tag, use system LLM to fill in
@@ -3805,10 +4028,10 @@ pub async fn stream_chat(
                                 .unwrap_or(false);
                             if is_valid {
                                 tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
-                                let _ = app.emit(
+                                let _ = crate::chat::runtime::emit_chat_event(&app,
                                     "chat-cue",
                                     serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
-                                );
+                                ).await;
                             } else {
                                 tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
                             }
@@ -3825,13 +4048,13 @@ pub async fn stream_chat(
     // Emit combined translation from all rounds
     if !all_translations.is_empty() {
         let combined_translation = all_translations.join(" ");
-        let _ = app.emit(
+        let _ = crate::chat::runtime::emit_chat_event(&app,
             "chat-turn-translation",
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "translation": combined_translation,
             }),
-        );
+        ).await;
     }
 
     // 8. Update History with final response
@@ -4097,7 +4320,7 @@ pub async fn stream_chat(
         let imagegen_svc = imagegen_state.inner().clone();
         let system_provider = llm_state.system_provider().await;
         let reply_for_analysis = full_response.clone();
-        let window_for_img = window.clone();
+        let window_for_img = app.clone();
         let window_size = window_size_state.get().await;
 
         tauri::async_runtime::spawn(async move {
@@ -4170,7 +4393,7 @@ pub async fn stream_chat(
         });
     }
 
-        app.emit(
+        crate::chat::runtime::emit_chat_event(&app,
             "chat-turn-finish",
             serde_json::json!({
                 "turn_id": assistant_turn_id,
@@ -4179,7 +4402,7 @@ pub async fn stream_chat(
                 "conversation_id": conversation_id,
                 "assistant_message_id": draft_row_id,
             }),
-        )
+        ).await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
 
         Ok(draft_row_id)
@@ -4187,13 +4410,23 @@ pub async fn stream_chat(
     .await;
 
     match stream_result {
-        Ok(assistant_message_id) => Ok(StreamChatResponse {
+        Ok(assistant_message_id) => {
+            if assistant_message_id.is_some() {
+                if let Some(speech) = speech {
+                    let text = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
+                        .turn_text(&client_request_id).unwrap_or_default();
+                    crate::chat::runtime::speak_completed_turn(app.clone(), client_request_id, assistant_turn_id.clone(), text, speech);
+                }
+            }
+            Ok(StreamChatResponse {
+            text: String::new(),
             conversation_id: conversation_id.unwrap_or_default(),
             user_message_id,
             assistant_message_id,
             client_request_id: request.client_request_id,
             status: Some("completed".to_string()),
-        }),
+        })
+        },
         Err(KokoroError::Chat(message)) if is_turn_cancelled_error_message(&message) => {
             tracing::info!(
                 target: "chat",
@@ -4238,7 +4471,7 @@ pub async fn stream_chat(
                         .await;
                 }
             }
-            app.emit(
+            crate::chat::runtime::emit_chat_event(&app,
                 "chat-turn-finish",
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
@@ -4247,9 +4480,10 @@ pub async fn stream_chat(
                     "conversation_id": conversation_id,
                     "assistant_message_id": serde_json::Value::Null,
                 }),
-            )
+            ).await
             .map_err(|e| KokoroError::Chat(e.to_string()))?;
             Ok(StreamChatResponse {
+            text: String::new(),
                 conversation_id: conversation_id.unwrap_or_default(),
                 user_message_id,
                 assistant_message_id: None,
@@ -4307,6 +4541,7 @@ mod tests {
     fn test_stream_chat_response_serialization_and_backward_compatibility() {
         // 包含 assistant_message_id 与 client_request_id 与 status 时的正向序列化与反序列化
         let res = StreamChatResponse {
+            text: String::new(),
             conversation_id: "conv-123".to_string(),
             user_message_id: Some(10),
             assistant_message_id: Some(11),
@@ -4319,6 +4554,7 @@ mod tests {
         assert_eq!(deserialized, res);
 
         let cancelled_res = StreamChatResponse {
+            text: String::new(),
             conversation_id: "conv-123".to_string(),
             user_message_id: Some(10),
             assistant_message_id: None,
@@ -4331,6 +4567,7 @@ mod tests {
         assert_eq!(deserialized_cancelled, cancelled_res);
 
         let error_res = StreamChatResponse {
+            text: String::new(),
             conversation_id: "conv-123".to_string(),
             user_message_id: Some(10),
             assistant_message_id: None,
@@ -5939,6 +6176,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_recovery_fences_late_admission_before_allowing_resend() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let runtime = crate::chat::runtime::ChatRuntimeState::default();
+        let mut request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "message": "draft", "character_id": "char-a", "client_request_id": "closed-window"
+        })).unwrap();
+
+        assert_eq!(
+            recover_chat_draft_submission_inner(&state.db, &runtime, "char-a", "closed-window").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+        assert!(matches!(runtime.begin(&request), Err(error) if error.starts_with("chat_draft_abandoned:")));
+        assert!(runtime.snapshots().is_empty());
+
+        request.client_request_id = Some("resend".into());
+        assert!(runtime.begin(&request).unwrap().0);
+        assert_eq!(
+            recover_chat_draft_submission_inner(&state.db, &runtime, "char-a", "resend").await.unwrap(),
+            ChatDraftSubmissionStatus::Pending,
+        );
+        assert!(!runtime.begin(&request).unwrap().0);
+        runtime.complete("resend", Err("chat_turn_busy".into())).unwrap();
+        assert_eq!(
+            recover_chat_draft_submission_inner(&state.db, &runtime, "char-a", "resend").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_submission_recovery_uses_the_saved_request_after_runtime_restart() {
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let db = &state.db;
+        let runtime = crate::chat::runtime::ChatRuntimeState::default();
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "message": "same text", "character_id": "char-a", "client_request_id": "draft-1"
+        })).unwrap();
+        runtime.begin(&request).unwrap();
+        assert_eq!(
+            recover_chat_draft_submission_inner(db, &runtime, "char-a", "draft-1").await.unwrap(),
+            ChatDraftSubmissionStatus::Pending,
+        );
+
+        sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('conv-a', 'char-a', 'now', 'now')")
+            .execute(db).await.unwrap();
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-a', 'user', 'same text', 'legacy malformed metadata', 'now')")
+            .execute(db).await.unwrap();
+        state.add_message_with_metadata_for_conversation(
+            "user".into(), request.message,
+            Some(serde_json::json!({ "client_request_id": "draft-1" }).to_string()),
+            "char-a", Some("conv-a"), None,
+        ).await.unwrap();
+
+        let restarted = crate::chat::runtime::ChatRuntimeState::default();
+        assert_eq!(
+            recover_chat_draft_submission_inner(db, &restarted, "char-a", "draft-1").await.unwrap(),
+            ChatDraftSubmissionStatus::Persisted,
+        );
+        assert_eq!(
+            recover_chat_draft_submission_inner(db, &restarted, "char-b", "draft-1").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+        assert_eq!(
+            recover_chat_draft_submission_inner(db, &restarted, "char-a", "draft-2").await.unwrap(),
+            ChatDraftSubmissionStatus::Unsent,
+        );
+    }
+
+    #[tokio::test]
     async fn test_conversation_state_snapshot_tracks_generation_and_id() {
         let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
         let (init_id, init_gen) = state.conversation_state_snapshot().await;
@@ -6691,12 +6996,14 @@ mod tests {
         // Turn 1 acquires lock
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 while turn 1 is active must fail with chat_turn_busy
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-2")
+            .await
             .expect_err("turn 2 must be rejected while turn 1 is active");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -6751,6 +7058,7 @@ mod tests {
         // Turn 2 can now acquire lock and proceed without chat_turn_busy!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-2")
+            .await
             .expect("turn 2 must succeed after turn 1 was cancelled");
         assert_eq!(guard2.context().unwrap().client_request_id, "req-2");
         assert!(orchestrator.is_chat_busy());
@@ -6768,12 +7076,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 is rejected
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-timeout-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -6817,6 +7127,7 @@ mod tests {
         // Subsequent request succeeds
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-timeout-2")
+            .await
             .expect("subsequent request must acquire lock after timeout");
         assert_eq!(guard2.context().unwrap().client_request_id, "req-timeout-2");
         drop(guard2);
@@ -6968,7 +7279,7 @@ mod tests {
 
         // And a draft row representing Round 2's partial text before timeout
         let draft_id = state
-            .persist_streaming_draft(cid, "Partial text in round 2 before timeout...")
+            .persist_streaming_draft(cid, "Partial text in round 2 before timeout...", turn_id)
             .await
             .unwrap();
 
@@ -7009,12 +7320,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-tool-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 is rejected
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-tool-cancel-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7076,6 +7389,7 @@ mod tests {
         // Subsequent chat request succeeds immediately without chat_turn_busy!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-tool-cancel-2")
+            .await
             .expect("turn 2 must succeed after tool execution was cancelled");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7098,6 +7412,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-after-action-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7146,6 +7461,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-after-action-2")
+            .await
             .expect("turn 2 must succeed after after-action hook was cancelled");
         assert_eq!(guard2.context().unwrap().client_request_id, "req-after-action-2");
         drop(guard2);
@@ -7162,12 +7478,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-tool-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 is rejected
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-tool-timeout-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7202,6 +7520,7 @@ mod tests {
         // Subsequent request succeeds
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-tool-timeout-2")
+            .await
             .expect("subsequent request must acquire lock after tool timeout");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7292,12 +7611,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prompt-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent request rejected while turn 1 is active
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-prompt-timeout-2")
+            .await
             .expect_err("must be rejected while busy");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7339,6 +7660,7 @@ mod tests {
         // Turn 2 succeeds immediately
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prompt-timeout-2")
+            .await
             .expect("turn 2 must succeed after prompt composition timed out");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7361,6 +7683,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prompt-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7412,6 +7735,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prompt-cancel-2")
+            .await
             .expect("turn 2 must succeed after prompt composition was cancelled");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7429,6 +7753,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-hook-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7468,6 +7793,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-hook-timeout-2")
+            .await
             .expect("turn 2 must acquire lock after hook timeout");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7485,6 +7811,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-best-effort-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7516,6 +7843,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-best-effort-2")
+            .await
             .expect("turn 2 must acquire lock after previous turn completed");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7535,12 +7863,14 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-fallback-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
         // Concurrent Turn 2 while turn 1 is active must fail with chat_turn_busy
         let busy_err = orchestrator
             .try_acquire_chat_turn("req-fallback-timeout-2")
+            .await
             .expect_err("turn 2 must be rejected while turn 1 is active");
         assert!(busy_err.contains("chat_turn_busy"));
 
@@ -7591,6 +7921,7 @@ mod tests {
         // Subsequent chat request can now acquire lock and proceed without chat_turn_busy!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-fallback-timeout-2")
+            .await
             .expect("turn 2 must succeed after turn 1 fallback timeout");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7610,6 +7941,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-fallback-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7666,6 +7998,7 @@ mod tests {
         // Subsequent request succeeds immediately!
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-fallback-cancel-2")
+            .await
             .expect("subsequent turn must acquire lock after fallback cancellation");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7688,6 +8021,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prep-sysprov-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7745,6 +8079,7 @@ mod tests {
         // Turn 2 succeeds immediately without chat_turn_busy
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prep-sysprov-cancel-2")
+            .await
             .expect("turn 2 must succeed after preparation was cancelled");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7762,6 +8097,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prep-timeout-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7802,6 +8138,7 @@ mod tests {
         // Turn 2 succeeds immediately
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prep-timeout-2")
+            .await
             .expect("turn 2 must succeed after preparation timed out");
         assert_eq!(
             guard2.context().unwrap().client_request_id,
@@ -7824,6 +8161,7 @@ mod tests {
 
         let guard1 = orchestrator
             .try_acquire_chat_turn("req-prep-convlock-cancel-1")
+            .await
             .expect("turn 1 should acquire lock");
         assert!(orchestrator.is_chat_busy());
 
@@ -7878,6 +8216,7 @@ mod tests {
 
         let guard2 = orchestrator
             .try_acquire_chat_turn("req-prep-convlock-cancel-2")
+            .await
             .expect("turn 2 must succeed after turn 1 cancelled");
         drop(guard2);
         assert!(!orchestrator.is_chat_busy());

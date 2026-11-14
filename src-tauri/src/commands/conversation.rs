@@ -1,6 +1,7 @@
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::State;
 
 #[derive(Serialize)]
@@ -187,7 +188,7 @@ pub async fn load_conversation_inner(
                 .and_then(|value| value.as_str());
             if matches!(
                 technical_type,
-                Some("assistant_tool_calls") | Some("translation_instruction")
+                Some("assistant_tool_calls") | Some("translation_instruction") | Some("invalid_failure_event")
             ) {
                 return None;
             }
@@ -213,6 +214,12 @@ pub async fn load_conversation(
     request: LoadConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<LoadedConversation, KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
+
     let max_chars = *state.max_message_chars.lock().await;
     load_conversation_inner(
         request,
@@ -292,6 +299,12 @@ pub async fn delete_conversation(
     request: DeleteConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
+
     delete_conversation_inner(
         request,
         &state.db,
@@ -325,6 +338,11 @@ pub async fn list_character_ids(
 
 #[tauri::command]
 pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
     state.clear_history().await;
     Ok(String::new())
 }
@@ -378,6 +396,7 @@ pub async fn update_conversation_state(
 #[derive(Deserialize, Debug, Clone)]
 pub struct EditConversationMessageRequest {
     pub conversation_id: Option<String>,
+    pub conversation_generation: Option<u64>,
     pub message_id: Option<i64>,
     pub visible_index: Option<usize>,
     pub new_content: String,
@@ -400,6 +419,7 @@ pub async fn edit_conversation_message_inner(
     current_conversation_id_lock: &tokio::sync::Mutex<Option<String>>,
     max_message_chars: usize,
     conversation_switch_lock: &tokio::sync::Mutex<()>,
+    conversation_generation: &AtomicU64,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
     let trimmed = request.new_content.trim();
     if trimmed.is_empty() {
@@ -410,6 +430,18 @@ pub async fn edit_conversation_message_inner(
     // 会话切换锁：编辑期间的会话重同步与删除/加载/清空等历史重写路径互斥，
     // 防止编辑在会话切换窗口内把旧会话历史覆盖到新会话
     let _switch_guard = conversation_switch_lock.lock().await;
+    // Panel edits are scoped to a selection; unscoped edits resolve ownership by row ID.
+    if let Some(expected) = request.conversation_generation {
+        let active_id = current_conversation_id_lock.lock().await;
+        if expected != conversation_generation.load(Ordering::SeqCst)
+            || request.conversation_id.is_none()
+            || request.conversation_id.as_ref() != active_id.as_ref()
+        {
+            return Err(KokoroError::Chat(
+                "Conversation changed before the message could be edited".to_string(),
+            ));
+        }
+    }
     let content_to_persist =
         crate::ai::context::truncate_message_content(trimmed.to_string(), max_message_chars);
 
@@ -454,25 +486,7 @@ pub async fn edit_conversation_message_inner(
 
         let visible_rows: Vec<i64> = rows
             .into_iter()
-            .filter(|(_, role, meta)| {
-                if role == "tool" {
-                    return false;
-                }
-                let technical_type = meta
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                    .and_then(|v| {
-                        v.get("type")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                    });
-                !matches!(
-                    technical_type.as_deref(),
-                    Some("assistant_tool_calls")
-                        | Some("translation_instruction")
-                        | Some("tool_result")
-                )
-            })
+            .filter(|(_, role, meta)| super::context::is_visible_message_raw(role, meta.as_deref()))
             .map(|(id, _, _)| id)
             .collect();
 
@@ -558,6 +572,12 @@ pub async fn edit_conversation_message(
     request: EditConversationMessageRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
+    let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _history_guard = state
+        .try_acquire_chat_turn("history_mutation")
+        .await
+        .map_err(KokoroError::Chat)?;
+
     let max_chars = *state.max_message_chars.lock().await;
     edit_conversation_message_inner(
         request,
@@ -566,6 +586,7 @@ pub async fn edit_conversation_message(
         &state.current_conversation_id,
         max_chars,
         &state.conversation_switch_lock,
+        &state.conversation_generation,
     )
     .await
 }
@@ -644,19 +665,69 @@ mod tests {
             metadata: None,
         });
 
-        // Edit via message_id
+        let generation = AtomicU64::new(1);
+        let lock = switch_lock();
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-2', 'char-1', 'Other', ?, ?)")
+            .bind(&now)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let request = EditConversationMessageRequest {
+            conversation_id: Some("conv-1".to_string()),
+            conversation_generation: Some(1),
+            message_id: Some(1),
+            visible_index: None,
+            new_content: "edited message content".to_string(),
+        };
+        for id in ["conv-2", "conv-1"] {
+            load_conversation_inner(
+                LoadConversationRequest { id: id.into() },
+                &pool,
+                &history,
+                &current_conv_id,
+                2000,
+                &lock,
+                Some(&generation),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+
+        let stale = edit_conversation_message_inner(
+            request.clone(),
+            &pool,
+            &history,
+            &current_conv_id,
+            2000,
+            &lock,
+            &generation,
+        )
+        .await;
+        assert!(matches!(stale, Err(KokoroError::Chat(_))));
+        let (content, updated_at): (String, String) = sqlx::query_as(
+            "SELECT m.content, c.updated_at FROM conversation_messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(content, "original message");
+        assert_eq!(updated_at, now);
+        assert_eq!(history.lock().await[0].content, "original message");
+
+        // A fresh editor can still edit the same row.
         let res = edit_conversation_message_inner(
             EditConversationMessageRequest {
-                conversation_id: Some("conv-1".to_string()),
-                message_id: Some(1),
-                visible_index: None,
-                new_content: "edited message content".to_string(),
+                conversation_generation: Some(3),
+                ..request
             },
             &pool,
             &history,
             &current_conv_id,
             2000,
-            &switch_lock(),
+            &lock,
+            &generation,
         )
         .await
         .unwrap();
@@ -715,6 +786,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-b".to_string()),
                 message_id: Some(1),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "must-not-be-written".to_string(),
             },
@@ -723,6 +795,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap_err();
@@ -791,6 +864,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: None,
                 message_id: Some(1),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "edited-message-a".to_string(),
             },
@@ -799,6 +873,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap();
@@ -859,6 +934,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-a".to_string()),
                 message_id: Some(1),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "must-roll-back".to_string(),
             },
@@ -867,6 +943,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap_err();
@@ -935,6 +1012,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-2".to_string()),
                 message_id: None,
+                conversation_generation: None,
                 visible_index: Some(1),
                 new_content: "new answer content".to_string(),
             },
@@ -943,6 +1021,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap();
@@ -1013,6 +1092,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-tools".to_string()),
                 message_id: None,
+                conversation_generation: None,
                 visible_index: Some(2),
                 new_content: "Thanks! What about tomorrow?".to_string(),
             },
@@ -1021,6 +1101,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap();
@@ -1055,6 +1136,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-tools".to_string()),
                 message_id: Some(5),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "Direct message_id edit on user question".to_string(),
             },
@@ -1063,6 +1145,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap();
@@ -1085,6 +1168,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-1".to_string()),
                 message_id: Some(1),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "   ".to_string(),
             },
@@ -1093,6 +1177,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap_err();
@@ -1104,6 +1189,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: None,
                 message_id: None,
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "valid text".to_string(),
             },
@@ -1112,6 +1198,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap_err();
@@ -1123,6 +1210,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: None,
                 message_id: Some(999),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: "valid text".to_string(),
             },
@@ -1131,6 +1219,7 @@ mod tests {
             &current_conv_id,
             2000,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap_err();
@@ -1165,6 +1254,7 @@ mod tests {
             EditConversationMessageRequest {
                 conversation_id: Some("conv-trunc".to_string()),
                 message_id: Some(1),
+                conversation_generation: None,
                 visible_index: None,
                 new_content: long_text.to_string(),
             },
@@ -1173,6 +1263,7 @@ mod tests {
             &current_conv_id,
             20,
             &switch_lock(),
+            &AtomicU64::new(0),
         )
         .await
         .unwrap();

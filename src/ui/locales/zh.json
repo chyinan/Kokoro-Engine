@@ -1136,6 +1136,7 @@
         }
     },
     "chat": {
+        "speech_failed": "未能朗读这条回复：{{error}}",
         "status": {
             "streaming": "生成中",
             "chat": "对话"
@@ -1165,6 +1166,7 @@
             "new_messages": "有新消息 ↓"
         },
         "errors": {
+            "history_turns_interleaved": "不同轮次的消息交错，从这里继续可能会删掉部分回复。",
             "image_too_large": "图片过大 (最大 5MB)",
             "only_images": "仅支持图片文件",
             "upload_failed": "图片上传失败",

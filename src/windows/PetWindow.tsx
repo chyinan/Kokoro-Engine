@@ -1,3 +1,4 @@
+import { ttsService } from "../core/services";
 // pattern: Imperative Shell
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
@@ -37,6 +38,7 @@ interface Live2dSelectionEvent {
 }
 
 export default function PetWindow() {
+    useEffect(() => { void ttsService.init(); return () => ttsService.cleanup(); }, []);
     // Get window reference once at module load, not on every render
     const currentWindowRef = useRef(getCurrentWindow());
     const currentWindow = currentWindowRef.current;

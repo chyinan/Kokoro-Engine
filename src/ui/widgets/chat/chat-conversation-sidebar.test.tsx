@@ -30,6 +30,7 @@ vi.mock("react-i18next", () => ({
 vi.mock("../../../lib/kokoro-bridge", () => ({
     listConversations: vi.fn(async () => []),
     deleteConversation: vi.fn(async () => undefined),
+    getChatView: vi.fn(async () => ({ revision: 0, character_id: "char-1", conversation_id: null, generation: 0, busy: false, messages: [], turns: [] })),
     renameConversation: vi.fn(async () => undefined),
     updateConversationState: vi.fn(async () => undefined),
     getConversationDisplayTitle: vi.fn((c: any) => c.title || "Untitled"),
@@ -226,7 +227,7 @@ describe("ConversationSidebar", () => {
             expect(deleteConversation).not.toHaveBeenCalled();
         });
 
-        it("executes delete and clears active conversation when confirmed", async () => {
+        it("submits confirmed deletion and lets the application restore authoritative selection", async () => {
             const onSelectConversation = vi.fn(async () => undefined);
             await renderSidebar(vi.fn(), "conv-1", onSelectConversation);
 
@@ -247,7 +248,7 @@ describe("ConversationSidebar", () => {
             });
 
             expect(deleteConversation).toHaveBeenCalledWith("conv-1");
-            expect(onSelectConversation).toHaveBeenCalledWith(null);
+            expect(onSelectConversation).not.toHaveBeenCalled();
             expect(listConversations).toHaveBeenCalledTimes(2); // Initial + refresh
         });
     });

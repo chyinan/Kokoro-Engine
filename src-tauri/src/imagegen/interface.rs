@@ -79,8 +79,10 @@ pub trait ImageGenProvider: Send + Sync {
     fn provider_type(&self) -> String;
 
     /// Check if the provider is reachable/configured
+    #[must_use = "await or poll this future to check image provider availability"]
     async fn is_available(&self) -> bool;
 
     /// Generate an image from the prompt
+    #[must_use = "await or poll this future to generate the image"]
     async fn generate(&self, params: ImageGenParams) -> Result<ImageGenResponse, ImageGenError>;
 }

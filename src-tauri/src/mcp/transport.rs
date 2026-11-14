@@ -57,15 +57,18 @@ impl std::fmt::Display for JsonRpcError {
 #[async_trait]
 pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and wait for the response.
+    #[must_use = "await or poll this future to send the MCP request and receive its response"]
     async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String>;
 
     /// Send a notification (no response expected).
+    #[must_use = "await or poll this future to send the MCP notification"]
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String>;
 
     /// Check if the transport is currently connected.
     fn is_connected(&self) -> bool;
 
     /// Gracefully shut down the transport.
+    #[must_use = "await or poll this future to shut down the MCP transport"]
     async fn shutdown(&self) -> Result<(), String>;
 }
 

@@ -148,6 +148,7 @@ pub trait ActionHandler: Send + Sync {
     }
 
     /// Execute the action with the given arguments
+    #[must_use = "await or poll this future to execute the action"]
     async fn execute(
         &self,
         args: HashMap<String, String>,

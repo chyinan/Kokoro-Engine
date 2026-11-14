@@ -159,6 +159,11 @@ The `LayoutRenderer` will be updated to support a new node type `mod-component`.
 
 Scripts run in a separate thread (Rust-side QuickJS runtime). They handle logic that doesn't need UI.
 
+`Kokoro.on("chat-done", callback)` receives the full final reply in `event.text`
+when `event.status` is `"completed"`. Use this text to replace any draft built
+from `chat` deltas, which can be skipped when the script queue fills. An empty
+string is valid for a completed turn with no reply text.
+
 **Capabilities:**
 -   Listen to engine events (`chat`, `interaction`)
 -   Control engine state (`cue`, `tts`)

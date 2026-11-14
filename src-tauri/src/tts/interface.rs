@@ -198,6 +198,7 @@ pub trait TtsProvider: Send + Sync {
     }
 
     /// Check if the provider is currently reachable / operational
+    #[must_use = "await or poll this future to check speech provider availability"]
     async fn is_available(&self) -> bool;
 
     /// Actionable reason returned when an explicitly selected provider is unavailable.
@@ -206,12 +207,14 @@ pub trait TtsProvider: Send + Sync {
     }
 
     /// Synthesize text to audio bytes (MP3/WAV/PCM)
+    #[must_use = "await or poll this future to synthesize speech audio"]
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError>;
 
     /// Streaming synthesis — returns chunks incrementally.
     /// Default implementation falls back to non-streaming `synthesize`.
     /// Streaming synthesis — returns chunks incrementally.
     /// Default implementation falls back to non-streaming `synthesize`.
+    #[must_use = "await or poll this future to open the speech audio stream"]
     async fn synthesize_stream(
         &self,
         text: &str,
@@ -231,6 +234,7 @@ pub trait TtsProvider: Send + Sync {
 
     /// Per-request entry point. Providers with remote streaming protocols can
     /// use the stable request ID and cancellation signal to cancel server work.
+    #[must_use = "await or poll this future to start speech synthesis for this request"]
     async fn synthesize_stream_for_request(
         &self,
         text: &str,
@@ -243,6 +247,7 @@ pub trait TtsProvider: Send + Sync {
 
     /// Cancel remote work belonging to one request. Implementations that own
     /// request-scoped connections should cancel the matching response only.
+    #[must_use = "await or poll this future to cancel remote speech synthesis for this request"]
     async fn cancel_request(&self, _request_id: &str) {}
 
     /// Number of sentences this provider can safely synthesize concurrently.

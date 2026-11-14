@@ -1,12 +1,11 @@
 use crate::error::KokoroError;
-use crate::stt::config::save_config;
 use crate::stt::{
     AudioChunk, AudioSource, NativeMicState, NativeWakeWordState, SenseVoiceLocalModelStatus,
     SttConfig, SttService,
 };
 use std::sync::Arc;
 use tauri::State;
-use tauri::{command, AppHandle};
+use tauri::{command, AppHandle, Manager};
 
 /// Transcribe audio bytes to text using the active STT provider.
 #[command]
@@ -29,36 +28,12 @@ pub async fn transcribe_audio(
 /// Return the current STT config from disk.
 /// Automatically merges any missing default providers so the UI always shows all options.
 #[command]
-pub async fn get_stt_config() -> Result<SttConfig, KokoroError> {
-    let app_data = dirs_next::data_dir()
+pub async fn get_stt_config(state: State<'_, SttService>) -> Result<SttConfig, KokoroError> {
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");
-    let mut config = crate::stt::load_config(&config_path);
-
-    // Merge missing default providers so new providers appear in the UI
-    // without requiring users to manually edit stt_config.json.
-    let defaults = crate::stt::config::default_providers_pub();
-    let mut changed = false;
-    for default in defaults {
-        if !config.providers.iter().any(|p| p.id == default.id) {
-            config.providers.push(default);
-            changed = true;
-        }
-    }
-
-    // Write back if we added new providers, so active_provider survives next load
-    if changed {
-        if let Err(e) = crate::stt::config::save_config(&config_path, &config) {
-            tracing::warn!(
-                target: "stt",
-                "Failed to persist merged default STT providers: {}",
-                e
-            );
-        }
-    }
-
-    Ok(config)
+    Ok(state.load_config_with_defaults(&config_path).await)
 }
 
 /// Save STT config to disk and hot-reload providers.
@@ -67,16 +42,11 @@ pub async fn save_stt_config(
     state: State<'_, SttService>,
     config: SttConfig,
 ) -> Result<(), KokoroError> {
-    let app_data = dirs_next::data_dir()
+    let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
     let config_path = app_data.join("stt_config.json");
-    save_config(&config_path, &config)?;
-    state
-        .reload_from_config(&config)
-        .await
-        .map_err(KokoroError::from)?;
-    Ok(())
+    state.save_and_reload(&config_path, config).await
 }
 
 /// Transcribe a short raw PCM audio clip (float32, 16kHz mono) for wake word detection.
@@ -103,23 +73,30 @@ pub async fn transcribe_wake_word_audio(
 #[command]
 pub async fn start_native_mic(
     app: AppHandle,
-    mic_state: State<'_, NativeMicState>,
     auto_stop_on_silence: Option<bool>,
-) -> Result<(), KokoroError> {
-    crate::stt::mic::start_native_mic_with_options(
-        &app,
-        mic_state.inner(),
-        auto_stop_on_silence.unwrap_or(false),
-    )
+    only_when_chat_idle: Option<bool>,
+) -> Result<bool, KokoroError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::stt::mic::start_native_mic_with_options(
+            &app,
+            app.state::<NativeMicState>().inner(),
+            auto_stop_on_silence.unwrap_or(false),
+            only_when_chat_idle.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|error| KokoroError::Stt(error.to_string()))?
     .map_err(KokoroError::Stt)
 }
 
 #[command]
-pub async fn stop_native_mic(
-    app: AppHandle,
-    mic_state: State<'_, NativeMicState>,
-) -> Result<(), KokoroError> {
-    crate::stt::mic::stop_native_mic(&app, mic_state.inner()).map_err(KokoroError::Stt)
+pub async fn stop_native_mic(app: AppHandle) -> Result<(), KokoroError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::stt::mic::stop_native_mic(&app, app.state::<NativeMicState>().inner())
+    })
+    .await
+    .map_err(|error| KokoroError::Stt(error.to_string()))?
+    .map_err(KokoroError::Stt)
 }
 
 #[command]

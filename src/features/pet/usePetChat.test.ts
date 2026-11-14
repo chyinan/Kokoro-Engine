@@ -1,383 +1,217 @@
 // @vitest-environment jsdom
-// pattern: Imperative Shell
-
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import { usePetChat, type PetChatState } from "./usePetChat";
-import * as eventApi from "@tauri-apps/api/event";
-import * as coreApi from "@tauri-apps/api/core";
-
-(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-
-vi.mock("@tauri-apps/api/event", () => ({
-    listen: vi.fn(async () => () => {}),
-    emit: vi.fn(async () => {}),
-}));
-
-vi.mock("@tauri-apps/api/core", () => ({
-    invoke: vi.fn(async () => {}),
-}));
-
-describe("usePetChat", () => {
-    let container: HTMLDivElement | null = null;
-    let root: Root | null = null;
-    let hookState: PetChatState | null = null;
-    let listeners: Record<string, (event: any) => void> = {};
-
-    function TestHarness() {
-        const hook = usePetChat();
-        hookState = hook;
-        return null;
-    }
-
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        listeners = {};
-        hookState = null;
-        vi.spyOn(eventApi, "listen").mockImplementation((event: string, cb: any) => {
-            listeners[event] = cb;
-            return Promise.resolve(() => {});
-        });
-        vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
-            if (event === "pet-chat-start") {
-                const reqId = payload?.client_request_id;
-                listeners["pet-chat-accepted"]?.({
-                    payload: { client_request_id: reqId, conversation_id: "conv-mock" },
-                });
-            }
-        });
-        vi.spyOn(coreApi, "invoke").mockImplementation(async () => {});
-
-        container = document.createElement("div");
-        document.body.appendChild(container);
-        root = createRoot(container);
-
-        await act(async () => {
-            root?.render(createElement(TestHarness));
-        });
-    });
-
-    afterEach(() => {
-        if (root && container) {
-            act(() => {
-                root?.unmount();
-            });
-            container.remove();
-        }
-        root = null;
-        container = null;
-        hookState = null;
-    });
-
-    it("generates client_request_id and includes it in pet-chat-start and stream_chat", async () => {
-        expect(hookState).not.toBeNull();
-
-        await act(async () => {
-            await hookState?.sendMessage("Hello from pet");
-        });
-
-        expect(eventApi.emit).toHaveBeenCalledTimes(1);
-        const emitArgs = (eventApi.emit as any).mock.calls[0];
-        expect(emitArgs[0]).toBe("pet-chat-start");
-        expect(emitArgs[1].message).toBe("Hello from pet");
-        expect(emitArgs[1].client_request_id).toMatch(/^pet_\d+_[a-z0-9]+$/);
-
-        expect(coreApi.invoke).toHaveBeenCalledWith("stream_chat", {
-            request: expect.objectContaining({
-                message: "Hello from pet",
-                client_request_id: emitArgs[1].client_request_id,
-            }),
-        });
-    });
-
-    it("clears busy state from the completed IPC response when turn-finish is lost", async () => {
-        vi.mocked(coreApi.invoke).mockImplementation(async (command) => {
-            if (command === "stream_chat") {
-                return { status: "completed", conversation_id: "conv-mock", assistant_message_id: 42 } as never;
-            }
-            return undefined as never;
-        });
-        await act(async () => {
-            await hookState?.sendMessage("Completed without finish event");
-        });
-        expect(coreApi.invoke).toHaveBeenCalledWith("stream_chat", expect.anything());
-        expect(hookState?.isStreaming).toBe(false);
-    });
-
-    it("prevents sending another message while streaming", async () => {
-        expect(hookState).not.toBeNull();
-
-        await act(async () => {
-            await hookState?.sendMessage("First pet message");
-        });
-
-        expect(hookState?.isStreaming).toBe(true);
-
-        // Attempting to send while streaming should be ignored
-        await act(async () => {
-            await hookState?.sendMessage("Duplicate pet message");
-        });
-
-        expect(eventApi.emit).toHaveBeenCalledTimes(1);
-    });
-
-    it("ignores chat turn lifecycle events from other client requests", async () => {
-        await act(async () => {
-            await hookState?.sendMessage("Own pet request");
-        });
-
-        const startCall = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
-        const ownClientRequestId = startCall[1].client_request_id;
-
-        await act(async () => {
-            listeners["chat-turn-start"]?.({
-                payload: { turn_id: "foreign-turn", client_request_id: "foreign-request" },
-            });
-            listeners["chat-turn-finish"]?.({
-                payload: {
-                    turn_id: "foreign-turn",
-                    client_request_id: "foreign-request",
-                    status: "completed",
-                },
-            });
-        });
-
-        expect(hookState?.isStreaming).toBe(true);
-
-        await act(async () => {
-            listeners["chat-turn-start"]?.({
-                payload: { turn_id: "own-turn", client_request_id: ownClientRequestId },
-            });
-            listeners["chat-turn-finish"]?.({
-                payload: {
-                    turn_id: "own-turn",
-                    status: "completed",
-                },
-            });
-        });
-
-        expect(hookState?.isStreaming).toBe(false);
-    });
-
-    it("ignores chat errors from other turns while the own turn is active", async () => {
-        await act(async () => {
-            await hookState?.sendMessage("Own pet request with error");
-        });
-
-        const startCall = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
-        const ownClientRequestId = startCall[1].client_request_id;
-        await act(async () => {
-            listeners["chat-turn-start"]?.({
-                payload: { turn_id: "own-turn", client_request_id: ownClientRequestId },
-            });
-            listeners["chat-error"]?.({
-                payload: { trace_id: "foreign-turn", message: "foreign error" },
-            });
-        });
-
-        expect(hookState?.isStreaming).toBe(true);
-
-        await act(async () => {
-            listeners["chat-error"]?.({
-                payload: {
-                    trace_id: "own-turn",
-                    message: "own error",
-                },
-            });
-        });
-
-        expect(hookState?.isStreaming).toBe(false);
-    });
-
-    it("ignores a late rejection after the pet turn has finished", async () => {
-        await act(async () => {
-            await hookState?.sendMessage("Finished pet request");
-        });
-
-        const startCall = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
-        const ownClientRequestId = startCall[1].client_request_id;
-
-        await act(async () => {
-            listeners["chat-turn-start"]?.({
-                payload: { turn_id: "finished-turn", client_request_id: ownClientRequestId },
-            });
-            listeners["chat-turn-finish"]?.({
-                payload: {
-                    turn_id: "finished-turn",
-                    client_request_id: ownClientRequestId,
-                    status: "completed",
-                },
-            });
-        });
-
-        const hideCallsBefore = (eventApi as any).emit.mock.calls.length;
-        await act(async () => {
-            listeners["pet-chat-rejected"]?.({
-                payload: { client_request_id: ownClientRequestId, reason: "late" },
-            });
-        });
-
-        expect(hookState?.isStreaming).toBe(false);
-        expect(coreApi.invoke).not.toHaveBeenCalledWith("cancel_chat_turn", expect.anything());
-        expect((eventApi as any).emit.mock.calls.length).toBe(hideCallsBefore);
-        expect(coreApi.invoke).not.toHaveBeenCalledWith("hide_bubble_window");
-    });
-
-    it("ignores empty or whitespace-only messages", async () => {
-        expect(hookState).not.toBeNull();
-
-        await act(async () => {
-            await hookState?.sendMessage("   ");
-        });
-
-        expect(eventApi.emit).not.toHaveBeenCalled();
-        expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
-    });
-
-    it("aborts sendMessage if is_chat_busy returns true", async () => {
-        expect(hookState).not.toBeNull();
-        vi.spyOn(coreApi, "invoke").mockImplementation(async (cmd: string) => {
-            if (cmd === "is_chat_busy") return true;
-            return undefined;
-        });
-
-        await act(async () => {
-            await hookState?.sendMessage("Hello when busy");
-        });
-
-        expect(eventApi.emit).not.toHaveBeenCalled();
-        expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
-    });
-
-    it("emits pet-chat-failed and hides bubble if stream_chat fails", async () => {
-        expect(hookState).not.toBeNull();
-        vi.spyOn(coreApi, "invoke").mockImplementation(async (cmd: string) => {
-            if (cmd === "stream_chat") throw new Error("chat_turn_busy: Chat turn is currently busy");
-            return undefined;
-        });
-
-        await act(async () => {
-            await hookState?.sendMessage("Hello that will fail");
-        });
-
-        expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-failed", expect.objectContaining({
-            client_request_id: expect.stringMatching(/^pet_\d+_[a-z0-9]+$/),
-            error: "chat_turn_busy: Chat turn is currently busy",
-        }));
-        expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
-        expect(hookState?.isStreaming).toBe(false);
-    });
-
-    it("does not call stream_chat and resets streaming when pet-chat-rejected is received during handshake", async () => {
-        expect(hookState).not.toBeNull();
-
-        vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
-            if (event === "pet-chat-start") {
-                listeners["pet-chat-rejected"]?.({
-                    payload: { client_request_id: payload?.client_request_id, reason: "busy" },
-                });
-            }
-        });
-
-        await act(async () => {
-            await hookState?.sendMessage("Hello pet rejected");
-        });
-
-        expect(hookState?.isStreaming).toBe(false);
-        expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
-        expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
-    });
-
-    it("cancels active turn on late pet-chat-rejected", async () => {
-        expect(hookState).not.toBeNull();
-
-        // Start a turn with default accepted mock
-        await act(async () => {
-            await hookState?.sendMessage("Hello pet");
-        });
-        expect(hookState?.isStreaming).toBe(true);
-
-        const emitArgs = (eventApi.emit as any).mock.calls.find((call: any[]) => call[0] === "pet-chat-start");
-        const clientRequestId = emitArgs[1].client_request_id;
-
-        // Simulate late rejection from ChatPanel
-        await act(async () => {
-            listeners["pet-chat-rejected"]?.({ payload: { client_request_id: clientRequestId, reason: "busy" } });
-        });
-
-        expect(hookState?.isStreaming).toBe(false);
-        expect(coreApi.invoke).toHaveBeenCalledWith("cancel_chat_turn", {
-            turnId: clientRequestId,
-            reason: "pet_chat_rejected",
-        });
-        expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
-    });
-
-    it("emits pet-chat-failed and resets state when handshake times out after 1000ms", async () => {
-        vi.useFakeTimers();
-        try {
-            vi.spyOn(eventApi, "emit").mockImplementation(async () => {});
-
-            let sendPromise: Promise<void> | null = null;
-            await act(async () => {
-                sendPromise = hookState!.sendMessage("Pet chat timeout message");
-            });
-
-            await act(async () => {
-                await vi.advanceTimersByTimeAsync(1000);
-            });
-
-            await act(async () => {
-                await sendPromise!;
-            });
-
-            expect(eventApi.emit).toHaveBeenCalledWith("pet-chat-failed", expect.objectContaining({
-                client_request_id: expect.stringMatching(/^pet_\d+_[a-z0-9]+$/),
-                error: "handshake_timeout",
-            }));
-            expect(hookState?.isStreaming).toBe(false);
-            expect(coreApi.invoke).toHaveBeenCalledWith("hide_bubble_window");
-            expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
-        } finally {
-            vi.useRealTimers();
-        }
-    });
-
-    it("ignores late pet-chat-accepted arriving after handshake timeout", async () => {
-        vi.useFakeTimers();
-        try {
-            let capturedReqId: string | undefined;
-            vi.spyOn(eventApi, "emit").mockImplementation(async (event: string, payload: any) => {
-                if (event === "pet-chat-start") {
-                    capturedReqId = payload?.client_request_id;
-                }
-            });
-
-            let sendPromise: Promise<void>;
-            act(() => {
-                sendPromise = hookState!.sendMessage("Pet late acceptance");
-            });
-
-            await act(async () => {
-                await vi.advanceTimersByTimeAsync(1000);
-            });
-            await act(async () => {
-                await sendPromise!;
-            });
-
-            expect(hookState?.isStreaming).toBe(false);
-
-            await act(async () => {
-                listeners["pet-chat-accepted"]?.({
-                    payload: { client_request_id: capturedReqId, conversation_id: "conv-mock" },
-                });
-            });
-
-            expect(coreApi.invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
-            expect(hookState?.isStreaming).toBe(false);
-        } finally {
-            vi.useRealTimers();
-        }
-    });
+import { chatViewFixture as chat } from "../../lib/chat/view-test-fixture";
+import type { ChatTurnSnapshot } from "../../lib/kokoro-bridge";
+import { deferred } from "../../lib/chat/__tests__/harness";
+import type { StreamChatResponse } from "../../lib/kokoro-bridge";
+vi.mock("../../lib/chat/application", async () => ({ chatApplication: (await import("../../lib/chat/view-test-fixture")).chatViewFixture }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+const snapshot = (status: ChatTurnSnapshot["status"] = "streaming", revision = 2): ChatTurnSnapshot => ({
+ revision, client_request_id: "pet_a", turn_id: "a", character_id: "char-1", conversation_id: "conv-1", user_message_id: 1, assistant_message_id: 2,
+ message: "hello", images: [], hidden: false, status, text: "complete recovered text", translation: null, tools: [], error: null,
+});
+describe("pet chat display adapter", () => {
+ let root: Root, container: HTMLDivElement, state: PetChatState;
+ function Harness() { state = usePetChat(); return null; }
+ beforeEach(async () => {
+  vi.clearAllMocks(); chat.reset(); chat.send.mockResolvedValue({ status: "completed", conversation_id: "conv-1", text: "reply" });
+  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+ });
+ afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); });
+ it("submits directly without ChatPanel or an acceptance handshake", async () => {
+  await act(async () => state.sendMessage("  hello  "));
+  expect(chat.send).toHaveBeenCalledWith({ message: "hello", client_request_id: expect.stringMatching(/^pet_/), character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1 });
+  expect(invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
+ });
+ it("coalesces duplicate clicks while the same user intent is in flight", async () => {
+  let done!: (value: any) => void; chat.send.mockImplementationOnce(() => new Promise(resolve => { done = resolve; }));
+  let first!: Promise<void>; await act(async () => { first = state.sendMessage("one"); void state.sendMessage("one"); });
+  expect(chat.send).toHaveBeenCalledOnce(); done({ status: "completed" }); await first;
+ });
+ it("shows the recovered reply on remount and updates the same bubble on later snapshots", async () => {
+  await act(async () => chat.set({ turns: [snapshot()], busy: true }));
+  act(() => root.unmount());
+  vi.mocked(invoke).mockClear();
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+  expect(state.isStreaming).toBe(true);
+  await act(async () => chat.set({ turns: [{ ...snapshot("streaming", 3), text: "intermediate recovered text" }] }));
+  expect(invoke).toHaveBeenLastCalledWith("update_bubble_text", { text: "intermediate recovered text" });
+  expect(state.isStreaming).toBe(true);
+  await act(async () => chat.set({ turns: [{ ...snapshot("completed", 4), text: "final recovered text" }], busy: false }));
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+   ["show_bubble_window", { text: "complete recovered text" }],
+   ["update_bubble_text", { text: "intermediate recovered text" }],
+   ["update_bubble_text", { text: "final recovered text" }],
+  ]);
+ });
+ it("keeps the submitted reply selected when the first history read appends older pet turns", async () => {
+  const response = deferred<StreamChatResponse>();
+  chat.send.mockReturnValueOnce(response.promise);
+  let sending!: Promise<void>;
+  await act(async () => { sending = state.sendMessage("new prompt"); });
+  const id = chat.send.mock.calls[0][0].client_request_id!;
+  const pending = { ...snapshot("pending", 0), client_request_id: id, text: "" };
+  const old = { ...snapshot("completed", 5), text: "old reply" };
+  await act(async () => chat.set({ turns: [pending, old], busy: true }));
+  expect(invoke).not.toHaveBeenCalledWith("update_bubble_text", expect.anything());
+  await act(async () => chat.set({ turns: [{ ...pending, status: "streaming", revision: 6, text: "new" }, old] }));
+  await act(async () => {
+   chat.set({ turns: [{ ...pending, status: "completed", revision: 7, text: "new reply" }, old], busy: false });
+   response.resolve({ conversation_id: "conv-1", status: "completed" });
+   await sending;
+  });
+  expect(vi.mocked(invoke).mock.calls.filter(([name]) => name === "update_bubble_text")).toEqual([
+   ["update_bubble_text", { text: "new" }], ["update_bubble_text", { text: "new reply" }],
+  ]);
+ });
+ it("does not concatenate replayed full snapshots", async () => {
+  await act(async () => chat.set({ turns: [snapshot()] }));
+  await act(async () => chat.set({ turns: [snapshot()] }));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+ });
+ it("a late speech failure does not replay the reply or restart its hide timer", async () => {
+  vi.useFakeTimers();
+  await act(async () => chat.set({ turns: [snapshot()] }));
+  const completed = { ...snapshot("completed", 3), completion_revision: 3 };
+  await act(async () => chat.set({ turns: [completed] }));
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  await act(async () => chat.set({ turns: [{ ...completed, revision: 4, speech_error: "Speech failed" }] }));
+  expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(invoke).toHaveBeenCalledWith("hide_bubble_window");
+ });
+ it("does not present another entry's reply as a pet request", async () => {
+  await act(async () => chat.set({ turns: [{ ...snapshot(), client_request_id: "interaction_a" }] }));
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it.each(["completed", "cancelled", "error"] as const)("settles %s from recovered state without waiting for finish", async status => {
+  vi.useFakeTimers(); await act(async () => chat.set({ turns: [snapshot(status)], busy: false }));
+  expect(state.isStreaming).toBe(false); await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it("keeps an expired reply hidden after unmount and reopen", async () => {
+  vi.useFakeTimers();
+  await act(async () => chat.set({ turns: [snapshot()], busy: true }));
+  await act(async () => chat.set({ turns: [snapshot("completed", 3)], busy: false }));
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+  act(() => root.unmount());
+  vi.mocked(invoke).mockClear();
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+  await act(async () => chat.set({ turns: [{ ...snapshot("completed", 4), completion_revision: 3, speech_error: "late failure" }] }));
+  await act(async () => vi.advanceTimersByTimeAsync(6000));
+  expect(invoke).not.toHaveBeenCalled();
+  expect(chat.send).not.toHaveBeenCalled();
+ });
+ it("hides the former character's reply and follows the new character", async () => {
+  const old = snapshot();
+  await act(async () => chat.set({ turns: [old], busy: true }));
+  vi.mocked(invoke).mockClear();
+  await act(async () => chat.set({ character_id: "char-2" }));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("hide_bubble_window");
+  const current = { ...snapshot("streaming", 3), character_id: "char-2", client_request_id: "pet_b", text: "new character reply" };
+  await act(async () => chat.set({ turns: [old, current] }));
+  expect(invoke).toHaveBeenLastCalledWith("show_bubble_window", { text: "new character reply" });
+  await act(async () => chat.set({ turns: [{ ...old, revision: 5, text: "late foreign text" }, current] }));
+  expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
+ });
+ it("ignores a foreign active reply on reopen even when it is newer", async () => {
+  await act(async () => chat.set({ character_id: "char-2", turns: [snapshot()] }));
+  act(() => root.unmount());
+  vi.mocked(invoke).mockClear();
+  root = createRoot(container);
+  await act(async () => root.render(createElement(Harness)));
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it("does not reopen a foreign bubble when its delayed update fails after switching away and back", async () => {
+  await act(async () => chat.set({ turns: [snapshot()], busy: true }));
+  const update = deferred<void>();
+  vi.mocked(invoke).mockImplementationOnce(() => update.promise);
+  await act(async () => chat.set({ turns: [snapshot("streaming", 3)] }));
+  await act(async () => chat.set({ character_id: "char-2", turns: [snapshot("completed", 4)] }));
+  await act(async () => chat.set({ character_id: "char-1" }));
+  vi.mocked(invoke).mockClear();
+  await act(async () => update.reject(new Error("bubble was destroyed")));
+  expect(invoke).not.toHaveBeenCalled();
+ });
+ it("suppresses a rejected send after switching character and releases the old request selection", async () => {
+  const response = deferred<StreamChatResponse>();
+  chat.send.mockReturnValueOnce(response.promise);
+  let sending!: Promise<void>;
+  await act(async () => { sending = state.sendMessage("old character question"); });
+  await act(async () => chat.set({ character_id: "char-2" }));
+  vi.mocked(invoke).mockClear();
+  await act(async () => { response.reject(new Error("old character failure")); await sending; });
+  expect(invoke).not.toHaveBeenCalled();
+  await act(async () => chat.set({ turns: [{ ...snapshot(), character_id: "char-2" }] }));
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+ });
+ it("unmount does not cancel an in-flight business request", async () => {
+  await act(async () => chat.set({ turns: [snapshot()], busy: true }));
+  act(() => root.unmount()); expect(chat.cancel).not.toHaveBeenCalled();
+  root = createRoot(container); await act(async () => root.render(createElement(Harness)));
+  expect(state.isStreaming).toBe(true); expect(chat.send).not.toHaveBeenCalled();
+ });
+ it("displays authoritative busy rejection and permits a subsequent send", async () => {
+  chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+  await act(async () => state.sendMessage("one"));
+  expect(invoke).toHaveBeenCalledWith("show_bubble_window", { text: "chat_turn_busy" });
+  await act(async () => state.sendMessage("two")); expect(chat.send).toHaveBeenCalledTimes(2);
+ });
+ it("ignores empty input", async () => { await state.sendMessage("  "); expect(chat.send).not.toHaveBeenCalled(); });
+ it.each([
+  { character_id: "char-2", conversation_id: "conv-2", generation: 2 },
+  { character_id: "char-1", conversation_id: "conv-2", generation: 2 },
+  { character_id: "char-1", conversation_id: "conv-1", generation: 3 },
+ ])("binds a click to its rendered scope when selection changes before React renders: %j", async next => {
+  const send = state.sendMessage;
+  await act(async () => { chat.set(next); await send("for the visible character"); });
+  expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
+   character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1,
+  }));
+ });
+ it("binds an empty conversation to its selection generation", async () => {
+  await act(async () => chat.set({ conversation_id: null, generation: 4 }));
+  await act(async () => state.sendMessage("new conversation"));
+  expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
+   character_id: "char-1", conversation_id: undefined, conversation_generation: 4,
+  }));
+ });
+ it("expires a pre-admission error after five seconds", async () => {
+  vi.useFakeTimers(); chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+  await act(async () => state.sendMessage("one"));
+  await act(async () => vi.advanceTimersByTimeAsync(4999));
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+ });
+ it("an old error timer cannot hide a subsequent pending request", async () => {
+  vi.useFakeTimers(); chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
+  await act(async () => state.sendMessage("one"));
+  await act(async () => vi.advanceTimersByTimeAsync(4000));
+  const response = deferred<StreamChatResponse>(); chat.send.mockReturnValueOnce(response.promise);
+  let sending!: Promise<void>;
+  await act(async () => { sending = state.sendMessage("two"); });
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  await act(async () => { response.reject(new Error("second failure")); await sending; });
+  await act(async () => vi.advanceTimersByTimeAsync(4999));
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+ });
+ it("preserves structured backend rejection text in the bubble", async () => {
+  chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: active request" });
+  await act(async () => state.sendMessage("one"));
+  expect(invoke).toHaveBeenCalledWith("show_bubble_window", { text: "chat_turn_busy: active request" });
+ });
 });
