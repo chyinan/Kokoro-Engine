@@ -63,6 +63,30 @@ describe("persistence failures in the chat view", () => {
     expect(projectMessages(selection)).toEqual([expect.objectContaining({ persistenceFailure: true })]);
     expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
   });
+
+  it("does not restore a failed save after its persisted prompt is truncated", () => {
+    const selection = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a" };
+    const messages = [{ id: 0, role: "user", content: "earlier question", created_at: "now" }];
+    expect(projectMessages({ ...selection, messages, turns: [{ ...failedSave, persistence_retryable: true }] }))
+      .toEqual([expect.objectContaining({ role: "user", id: 0, text: "earlier question" })]);
+  });
+
+  it("does not restore an older failed save after a newer turn on the same prompt", () => {
+    const selection = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a" };
+    const messages = [{ id: 1, role: "user", content: "question", created_at: "now" }];
+    expect(projectMessages({ ...selection, messages, turns: [failedSave, turn("new", 5, "completed")] }))
+      .toEqual([
+        expect.objectContaining({ role: "user", id: 1 }),
+        expect.objectContaining({ role: "kokoro", clientRequestId: "new" }),
+      ]);
+  });
+
+  it("scopes an initial save failure in an existing conversation to its selection generation", () => {
+    const beforeUser = { ...failedSave, conversation_generation: 2, user_message_id: null, text: "" };
+    const selection = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 2, turns: [beforeUser] };
+    expect(projectMessages(selection)).toEqual([expect.objectContaining({ persistenceFailure: true })]);
+    expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
+  });
 });
 
 describe("UI-independent chat application", () => {

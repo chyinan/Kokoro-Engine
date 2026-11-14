@@ -51,10 +51,41 @@ enum SessionMode {
     /// Continue the desktop conversation (default).
     Continue,
     /// Fresh conversation started via /new.
-    New,
+    New { conversation_id: String },
 }
 
-type Sessions = Arc<RwLock<HashMap<ChatId, SessionMode>>>;
+type Sessions = Arc<RwLock<HashMap<(ChatId, String), SessionMode>>>;
+
+async fn telegram_character_id(config: &TelegramConfig, orchestrator: &AIOrchestrator) -> String {
+    if let Some(id) = config.character_id.as_deref().filter(|id| !id.is_empty()) {
+        return id.to_owned();
+    }
+    let id = orchestrator.get_character_id().await;
+    if !id.is_empty() && id != "default" {
+        id
+    } else {
+        AIOrchestrator::load_active_character_id().unwrap_or_else(|| "default".to_owned())
+    }
+}
+
+async fn start_new_telegram_session(
+    orchestrator: &AIOrchestrator,
+    sessions: &Sessions,
+    character_id: &str,
+    chat_id: ChatId,
+) {
+    // Only the active character shares the desktop selection. An isolated bot
+    // session must rotate its own identity without clearing desktop history.
+    if orchestrator.get_character_id().await == character_id {
+        orchestrator.clear_history().await;
+    }
+    sessions.write().await.insert(
+        (chat_id, character_id.to_owned()),
+        SessionMode::New {
+            conversation_id: uuid::Uuid::new_v4().to_string(),
+        },
+    );
+}
 
 async fn max_tool_rounds(app: &tauri::AppHandle) -> usize {
     if let Some(settings) = app.try_state::<Arc<RwLock<ToolSettings>>>() {
@@ -171,10 +202,12 @@ async fn handle_message(
     }
 
     let result = match msg.text() {
-        Some(text) if text.starts_with('/') => handle_command(&bot, &msg, text, &config, &sessions, &app).await,
-        Some(text) => handle_text(&bot, &msg, text, &config, &app).await,
+        Some(text) if text.starts_with('/') => {
+            handle_command(&bot, &msg, text, &config, &sessions, &app).await
+        }
+        Some(text) => handle_text(&bot, &msg, text, &config, &sessions, &app).await,
         None if msg.voice().is_some() => handle_voice(&bot, &msg, &config, &sessions, &app).await,
-        None if msg.photo().is_some() => handle_photo(&bot, &msg, &config, &app).await,
+        None if msg.photo().is_some() => handle_photo(&bot, &msg, &config, &sessions, &app).await,
         None => Ok(()),
     };
     if let Err(error) = &result {
@@ -190,7 +223,7 @@ async fn handle_command(
     bot: &Bot,
     msg: &Message,
     text: &str,
-    _config: &Arc<TelegramConfig>,
+    config: &Arc<TelegramConfig>,
     sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -210,36 +243,41 @@ async fn handle_command(
             }
         }
         "/new" => {
-            // Clear orchestrator history to start fresh
             if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                // 标准清空路径：持有会话切换锁、重置历史与边界、置空会话指针、递增 generation 并持久化
-                orchestrator.clear_history().await;
-            }
-            {
-                let mut s = sessions.write().await;
-                s.insert(chat_id, SessionMode::New);
+                let character_id = telegram_character_id(config, &orchestrator).await;
+                start_new_telegram_session(&orchestrator, sessions, &character_id, chat_id).await;
             }
             bot.send_message(chat_id, "✨ New conversation started.")
                 .await
                 .ok();
         }
         "/continue" => {
-            {
-                let mut s = sessions.write().await;
-                s.insert(chat_id, SessionMode::Continue);
+            if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
+                let character_id = telegram_character_id(config, &orchestrator).await;
+                sessions
+                    .write()
+                    .await
+                    .insert((chat_id, character_id), SessionMode::Continue);
             }
             bot.send_message(chat_id, "🔗 Continuing desktop conversation.")
                 .await
                 .ok();
         }
         "/status" => {
-            let mode = {
-                let s = sessions.read().await;
-                s.get(&chat_id).cloned().unwrap_or(SessionMode::Continue)
+            let mode = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
+                let character_id = telegram_character_id(config, &orchestrator).await;
+                sessions
+                    .read()
+                    .await
+                    .get(&(chat_id, character_id))
+                    .cloned()
+                    .unwrap_or(SessionMode::Continue)
+            } else {
+                SessionMode::Continue
             };
             let mode_str = match mode {
                 SessionMode::Continue => "Continue (desktop)",
-                SessionMode::New => "New conversation",
+                SessionMode::New { .. } => "New conversation",
             };
             let history_len = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
                 orchestrator.history.lock().await.len()
@@ -260,7 +298,7 @@ async fn handle_command(
             // Unknown command — treat as text
             let clean = text.trim_start_matches('/');
             if !clean.is_empty() {
-                handle_text(bot, msg, text, _config, app).await?;
+                handle_text(bot, msg, text, config, sessions, app).await?;
             }
         }
     }
@@ -275,11 +313,28 @@ async fn begin_telegram_turn(
     message_id: i32,
     text: &str,
     continue_selected: bool,
+    sessions: &Sessions,
 ) -> Result<ExternalTurn, KokoroError> {
     let chat_key = chat_id.to_string();
-    let conversation_id = persistence::external_identity("telegram", &[character_id, &chat_key]);
-    let request_id = persistence::external_identity("telegram", &[&chat_key, &message_id.to_string()]);
-    ExternalTurn::begin(orchestrator, character_id, conversation_id, request_id, text, continue_selected).await
+    let conversation_id = match sessions
+        .read()
+        .await
+        .get(&(ChatId(chat_id), character_id.to_owned()))
+    {
+        Some(SessionMode::New { conversation_id }) => conversation_id.clone(),
+        _ => persistence::external_identity("telegram", &[character_id, &chat_key]),
+    };
+    let request_id =
+        persistence::external_identity("telegram", &[&chat_key, &message_id.to_string()]);
+    ExternalTurn::begin(
+        orchestrator,
+        character_id,
+        conversation_id,
+        request_id,
+        text,
+        continue_selected,
+    )
+    .await
 }
 
 fn format_telegram_text(text: &str) -> String {
@@ -299,6 +354,7 @@ async fn handle_text(
     msg: &Message,
     text: &str,
     config: &Arc<TelegramConfig>,
+    sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
@@ -322,18 +378,7 @@ async fn handle_text(
 
     // 1. Record user message
     // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
-    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
+    let char_id = telegram_character_id(config, &orchestrator).await;
     tracing::info!(target: "telegram", "[Telegram] Resolved char_id='{}' for this request", char_id);
     let continue_selected = orchestrator.get_character_id().await == char_id;
     let isolated;
@@ -346,7 +391,16 @@ async fn handle_text(
     } else {
         &*orchestrator
     };
-    let turn = begin_telegram_turn(orchestrator, &char_id, chat_id.0, msg.id.0, text, continue_selected).await?;
+    let turn = begin_telegram_turn(
+        orchestrator,
+        &char_id,
+        chat_id.0,
+        msg.id.0,
+        text,
+        continue_selected,
+        sessions,
+    )
+    .await?;
     if let Some((text, translation)) = &turn.previous_reply {
         bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(text), translation.as_deref())).await?;
         return Ok(());
@@ -697,7 +751,7 @@ async fn handle_voice(
     bot: &Bot,
     msg: &Message,
     config: &Arc<TelegramConfig>,
-    _sessions: &Sessions,
+    sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
@@ -742,7 +796,7 @@ async fn handle_voice(
     }
 
     // Process as regular text
-    handle_text(bot, msg, &transcription, config, app).await
+    handle_text(bot, msg, &transcription, config, sessions, app).await
 }
 
 /// Handle photo messages — download image, convert to base64, send to LLM with vision.
@@ -750,6 +804,7 @@ async fn handle_photo(
     bot: &Bot,
     msg: &Message,
     config: &Arc<TelegramConfig>,
+    sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
@@ -801,18 +856,7 @@ async fn handle_photo(
 
     // 1. Record user message
     // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
-    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
+    let char_id = telegram_character_id(config, &orchestrator).await;
     tracing::info!(
         target: "telegram",
         "[Telegram] Resolved char_id='{}' for photo request",
@@ -829,7 +873,16 @@ async fn handle_photo(
     } else {
         &*orchestrator
     };
-    let turn = begin_telegram_turn(orchestrator, &char_id, chat_id.0, msg.id.0, &caption, continue_selected).await?;
+    let turn = begin_telegram_turn(
+        orchestrator,
+        &char_id,
+        chat_id.0,
+        msg.id.0,
+        &caption,
+        continue_selected,
+        sessions,
+    )
+    .await?;
     if let Some((text, translation)) = &turn.previous_reply {
         bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(text), translation.as_deref())).await?;
         return Ok(());
@@ -1567,12 +1620,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_telegram_new_conversation_bumps_generation_and_clears_active_id() {
-        let orchestrator = crate::ai::context::AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let orchestrator = crate::ai::context::AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
         *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
         let initial_gen = orchestrator.current_conversation_generation();
 
-        // Simulate /new action calling clear_history()
-        orchestrator.clear_history().await;
+        let character_id = orchestrator.get_character_id().await;
+        start_new_telegram_session(
+            &orchestrator,
+            &Sessions::default(),
+            &character_id,
+            ChatId(10),
+        )
+        .await;
 
         assert!(orchestrator.current_conversation_id.lock().await.is_none());
         assert_eq!(
@@ -1580,15 +1643,171 @@ mod tests {
             initial_gen + 1
         );
     }
+
+    #[tokio::test]
+    async fn isolated_telegram_new_rotates_only_its_character_and_chat_and_keeps_redelivery_bound()
+    {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
+        let sessions = Sessions::default();
+        sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at)
+            VALUES ('telegram-character', 'Telegram', '', '', 'test', 1, 1)")
+            .execute(&state.db).await.unwrap();
+        let desktop =
+            begin_telegram_turn(&state, "default", 20, 1, "desktop prompt", true, &sessions)
+                .await
+                .unwrap();
+        let generation = state.current_conversation_generation();
+        let isolated = state.fork_with_isolated_history().await;
+        assert!(isolated
+            .apply_character_profile("telegram-character")
+            .await
+            .unwrap());
+        let original = begin_telegram_turn(
+            &isolated,
+            "telegram-character",
+            10,
+            1,
+            "old prompt",
+            false,
+            &sessions,
+        )
+        .await
+        .unwrap();
+        original
+            .save_reply(&isolated, "old answer", None)
+            .await
+            .unwrap();
+        let other_chat = begin_telegram_turn(
+            &isolated,
+            "telegram-character",
+            11,
+            1,
+            "other chat",
+            false,
+            &sessions,
+        )
+        .await
+        .unwrap();
+
+        start_new_telegram_session(&state, &sessions, "telegram-character", ChatId(10)).await;
+        let fresh = state.fork_with_isolated_history().await;
+        assert!(fresh
+            .apply_character_profile("telegram-character")
+            .await
+            .unwrap());
+        let first = begin_telegram_turn(
+            &fresh,
+            "telegram-character",
+            10,
+            2,
+            "new text",
+            false,
+            &sessions,
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            first.target.conversation_id,
+            original.target.conversation_id
+        );
+        assert_eq!(first.history.len(), 1);
+        assert_eq!(first.history[0].content, "new text");
+        for (id, text) in [(3, "new photo caption"), (4, "new voice transcript")] {
+            let fresh = state.fork_with_isolated_history().await;
+            let next =
+                begin_telegram_turn(&fresh, "telegram-character", 10, id, text, false, &sessions)
+                    .await
+                    .unwrap();
+            assert_eq!(next.target.conversation_id, first.target.conversation_id);
+            assert!(!next
+                .history
+                .iter()
+                .any(|message| message.content == "old prompt"));
+        }
+        let replay = begin_telegram_turn(
+            &isolated,
+            "telegram-character",
+            10,
+            1,
+            "old prompt",
+            false,
+            &sessions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            replay.target.conversation_id,
+            original.target.conversation_id
+        );
+        assert_eq!(replay.previous_reply, Some(("old answer".into(), None)));
+        let other_next = begin_telegram_turn(
+            &isolated,
+            "telegram-character",
+            11,
+            2,
+            "other next",
+            false,
+            &sessions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            other_next.target.conversation_id,
+            other_chat.target.conversation_id
+        );
+        assert_eq!(
+            *state.current_conversation_id.lock().await,
+            Some(desktop.target.conversation_id)
+        );
+        assert_eq!(state.current_conversation_generation(), generation);
+        assert_eq!(state.history.lock().await.len(), 1);
+        assert!(sessions
+            .read()
+            .await
+            .get(&(ChatId(10), "default".into()))
+            .is_none());
+
+        start_new_telegram_session(&state, &sessions, "telegram-character", ChatId(10)).await;
+        let second = begin_telegram_turn(
+            &isolated,
+            "telegram-character",
+            10,
+            5,
+            "second new",
+            false,
+            &sessions,
+        )
+        .await
+        .unwrap();
+        assert_ne!(second.target.conversation_id, first.target.conversation_id);
+        assert_eq!(second.history.len(), 1);
+    }
     #[tokio::test]
     async fn telegram_initial_write_failure_propagates_before_text_or_photo_can_generate() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap().fork_with_isolated_history().await;
-        sqlx::query("CREATE TRIGGER reject_telegram_user BEFORE INSERT ON conversation_messages
-            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'Telegram user fault'); END")
-            .execute(&state.db).await.unwrap();
-        for (id, text) in [(1, "typed prompt"), (2, "photo caption"), (3, "voice transcript")] {
+        let sessions = Sessions::default();
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
+        sqlx::query(
+            "CREATE TRIGGER reject_telegram_user BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'Telegram user fault'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        for (id, text) in [
+            (1, "typed prompt"),
+            (2, "photo caption"),
+            (3, "voice transcript"),
+        ] {
             assert!(matches!(
-                begin_telegram_turn(&state, "default", 10, id, text, true).await,
+                begin_telegram_turn(&state, "default", 10, id, text, true, &sessions).await,
                 Err(KokoroError::ChatPersistence(_))
             ));
         }
@@ -1601,11 +1820,22 @@ mod tests {
 
     #[tokio::test]
     async fn telegram_redelivery_retries_only_the_saved_reply_in_its_original_conversation() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap().fork_with_isolated_history().await;
-        let first = begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true).await.unwrap();
+        let sessions = Sessions::default();
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
+        let first =
+            begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions)
+                .await
+                .unwrap();
         assert!(first.previous_reply.is_none());
         state.clear_history().await;
-        let second = begin_telegram_turn(&state, "default", 10, 2, "second question", true).await.unwrap();
+        let second =
+            begin_telegram_turn(&state, "default", 10, 2, "second question", true, &sessions)
+                .await
+                .unwrap();
         assert_ne!(second.target.conversation_id, first.target.conversation_id);
         sqlx::query("CREATE TRIGGER reject_telegram_assistant BEFORE INSERT ON conversation_messages
             WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'Telegram assistant fault'); END")
@@ -1613,12 +1843,15 @@ mod tests {
         let raw_reply = "**full reply**\n\n\nnext paragraph";
         assert!(matches!(first.save_reply(&state, raw_reply, Some("translation")).await, Err(KokoroError::ChatPersistence(_))));
         assert!(matches!(
-            begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true).await,
+            begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions).await,
             Err(KokoroError::ChatPersistence(_))
         ));
         sqlx::query("DROP TRIGGER reject_telegram_assistant").execute(&state.db).await.unwrap();
         for _ in 0..2 {
-            let retry = begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true).await.unwrap();
+            let retry =
+                begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions)
+                    .await
+                    .unwrap();
             assert_eq!(retry.target.conversation_id, first.target.conversation_id);
             assert_eq!(retry.previous_reply, Some((raw_reply.into(), Some("translation".into()))));
         }

@@ -101,7 +101,9 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
       && turn.turn_id && turn.conversation_id === view.conversation_id && !shownFailures.has(turn.turn_id)) {
       const promptIndex = turn.user_message_id !== null && latestTurnByUser.get(turn.user_message_id) === turn
         ? messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id) : -1;
-      if (promptIndex >= 0 || persistenceFailure || (preparationFailure && turn.user_message_id === null)) {
+      const initialSaveFailure = persistenceFailure && turn.user_message_id === null
+        && turn.conversation_generation === view.generation;
+      if (promptIndex >= 0 || initialSaveFailure || (preparationFailure && turn.user_message_id === null)) {
         let replyIndex = messages.findIndex(message => message.role === "kokoro" && message.turnId === turn.turn_id);
         const partial = persistenceFailure && stripStreamingControlMarkup(turn.text).trim();
         if (partial && replyIndex < 0) {

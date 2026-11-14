@@ -8,7 +8,9 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
-use crate::chat::persistence::{self, ExternalTurn};
+use crate::chat::persistence::{
+    self, ExternalReplyImage as BotReplyImage, ExternalReplyMedia, ExternalTurn,
+};
 use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
 use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
@@ -810,14 +812,6 @@ struct BotReply {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct BotReplyImage {
-    prompt: String,
-    mime_type: String,
-    file_name: String,
-    data_base64: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 struct BotReplyAudio {
     mime_type: String,
     file_name: String,
@@ -930,8 +924,13 @@ async fn generate_bot_reply(
     let turn = ExternalTurn::begin(orchestrator, &char_id, conversation_id, request_id, &prompt_text, false).await?;
     if let Some((reply, translation)) = turn.previous_reply {
         return Ok(BotReply {
-            reply: format_bot_text(&reply), translation, generated_image_count: 0, images: Vec::new(),
-            audio: None, speech_error: None, image_prompts: Vec::new(),
+            reply: format_bot_text(&reply),
+            translation,
+            generated_image_count: turn.previous_reply_media.images.len(),
+            images: turn.previous_reply_media.images,
+            audio: None,
+            speech_error: None,
+            image_prompts: turn.previous_reply_media.image_prompts,
         });
     }
 
@@ -1137,7 +1136,16 @@ async fn generate_bot_reply(
         Some(compact_newlines(&all_translations.join(" ")))
     };
 
-    turn.save_reply(orchestrator, &canonical_reply, translation.as_deref()).await?;
+    turn.save_reply_with_media(
+        orchestrator,
+        &canonical_reply,
+        translation.as_deref(),
+        ExternalReplyMedia {
+            images: all_generated_images.clone(),
+            image_prompts: all_image_prompts.clone(),
+        },
+    )
+    .await?;
 
     trigger_bot_memory_tasks(
         platform,

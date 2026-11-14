@@ -364,12 +364,48 @@ pub(crate) struct PendingChatSave {
     pub speech: Option<crate::characters::activation::ResolvedTts>,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ExternalReplyImage {
+    pub prompt: String,
+    pub mime_type: String,
+    pub file_name: String,
+    pub data_base64: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ExternalReplyMedia {
+    pub images: Vec<ExternalReplyImage>,
+    pub image_prompts: Vec<String>,
+}
+
+impl ExternalReplyMedia {
+    fn byte_len(&self) -> usize {
+        self.images
+            .iter()
+            .map(|image| {
+                image.prompt.len()
+                    + image.mime_type.len()
+                    + image.file_name.len()
+                    + image.data_base64.len()
+            })
+            .sum::<usize>()
+            + self.image_prompts.iter().map(String::len).sum::<usize>()
+    }
+}
+
 #[derive(Clone)]
 struct PendingExternalReply {
     text: String,
     translation: Option<String>,
+    media: ExternalReplyMedia,
     expected_revision: i64,
     database_guard_generation: u64,
+}
+
+impl PendingExternalReply {
+    fn byte_len(&self) -> usize {
+        self.text.len() + self.translation.as_deref().map_or(0, str::len) + self.media.byte_len()
+    }
 }
 
 struct ExternalReplyEntry {
@@ -401,9 +437,7 @@ impl ExternalReplies {
         let mut replies = self.0.lock().unwrap();
         replies
             .retain(|entry| entry.conversation_id != conversation || entry.request_id != request);
-        if pending.text.len() + pending.translation.as_deref().map_or(0, str::len)
-            > MAX_PENDING_BYTES
-        {
+        if pending.byte_len() > MAX_PENDING_BYTES {
             return;
         }
         replies.push_back(ExternalReplyEntry {
@@ -414,10 +448,7 @@ impl ExternalReplies {
         while replies.len() > MAX_PENDING_REPLIES
             || replies
                 .iter()
-                .map(|entry| {
-                    entry.pending.text.len()
-                        + entry.pending.translation.as_deref().map_or(0, str::len)
-                })
+                .map(|entry| entry.pending.byte_len())
                 .sum::<usize>()
                 > MAX_PENDING_BYTES
         {
@@ -439,6 +470,7 @@ pub(crate) struct ExternalTurn {
     pub target: ConversationTarget,
     pub history: Vec<crate::ai::context::Message>,
     pub previous_reply: Option<(String, Option<String>)>,
+    pub previous_reply_media: ExternalReplyMedia,
     request_id: String,
 }
 
@@ -495,6 +527,7 @@ impl ExternalTurn {
                 None,
             )
             .await?;
+        let mut previous_reply_media = ExternalReplyMedia::default();
         let previous_reply = if saved[0].changed {
             None
         } else {
@@ -509,13 +542,21 @@ impl ExternalTurn {
             .await
             .map_err(KokoroError::chat_persistence)?;
             if let Some((text, metadata)) = existing {
+                let metadata = metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+                if let Some(media) = metadata
+                    .as_ref()
+                    .and_then(|value| value.get("external_reply_media"))
+                {
+                    previous_reply_media = serde_json::from_value(media.clone())
+                        .map_err(KokoroError::chat_persistence)?;
+                }
                 Some((
                     text,
-                    metadata.as_deref().and_then(|raw| {
-                        serde_json::from_str::<serde_json::Value>(raw)
-                            .ok()
-                            .and_then(|value| value["translation"].as_str().map(str::to_owned))
-                    }),
+                    metadata
+                        .as_ref()
+                        .and_then(|value| value["translation"].as_str().map(str::to_owned)),
                 ))
             } else if let Some(pending) = state
                 .external_replies
@@ -527,6 +568,7 @@ impl ExternalTurn {
                     &request_id,
                     &pending.text,
                     pending.translation.as_deref(),
+                    &pending.media,
                     Some(pending.expected_revision),
                 )
                 .await;
@@ -536,6 +578,7 @@ impl ExternalTurn {
                         .forget(&target.conversation_id, &request_id);
                 }
                 result?;
+                previous_reply_media = pending.media;
                 Some((pending.text, pending.translation))
             } else {
                 return Err(KokoroError::Chat(
@@ -555,6 +598,7 @@ impl ExternalTurn {
             },
             history,
             previous_reply,
+            previous_reply_media,
             request_id,
         })
     }
@@ -592,6 +636,17 @@ impl ExternalTurn {
         text: &str,
         translation: Option<&str>,
     ) -> Result<(), KokoroError> {
+        self.save_reply_with_media(state, text, translation, ExternalReplyMedia::default())
+            .await
+    }
+
+    pub(crate) async fn save_reply_with_media(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+        text: &str,
+        translation: Option<&str>,
+        media: ExternalReplyMedia,
+    ) -> Result<(), KokoroError> {
         let _selection = state.conversation_switch_lock.lock().await;
         let revision = current_revision(&state.db, &self.target)
             .await
@@ -603,6 +658,7 @@ impl ExternalTurn {
             &self.request_id,
             text,
             translation,
+            &media,
             None,
         )
         .await;
@@ -614,6 +670,7 @@ impl ExternalTurn {
                     PendingExternalReply {
                         text: text.to_owned(),
                         translation: translation.map(str::to_owned),
+                        media,
                         expected_revision,
                         database_guard_generation:
                             crate::ai::context::database_operation_generation(),
@@ -630,10 +687,18 @@ impl ExternalTurn {
         request_id: &str,
         text: &str,
         translation: Option<&str>,
+        media: &ExternalReplyMedia,
         expected_revision: Option<i64>,
     ) -> Result<(), KokoroError> {
+        let mut metadata = serde_json::Map::new();
+        if let Some(translation) = translation {
+            metadata.insert("translation".into(), serde_json::json!(translation));
+        }
+        if !media.images.is_empty() || !media.image_prompts.is_empty() {
+            metadata.insert("external_reply_media".into(), serde_json::json!(media));
+        }
         let metadata =
-            translation.map(|text| serde_json::json!({ "translation": text }).to_string());
+            (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
         state
             .save_messages_expected_locked(
                 target,
@@ -677,6 +742,122 @@ mod tests {
             conversation_id: conversation.into(),
             create,
         }
+    }
+
+    #[tokio::test]
+    async fn external_save_retry_preserves_image_only_and_prompt_only_replies() {
+        let state = state().await;
+        let image = ExternalReplyImage {
+            prompt: "a forest".into(),
+            mime_type: "image/png".into(),
+            file_name: "forest.png".into(),
+            data_base64: "aW1hZ2U=".into(),
+        };
+        for (index, media) in [
+            ExternalReplyMedia {
+                images: vec![image.clone()],
+                image_prompts: vec![],
+            },
+            ExternalReplyMedia {
+                images: vec![],
+                image_prompts: vec!["a lake".into()],
+            },
+            ExternalReplyMedia {
+                images: vec![image],
+                image_prompts: vec!["a lake".into()],
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let conversation = format!("media-{index}");
+            let request = format!("request-{index}");
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                conversation.clone(),
+                request.clone(),
+                "draw",
+                false,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TRIGGER reject_media_reply BEFORE INSERT ON conversation_messages
+                WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'media reply fault'); END",
+            )
+            .execute(&state.db)
+            .await
+            .unwrap();
+            assert!(matches!(
+                turn.save_reply_with_media(&state, "", Some("translation"), media.clone())
+                    .await,
+                Err(KokoroError::ChatPersistence(_))
+            ));
+            assert!(matches!(
+                ExternalTurn::begin(
+                    &state,
+                    "default",
+                    conversation.clone(),
+                    request.clone(),
+                    "draw",
+                    false
+                )
+                .await,
+                Err(KokoroError::ChatPersistence(_))
+            ));
+            sqlx::query("DROP TRIGGER reject_media_reply")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            // The first retry uses the pending save. The second reads SQLite
+            // after that pending entry has been removed.
+            for _ in 0..2 {
+                let replay = ExternalTurn::begin(
+                    &state,
+                    "default",
+                    conversation.clone(),
+                    request.clone(),
+                    "draw",
+                    false,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    replay.previous_reply,
+                    Some(("".into(), Some("translation".into())))
+                );
+                assert_eq!(replay.previous_reply_media, media);
+                assert!(replay.history.is_empty());
+            }
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?",
+            )
+            .bind(&conversation)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(count, 2);
+        }
+    }
+
+    #[test]
+    fn external_reply_cache_counts_media_toward_its_byte_limit() {
+        let replies = ExternalReplies::default();
+        let pending = PendingExternalReply {
+            text: String::new(),
+            translation: None,
+            media: ExternalReplyMedia {
+                images: vec![],
+                image_prompts: vec!["x".repeat(9 * 1024 * 1024)],
+            },
+            expected_revision: 1,
+            database_guard_generation: crate::ai::context::database_operation_generation(),
+        };
+        replies.remember("conversation", "first", pending.clone());
+        replies.remember("conversation", "second", pending);
+        assert!(replies.get("conversation", "first").is_none());
+        assert!(replies.get("conversation", "second").is_some());
     }
 
     #[tokio::test]
