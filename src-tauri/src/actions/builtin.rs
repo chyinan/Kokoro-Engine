@@ -174,7 +174,7 @@ impl ActionHandler for PlayCueAction {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ActionError("Missing 'cue' parameter".into()))?;
 
-        let profile = crate::commands::live2d::load_active_live2d_profile()
+        let profile = crate::live2d::load_active_live2d_profile()
             .ok_or_else(|| ActionError("No active Live2D model profile loaded".into()))?;
         if !profile.cue_map.contains_key(cue) {
             let available_cues = profile
@@ -319,7 +319,7 @@ impl ActionHandler for GenerateImageAction {
             .ok_or_else(|| ActionError("Image generation service is not available".into()))?;
         let window_size = match ctx
             .app
-            .try_state::<crate::commands::system::WindowSizeState>()
+            .try_state::<crate::imagegen::WindowSizeState>()
         {
             Some(state) => Some(state.get().await),
             None => None,

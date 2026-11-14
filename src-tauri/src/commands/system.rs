@@ -1,42 +1,14 @@
 use crate::ai::context::AIOrchestrator;
-use crate::commands::live2d::load_active_live2d_profile;
+use crate::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::{command, Manager, State};
-use tokio::sync::RwLock;
 
 const GITHUB_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/chyinan/Kokoro-Engine/releases/latest";
 
-#[derive(Clone)]
-pub struct WindowSizeState {
-    pub width: Arc<RwLock<u32>>,
-    pub height: Arc<RwLock<u32>>,
-}
-
-impl Default for WindowSizeState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WindowSizeState {
-    pub fn new() -> Self {
-        Self {
-            width: Arc::new(RwLock::new(1200)),
-            height: Arc::new(RwLock::new(800)),
-        }
-    }
-    pub async fn get(&self) -> (u32, u32) {
-        (*self.width.read().await, *self.height.read().await)
-    }
-    pub async fn set(&self, w: u32, h: u32) {
-        *self.width.write().await = w;
-        *self.height.write().await = h;
-    }
-}
+use crate::imagegen::WindowSizeState;
 
 #[command]
 pub async fn set_window_size(

@@ -9,7 +9,7 @@ pub mod tool_settings;
 
 pub use audit::{build_tool_audit_event, ToolAuditDecision, ToolAuditEvent, ToolAuditInput};
 pub use executor::{
-    action_result_is_success, execute_tool_calls, execute_tool_calls_with_cancellation,
+    action_result_is_success,
     ToolCancellationError,
     ToolExecutionOutcome, ToolInvocation,
 };

@@ -8,7 +8,7 @@ import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, Ima
 import { onChatWarning, uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
 import { chatApplication, type ChatMessageTarget } from "../../lib/chat/application";
-import { projectMessages, isActiveTurn } from "../../lib/chat/projection";
+import { projectMessages, isActiveTurn, turnMatchesView } from "../../lib/chat/projection";
 import { canSubmitApproval, getApprovalRequestId, type ChatPanelMessage } from "../../lib/chat/turn-state";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { useVoiceInput, VoiceState, useWakeWord } from "../hooks";
@@ -203,7 +203,7 @@ export default function ChatPanel({
     activeCharacterIdRef.current = activeCharacterId;
     activeConversationIdRef.current = activeConversationId;
     conversationGenerationRef.current = view.generation;
-    const activeTurn = view.turns.find(turn => isActiveTurn(turn) && turn.character_id === activeCharacterId);
+    const activeTurn = view.turns.find(turn => isActiveTurn(turn) && turn.character_id === activeCharacterId && turnMatchesView(view, turn));
     const messages = useChatTextReveal(projectedMessages, activeTurn?.turn_id);
     const isStreaming = Boolean(activeTurn);
     const isThinking = isStreaming && !activeTurn?.text;

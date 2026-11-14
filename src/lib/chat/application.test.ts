@@ -239,6 +239,35 @@ describe("UI-independent chat application", () => {
     pending.resolve({ status: "cancelled", conversation_id: "" }); await result;
     expect(h.app.getSnapshot().busy).toBe(false);
   });
+  it("does not cancel or project a different external conversation", async () => {
+    const h = harness();
+    const foreign = {
+      ...emptyChatView,
+      character_id: "character-a",
+      conversation_id: "desktop",
+      generation: 3,
+      turns: [{
+        revision: 1, client_request_id: "telegram", turn_id: "external",
+        character_id: "character-a", conversation_id: "telegram-private",
+        user_message_id: null, assistant_message_id: null, message: "private question",
+        images: [], hidden: false, status: "streaming", text: "private answer",
+        translation: null, tools: [], error: null,
+      }],
+    } satisfies ChatViewSnapshot;
+    vi.mocked(h.io.read).mockResolvedValue(foreign);
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+    await h.app.cancel();
+    expect(h.io.cancel).not.toHaveBeenCalled();
+
+    vi.mocked(h.io.read).mockResolvedValue({
+      ...foreign,
+      turns: [{ ...foreign.turns[0], conversation_id: "desktop", revision: 2 }],
+    });
+    await h.app.refresh();
+    await h.app.cancel();
+    expect(h.io.cancel).toHaveBeenCalledWith("telegram", "stopped_by_user");
+  });
   it.each(["denied IPC", "connection lost", "serialization failed"])("releases provisional state after %s before journal registration", async error => {
     const h = harness(); vi.mocked(h.io.send).mockRejectedValueOnce(new Error(error));
     await expect(h.app.send({ message: "one" })).rejects.toThrow(error);

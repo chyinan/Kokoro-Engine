@@ -505,19 +505,8 @@ fn build_resolved_direct_invocation(
     }
 }
 
-pub(crate) fn build_tool_invocation_from_input(
-    registry: &ActionRegistry,
-    input: &str,
-    args: HashMap<String, String>,
-    tool_call_id: Option<String>,
-) -> Result<ToolInvocation, crate::actions::registry::ActionError> {
-    let action_id = registry.resolve_action_id_for_input(input)?;
-    Ok(ToolInvocation {
-        tool_call_id,
-        name: action_id,
-        args,
-    })
-}
+#[cfg(test)]
+use crate::actions::executor::build_tool_invocation_from_input;
 
 async fn resolve_action_id_at_boundary(
     registry_state: &State<'_, Arc<RwLock<ActionRegistry>>>,
