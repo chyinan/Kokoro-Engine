@@ -83,6 +83,31 @@ pub struct Message {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Copy)]
+enum ChatMessageOrigin {
+    Desktop,
+    External,
+}
+
+#[derive(Clone)]
+struct DesktopMemoryBoundary {
+    target: ConversationTarget,
+    conversation_generation: u64,
+    database_generation: u64,
+    first_message_id: i64,
+}
+
+fn is_external_chat_message(message: &Message) -> bool {
+    // ExternalTurn already persists these identities. Desktop user writes also
+    // have a client_request_id, so old replies and save retries need no migration.
+    message.metadata.as_ref().is_some_and(|metadata| {
+        metadata["external_user_message_id"].is_i64()
+            || (message.role == "user"
+                && metadata["chat_save_id"].is_string()
+                && metadata.get("client_request_id").is_none())
+    })
+}
+
 pub fn is_vision_context_message(message: &Message) -> bool {
     message.role == "context"
         || message
@@ -449,6 +474,7 @@ pub struct AIOrchestrator {
     pub(crate) memory_trigger_count: Arc<Mutex<u64>>,
     /// History index boundary used to prevent extracting conversations from disabled periods.
     pub(crate) memory_history_boundary: Arc<Mutex<usize>>,
+    desktop_memory_boundary: Arc<Mutex<Option<DesktopMemoryBoundary>>>,
     /// Current character ID for memory isolation.
     pub(crate) character_id: Arc<Mutex<String>>,
     /// In-memory cooldown map for memory event trigger throttling.
@@ -560,6 +586,7 @@ impl AIOrchestrator {
             message_count: Arc::new(Mutex::new(0)),
             memory_trigger_count: Arc::new(Mutex::new(0)),
             memory_history_boundary: Arc::new(Mutex::new(0)),
+            desktop_memory_boundary: Arc::new(Mutex::new(None)),
             character_id: Arc::new(Mutex::new("default".to_string())),
             memory_event_cooldowns: Arc::new(Mutex::new(HashMap::new())),
             memory_enabled: Arc::new(AtomicBool::new(true)),
@@ -601,6 +628,7 @@ impl AIOrchestrator {
             message_count: Arc::new(Mutex::new(0)),
             memory_trigger_count: Arc::new(Mutex::new(0)),
             memory_history_boundary: Arc::new(Mutex::new(0)),
+            desktop_memory_boundary: Arc::new(Mutex::new(None)),
             character_id: Arc::new(Mutex::new(self.character_id.lock().await.clone())),
             memory_event_cooldowns: self.memory_event_cooldowns.clone(),
             memory_enabled: self.memory_enabled.clone(),
@@ -879,6 +907,46 @@ impl AIOrchestrator {
         summary_provider: Option<Arc<dyn LlmProvider>>,
         expected_revision: Option<i64>,
     ) -> Result<Vec<SavedMessage>, KokoroError> {
+        self.save_messages_for_origin_locked(
+            target,
+            messages,
+            select_on_commit,
+            summary_provider,
+            expected_revision,
+            ChatMessageOrigin::Desktop,
+        )
+        .await
+    }
+
+    /// External turns own their cadence even when Telegram shares the selected
+    /// conversation. They still update the selected chat context after commit.
+    pub(crate) async fn save_external_messages_locked(
+        &self,
+        target: &ConversationTarget,
+        messages: &[MessageWrite],
+        select_on_commit: bool,
+        expected_revision: Option<i64>,
+    ) -> Result<Vec<SavedMessage>, KokoroError> {
+        self.save_messages_for_origin_locked(
+            target,
+            messages,
+            select_on_commit,
+            None,
+            expected_revision,
+            ChatMessageOrigin::External,
+        )
+        .await
+    }
+
+    async fn save_messages_for_origin_locked(
+        &self,
+        target: &ConversationTarget,
+        messages: &[MessageWrite],
+        select_on_commit: bool,
+        summary_provider: Option<Arc<dyn LlmProvider>>,
+        expected_revision: Option<i64>,
+        origin: ChatMessageOrigin,
+    ) -> Result<Vec<SavedMessage>, KokoroError> {
         for message in messages.iter().filter(|message| message.role == "user") {
             persistence::validate_user_input(&message.content)?;
         }
@@ -892,11 +960,29 @@ impl AIOrchestrator {
         }
 
         let selected = self.current_conversation_id.lock().await.as_deref() == Some(&target.conversation_id);
-        for (message, _) in messages.iter().zip(&saved).filter(|(_, saved)| saved.changed) {
-            if message.role == "user" {
+        for (message, row) in messages.iter().zip(&saved).filter(|(_, saved)| saved.changed) {
+            if message.role == "user" && matches!(origin, ChatMessageOrigin::Desktop) {
                 *self.message_count.lock().await += 1;
                 if self.is_memory_enabled() {
                     *self.memory_trigger_count.lock().await += 1;
+                    if selected {
+                        let generation = self.current_conversation_generation();
+                        let database_generation = database_operation_generation();
+                        let mut boundary = self.desktop_memory_boundary.lock().await;
+                        if !boundary.as_ref().is_some_and(|boundary| {
+                            boundary.target.conversation_id == target.conversation_id
+                                && boundary.target.character_id == target.character_id
+                                && boundary.conversation_generation == generation
+                                && boundary.database_generation == database_generation
+                        }) {
+                            *boundary = Some(DesktopMemoryBoundary {
+                                target: target.clone(),
+                                conversation_generation: generation,
+                                database_generation,
+                                first_message_id: row.id,
+                            });
+                        }
+                    }
                 }
             }
             if selected {
@@ -1010,15 +1096,33 @@ impl AIOrchestrator {
         target: &ConversationTarget,
         through_message_id: Option<i64>,
     ) -> Result<Vec<Message>, KokoroError> {
-        self.saved_history_range(target, 0, through_message_id.unwrap_or(i64::MAX))
+        self.saved_history_range(target, 0, through_message_id.unwrap_or(i64::MAX), None)
             .await
     }
 
-    pub(crate) async fn saved_history_range(
+    pub(crate) async fn saved_external_memory_history(
         &self,
         target: &ConversationTarget,
         first_message_id: i64,
         through_message_id: i64,
+    ) -> Result<Vec<Message>, KokoroError> {
+        // Filter before the SQL window limit: interleaved desktop messages must
+        // not crowd the external turns out of their next extraction batch.
+        self.saved_history_range(
+            target,
+            first_message_id,
+            through_message_id,
+            Some(ChatMessageOrigin::External),
+        )
+        .await
+    }
+
+    async fn saved_history_range(
+        &self,
+        target: &ConversationTarget,
+        first_message_id: i64,
+        through_message_id: i64,
+        origin: Option<ChatMessageOrigin>,
     ) -> Result<Vec<Message>, KokoroError> {
         let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT m.role, m.content, m.metadata FROM conversation_messages m
@@ -1027,6 +1131,11 @@ impl AIOrchestrator {
                AND m.id >= ? AND m.id <= ?
                AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.external_user_message_id') END, m.id) >= ?
                AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.streaming_draft') END, 0) != 1
+               AND (? = 0 OR COALESCE(CASE WHEN json_valid(m.metadata) THEN
+                   json_type(m.metadata, '$.external_user_message_id') = 'integer'
+                   OR (m.role = 'user' AND json_type(m.metadata, '$.chat_save_id') = 'text'
+                       AND json_type(m.metadata, '$.client_request_id') IS NULL)
+                   END, 0) = ?)
              ORDER BY m.id DESC LIMIT ?",
         )
         .bind(&target.conversation_id)
@@ -1034,6 +1143,8 @@ impl AIOrchestrator {
         .bind(first_message_id)
         .bind(through_message_id)
         .bind(first_message_id)
+        .bind(origin.is_some())
+        .bind(matches!(origin, Some(ChatMessageOrigin::External)))
         .bind(MAX_IN_MEMORY_HISTORY_MESSAGES as i64)
         .fetch_all(&self.db)
         .await
@@ -1272,14 +1383,48 @@ impl AIOrchestrator {
         filtered.into_iter().skip(start).collect()
     }
 
-    /// Returns the last `n` messages after the current memory boundary.
+    /// Read the desktop extraction window after its first admitted user message.
+    /// Filtering SQLite before LIMIT prevents a busy shared Telegram conversation
+    /// from evicting desktop turns before their own cadence reaches extraction.
     pub async fn get_recent_memory_history(&self, n: usize) -> Vec<Message> {
+        let boundary = self.desktop_memory_boundary.lock().await.clone();
+        if let Some(boundary) = boundary.filter(|boundary| {
+            boundary.conversation_generation == self.current_conversation_generation()
+                && boundary.database_generation == database_operation_generation()
+        }) {
+            if self.current_conversation_id.lock().await.as_deref()
+                == Some(&boundary.target.conversation_id)
+            {
+                match self
+                    .saved_history_range(
+                        &boundary.target,
+                        boundary.first_message_id,
+                        i64::MAX,
+                        Some(ChatMessageOrigin::Desktop),
+                    )
+                    .await
+                {
+                    Ok(mut history) => {
+                        history.retain(is_memory_candidate_message);
+                        history.drain(..history.len().saturating_sub(n));
+                        return history;
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "memory", "Failed to load committed desktop memory history: {error}")
+                    }
+                }
+            }
+        }
+        // Keep the existing bounded fallback for legacy/manually supplied history
+        // and an unavailable database; memory must not block ordinary chat.
         let history = self.history.lock().await;
         let boundary = (*self.memory_history_boundary.lock().await).min(history.len());
         let filtered = history
             .iter()
             .skip(boundary)
-            .filter(|message| is_memory_candidate_message(message))
+            .filter(|message| {
+                is_memory_candidate_message(message) && !is_external_chat_message(message)
+            })
             .cloned()
             .collect::<Vec<_>>();
         let start = filtered.len().saturating_sub(n);
@@ -1300,6 +1445,7 @@ impl AIOrchestrator {
             let mut trigger_count = self.memory_trigger_count.lock().await;
             *trigger_count = 0;
         }
+        *self.desktop_memory_boundary.lock().await = None;
         {
             let history_len = self.history.lock().await.len();
             let mut boundary = self.memory_history_boundary.lock().await;
@@ -1781,6 +1927,7 @@ impl AIOrchestrator {
         drop(history);
         *self.memory_history_boundary.lock().await = 0;
         *self.memory_trigger_count.lock().await = 0;
+        *self.desktop_memory_boundary.lock().await = None;
         // 清空当前对话 ID，下次发消息时会创建新对话
         let mut conv_id = self.current_conversation_id.lock().await;
         *conv_id = None;
@@ -1794,6 +1941,7 @@ impl AIOrchestrator {
         self.history.lock().await.clear();
         *self.memory_history_boundary.lock().await = 0;
         *self.memory_trigger_count.lock().await = 0;
+        *self.desktop_memory_boundary.lock().await = None;
     }
 
     /// Resets and populates in-memory history from raw database rows or messages,
@@ -1807,11 +1955,13 @@ impl AIOrchestrator {
         let mut history = self.history.lock().await;
         let count = sync_history_window(&mut history, items, max_chars);
         *self.memory_history_boundary.lock().await = count;
+        *self.desktop_memory_boundary.lock().await = None;
         count
     }
 
     pub async fn set_memory_history_boundary(&self, boundary: usize) {
         *self.memory_history_boundary.lock().await = boundary;
+        *self.desktop_memory_boundary.lock().await = None;
     }
 
     pub async fn memory_history_boundary(&self) -> usize {

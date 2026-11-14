@@ -526,7 +526,7 @@ impl ExternalTurn {
             create,
         };
         let saved = state
-            .save_messages_locked(
+            .save_external_messages_locked(
                 &target,
                 &[MessageWrite::new("user", text, None).with_save_id(save_id)],
                 select_new && create,
@@ -637,7 +637,7 @@ impl ExternalTurn {
             return Vec::new();
         }
         match state
-            .saved_history_range(&self.target, work.first_message_id, work.through_message_id)
+            .saved_external_memory_history(&self.target, work.first_message_id, work.through_message_id)
             .await
         {
             Ok(mut history) => {
@@ -738,12 +738,11 @@ impl ExternalTurn {
         let metadata =
             (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
         let saved = state
-            .save_messages_expected_locked(
+            .save_external_messages_locked(
                 target,
                 &[MessageWrite::new("assistant", text, metadata)
                     .with_save_id(format!("{request_id}:assistant"))],
                 false,
-                None,
                 expected_revision,
             )
             .await?;
@@ -803,6 +802,345 @@ mod tests {
         .unwrap()
     }
 
+    async fn desktop_turn(state: &AIOrchestrator, label: &str) -> u64 {
+        let _selection = state.conversation_switch_lock.lock().await;
+        let selected = state.current_conversation_id.lock().await.clone();
+        let target = target(selected.as_deref().unwrap_or("desktop"), selected.is_none());
+        state
+            .save_messages_locked(
+                &target,
+                &[MessageWrite::new(
+                    "user",
+                    label,
+                    Some(
+                        serde_json::json!({
+                            "client_request_id": label,
+                        })
+                        .to_string(),
+                    ),
+                )
+                .with_save_id(format!("{label}:user"))],
+                target.create,
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .save_messages_locked(
+                &ConversationTarget {
+                    create: false,
+                    ..target
+                },
+                &[
+                    MessageWrite::new("assistant", format!("answer-{label}"), None)
+                        .with_save_id(format!("{label}:assistant")),
+                ],
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        state.get_memory_trigger_count().await
+    }
+
+    fn assert_memory_transcript(history: Vec<crate::ai::context::Message>, expected: &[String]) {
+        let expected = &expected[expected.len().saturating_sub(10)..];
+        assert_eq!(
+            history
+                .into_iter()
+                .map(|message| message.content)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_external_turns_preserve_desktop_and_external_memory_cadence_and_transcripts() {
+        for (platform, continue_selected) in
+            [("telegram", true), ("line", false), ("discord", false)]
+        {
+            // One orchestrator handles both producers, as in the managed same-character
+            // paths. The fixture only disables disk selection persistence; requests do
+            // not fork, so an external write would corrupt the desktop counter here.
+            let state = state().await;
+            let mut desktop_history = Vec::new();
+            let mut external_history = Vec::new();
+            let mut desktop_count = 0;
+            let mut desktop_extractions = 0;
+            let mut desktop_consolidations = 0;
+            let mut external_extractions = 0;
+            let mut external_consolidations = 0;
+            for index in 1..=4 {
+                let label = format!("desktop-{index}");
+                desktop_count = desktop_turn(&state, &label).await;
+                desktop_history.extend([label.clone(), format!("answer-{label}")]);
+            }
+            assert_eq!(desktop_count, 4);
+            let desktop_id = state.current_conversation_id.lock().await.clone().unwrap();
+            let external_id = external_identity(platform, &["default", "chat"]);
+
+            for index in 1..=20 {
+                let request = format!("{platform}-{index}");
+                let label = format!("external-{request}");
+                if index == 1 {
+                    sqlx::query("CREATE TRIGGER reject_managed_user BEFORE INSERT ON conversation_messages WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'user fault'); END")
+                        .execute(&state.db).await.unwrap();
+                    assert!(matches!(
+                        ExternalTurn::begin(
+                            &state,
+                            "default",
+                            external_id.clone(),
+                            request.clone(),
+                            &label,
+                            continue_selected
+                        )
+                        .await,
+                        Err(KokoroError::ChatPersistence(_))
+                    ));
+                    assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                    sqlx::query("DROP TRIGGER reject_managed_user")
+                        .execute(&state.db)
+                        .await
+                        .unwrap();
+                }
+                let turn = ExternalTurn::begin(
+                    &state,
+                    "default",
+                    external_id.clone(),
+                    request.clone(),
+                    &label,
+                    continue_selected,
+                )
+                .await
+                .unwrap();
+                assert_eq!(turn.target.conversation_id == desktop_id, continue_selected);
+                assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                assert_eq!(state.get_message_count().await, desktop_count);
+                let answer = format!("answer-{label}");
+                let work = if matches!(index, 1 | 5 | 20) {
+                    sqlx::query("CREATE TRIGGER reject_managed_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply fault'); END")
+                        .execute(&state.db).await.unwrap();
+                    assert!(matches!(
+                        turn.save_reply(&state, &answer, None).await,
+                        Err(KokoroError::ChatPersistence(_))
+                    ));
+                    assert!(matches!(
+                        ExternalTurn::begin(
+                            &state,
+                            "default",
+                            external_id.clone(),
+                            request.clone(),
+                            &label,
+                            continue_selected
+                        )
+                        .await,
+                        Err(KokoroError::ChatPersistence(_))
+                    ));
+                    assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                    sqlx::query("DROP TRIGGER reject_managed_reply")
+                        .execute(&state.db)
+                        .await
+                        .unwrap();
+                    let recovered = ExternalTurn::begin(
+                        &state,
+                        "default",
+                        external_id.clone(),
+                        request.clone(),
+                        &label,
+                        continue_selected,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(recovered.previous_reply, Some((answer.clone(), None)));
+                    recovered.previous_memory_work.unwrap()
+                } else {
+                    turn.save_reply(&state, &answer, None)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                };
+                assert_eq!(work.count, index);
+                external_extractions += usize::from(work.extract());
+                external_consolidations += usize::from(work.consolidate());
+                external_history.extend([label.clone(), answer]);
+                assert_memory_transcript(
+                    turn.recent_committed_history(&state, work, 10).await,
+                    &external_history,
+                );
+                assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                let duplicate = ExternalTurn::begin(
+                    &state,
+                    "default",
+                    external_id.clone(),
+                    request,
+                    &label,
+                    continue_selected,
+                )
+                .await
+                .unwrap();
+                assert!(duplicate.previous_memory_work.is_none());
+                assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+
+                if desktop_count < 20 {
+                    let label = format!("desktop-{}", desktop_count + 1);
+                    desktop_count = desktop_turn(&state, &label).await;
+                    desktop_history.extend([label.clone(), format!("answer-{label}")]);
+                    desktop_extractions += usize::from(desktop_count.is_multiple_of(5));
+                    desktop_consolidations += usize::from(desktop_count.is_multiple_of(20));
+                    assert_memory_transcript(
+                        state.get_recent_memory_history(10).await,
+                        &desktop_history,
+                    );
+                    if index == 1 {
+                        assert_eq!(
+                            desktop_count, 5,
+                            "four desktop turns, one external turn, then the fifth desktop turn"
+                        );
+                        assert_eq!(desktop_extractions, 1);
+                    }
+                }
+                assert_eq!(
+                    *state.current_conversation_id.lock().await,
+                    Some(desktop_id.clone())
+                );
+            }
+            assert_eq!((desktop_extractions, desktop_consolidations), (4, 1));
+            assert_eq!((external_extractions, external_consolidations), (4, 1));
+            let context = state
+                .saved_history_for(&target(&desktop_id, false), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                context
+                    .iter()
+                    .any(|message| message.content.starts_with("external-")),
+                continue_selected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_telegram_memory_switch_keeps_both_transcripts_inside_their_own_boundary() {
+        let state = state().await;
+        desktop_turn(&state, "desktop-before-toggle").await;
+        let old = ExternalTurn::begin(
+            &state,
+            "default",
+            "unused".into(),
+            "old".into(),
+            "external-before-toggle",
+            true,
+        )
+        .await
+        .unwrap();
+        state.set_memory_enabled(false).await;
+        assert_eq!(desktop_turn(&state, "desktop-disabled").await, 0);
+        let disabled = ExternalTurn::begin(
+            &state,
+            "default",
+            "unused".into(),
+            "disabled".into(),
+            "external-disabled",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(disabled
+            .save_reply(&state, "answer-disabled", None)
+            .await
+            .unwrap()
+            .is_none());
+        state.set_memory_enabled(true).await;
+        let mut desktop_history = Vec::new();
+        let mut external_history = Vec::new();
+        for index in 1..=5 {
+            let label = format!("desktop-after-{index}");
+            assert_eq!(desktop_turn(&state, &label).await, index);
+            desktop_history.extend([label.clone(), format!("answer-{label}")]);
+            let label = format!("external-after-{index}");
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                "unused".into(),
+                label.clone(),
+                &label,
+                true,
+            )
+            .await
+            .unwrap();
+            if index == 1 {
+                assert!(old
+                    .save_reply(&state, "late-before-toggle", None)
+                    .await
+                    .unwrap()
+                    .is_none());
+            }
+            let answer = format!("answer-{label}");
+            let work = turn
+                .save_reply(&state, &answer, None)
+                .await
+                .unwrap()
+                .unwrap();
+            external_history.extend([label, answer]);
+            assert_eq!(work.count, index);
+            assert_eq!(work.extract(), index == 5);
+            assert_memory_transcript(
+                turn.recent_committed_history(&state, work, 10).await,
+                &external_history,
+            );
+            assert_memory_transcript(state.get_recent_memory_history(10).await, &desktop_history);
+            assert_eq!(state.get_memory_trigger_count().await, index);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_memory_transcripts_filter_before_window_limits_in_both_directions() {
+        let state = state().await;
+        let mut desktop_history = Vec::new();
+        let mut external_history = Vec::new();
+        for index in 1..=30 {
+            // The first external pair must survive 24 desktop pairs. Later the
+            // desktop window must survive 25 external pairs without a new fork.
+            if index == 1 {
+                let label = "desktop-1";
+                desktop_turn(&state, label).await;
+                desktop_history.extend([label.to_owned(), format!("answer-{label}")]);
+            }
+            let label = format!("external-{index}");
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                "unused".into(),
+                label.clone(),
+                &label,
+                true,
+            )
+            .await
+            .unwrap();
+            let answer = format!("answer-{label}");
+            let work = turn
+                .save_reply(&state, &answer, None)
+                .await
+                .unwrap()
+                .unwrap();
+            external_history.extend([label, answer]);
+            assert_eq!(work.count, index);
+            assert_memory_transcript(
+                turn.recent_committed_history(&state, work, 10).await,
+                &external_history,
+            );
+            if index == 1 {
+                for desktop_index in 2..=25 {
+                    let label = format!("desktop-{desktop_index}");
+                    assert_eq!(desktop_turn(&state, &label).await, desktop_index);
+                    desktop_history.extend([label.clone(), format!("answer-{label}")]);
+                }
+            }
+            assert_memory_transcript(state.get_recent_memory_history(10).await, &desktop_history);
+        }
+        assert_eq!(state.get_memory_trigger_count().await, 25);
+    }
+
     #[tokio::test]
     async fn external_memory_cadence_survives_twenty_fresh_forks_per_platform_and_chat() {
         let state = state().await;
@@ -826,8 +1164,8 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(work.count, index);
-                // This is the former bug: every request-local counter is still 1.
-                assert_eq!(fork.get_memory_trigger_count().await, 1);
+                // External turns never advance the desktop-owned counter.
+                assert_eq!(fork.get_memory_trigger_count().await, 0);
                 *extraction_counts.entry(conversation).or_insert(0) += usize::from(work.extract());
                 *consolidation_counts.entry(conversation).or_insert(0) +=
                     usize::from(work.consolidate());
