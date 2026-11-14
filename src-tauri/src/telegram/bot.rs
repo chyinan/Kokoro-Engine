@@ -11,6 +11,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::external_memory::MemoryWork;
 use crate::chat::persistence::{self, ExternalTurn};
 use crate::error::KokoroError;
 use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
@@ -348,6 +349,173 @@ fn telegram_reply_text(text: &str, translation: Option<&str>) -> String {
     }
 }
 
+async fn trigger_telegram_memory_tasks(
+    orchestrator: &AIOrchestrator,
+    llm_service: &LlmService,
+    turn: &ExternalTurn,
+    text: &str,
+    memory_work: Option<MemoryWork>,
+    event_driven: bool,
+) {
+    let char_id = turn.target.character_id.as_str();
+    // Event-driven + periodic memory extraction
+    let Some(work) = memory_work.filter(|work| orchestrator.external_memory.is_current(*work))
+    else {
+        return;
+    };
+    let msg_count = work.count;
+    let memory_msg_count = work.count;
+    let upgrade_config =
+        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
+    let ingress_options = MemoryEventIngressOptions {
+        enabled: upgrade_config.event_trigger_enabled,
+        event_cooldown_secs: upgrade_config.event_cooldown_secs,
+        intent_routing_enabled: upgrade_config.intent_routing_enabled,
+    };
+    let memory_target_language = orchestrator.response_language.lock().await.clone();
+    tracing::info!(
+        target: "telegram::memory",
+        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
+        msg_count, memory_msg_count, char_id
+    );
+
+    if event_driven && orchestrator.is_memory_enabled() {
+        if let Some(decision) = select_memory_ingress_decision(text, &ingress_options) {
+            let cooldown_key = build_cooldown_key(
+                char_id,
+                &turn.target.conversation_id,
+                decision.event.event_type,
+            );
+            if orchestrator
+                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
+                .await
+            {
+                tracing::info!(
+                    target: "telegram::memory",
+                    "[Telegram/Memory] Triggering event-driven extraction (trigger={}, count={})",
+                    decision.trigger_label,
+                    msg_count
+                );
+
+                let history = turn.recent_committed_history(orchestrator, work, 10).await;
+                let memory_mgr = orchestrator.memory_manager.clone();
+                let provider_for_mem = llm_service.provider().await;
+                let char_id_for_mem = char_id.to_owned();
+                let memory_enabled = orchestrator.memory_enabled_flag();
+                let external_memory = orchestrator.external_memory.clone();
+                let observation_started_at = std::time::Instant::now();
+                let trigger_for_observation = decision.trigger_label.to_string();
+                let extraction_options = memory_extractor::MemoryExtractionOptions {
+                    structured_memory_enabled: should_use_structured_extraction(
+                        upgrade_config.structured_memory_enabled,
+                        &ingress_options,
+                    ),
+                    target_language: Some(memory_target_language.clone()),
+                };
+                tauri::async_runtime::spawn(async move {
+                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
+                        || !external_memory.is_current(work)
+                    {
+                        return;
+                    }
+                    let _ = memory_mgr
+                        .record_periodic_write_if_enabled(
+                            &char_id_for_mem,
+                            "telegram",
+                            &trigger_for_observation,
+                            observation_started_at,
+                        )
+                        .await;
+                    memory_extractor::extract_and_store_memories_with_options(
+                        &history,
+                        &memory_mgr,
+                        provider_for_mem,
+                        char_id_for_mem,
+                        extraction_options,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+
+    if orchestrator.is_memory_enabled() && work.extract() {
+        tracing::info!(
+            target: "telegram::memory",
+            "[Telegram/Memory] Triggering memory extraction (count={})",
+            msg_count
+        );
+        let history = turn.recent_committed_history(orchestrator, work, 10).await;
+        let memory_mgr = orchestrator.memory_manager.clone();
+        let provider_for_mem = llm_service.provider().await;
+        let char_id_for_mem = char_id.to_owned();
+        let memory_enabled = orchestrator.memory_enabled_flag();
+        let external_memory = orchestrator.external_memory.clone();
+        let observation_started_at = std::time::Instant::now();
+        let extraction_options = memory_extractor::MemoryExtractionOptions {
+            structured_memory_enabled: false,
+            target_language: Some(memory_target_language.clone()),
+        };
+        tauri::async_runtime::spawn(async move {
+            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
+                || !external_memory.is_current(work)
+            {
+                return;
+            }
+            let _ = memory_mgr
+                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
+                .await;
+            memory_extractor::extract_and_store_memories_with_options(
+                &history,
+                &memory_mgr,
+                provider_for_mem,
+                char_id_for_mem,
+                extraction_options,
+            )
+            .await;
+        });
+    }
+    if orchestrator.is_memory_enabled() && work.consolidate() {
+        let memory_mgr = orchestrator.memory_manager.clone();
+        let char_id_for_consolidation = char_id.to_owned();
+        let provider_for_consolidation = llm_service.provider().await;
+        let memory_enabled = orchestrator.memory_enabled_flag();
+        let external_memory = orchestrator.external_memory.clone();
+        let observation_started_at = std::time::Instant::now();
+        let target_language_for_consolidation = memory_target_language.clone();
+        tauri::async_runtime::spawn(async move {
+            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
+                || !external_memory.is_current(work)
+            {
+                return;
+            }
+            let _ = memory_mgr
+                .periodic_consolidation_observation(
+                    &char_id_for_consolidation,
+                    "telegram",
+                    observation_started_at,
+                )
+                .await;
+            match memory_mgr
+                .consolidate_memories_with_language(
+                    &char_id_for_consolidation,
+                    provider_for_consolidation,
+                    Some(target_language_for_consolidation),
+                )
+                .await
+            {
+                Ok(count) if count > 0 => {
+                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
+                }
+                Err(e) => {
+                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
+                }
+                _ => {}
+            }
+        });
+    }
+}
+
 /// Handle a plain text message — run through the LLM pipeline and reply.
 async fn handle_text(
     bot: &Bot,
@@ -401,8 +569,9 @@ async fn handle_text(
         sessions,
     )
     .await?;
-    if let Some((text, translation)) = &turn.previous_reply {
-        bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(text), translation.as_deref())).await?;
+    if let Some((reply, translation)) = &turn.previous_reply {
+        trigger_telegram_memory_tasks(orchestrator, &llm_service, &turn, text, turn.previous_memory_work, true).await;
+        bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(reply), translation.as_deref())).await?;
         return Ok(());
     }
 
@@ -578,148 +747,9 @@ async fn handle_text(
     }
 
     // 5. Persist assistant message
-    turn.save_reply(orchestrator, &canonical_response, translation.as_deref()).await?;
+    let memory_work = turn.save_reply(orchestrator, &canonical_response, translation.as_deref()).await?;
 
-    // Event-driven + periodic memory extraction
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let upgrade_config =
-        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
-    let ingress_options = MemoryEventIngressOptions {
-        enabled: upgrade_config.event_trigger_enabled,
-        event_cooldown_secs: upgrade_config.event_cooldown_secs,
-        intent_routing_enabled: upgrade_config.intent_routing_enabled,
-    };
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-    tracing::info!(
-        target: "telegram::memory",
-        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
-        msg_count, memory_msg_count, char_id
-    );
-
-    if orchestrator.is_memory_enabled() {
-        if let Some(decision) = select_memory_ingress_decision(text, &ingress_options) {
-            let cooldown_key =
-                build_cooldown_key(&char_id, &chat_id.to_string(), decision.event.event_type);
-            if orchestrator
-                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
-                .await
-            {
-                tracing::info!(
-                    target: "telegram::memory",
-                    "[Telegram/Memory] Triggering event-driven extraction (trigger={}, count={})",
-                    decision.trigger_label,
-                    msg_count
-                );
-
-                let history = turn.recent_committed_history(orchestrator, 10).await;
-                let memory_mgr = orchestrator.memory_manager.clone();
-                let provider_for_mem = llm_service.provider().await;
-                let char_id_for_mem = char_id.clone();
-                let memory_enabled = orchestrator.memory_enabled_flag();
-                let observation_started_at = std::time::Instant::now();
-                let trigger_for_observation = decision.trigger_label.to_string();
-                let extraction_options = memory_extractor::MemoryExtractionOptions {
-                    structured_memory_enabled: should_use_structured_extraction(
-                        upgrade_config.structured_memory_enabled,
-                        &ingress_options,
-                    ),
-                    target_language: Some(memory_target_language.clone()),
-                };
-                tauri::async_runtime::spawn(async move {
-                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                        return;
-                    }
-                    let _ = memory_mgr
-                        .record_periodic_write_if_enabled(
-                            &char_id_for_mem,
-                            "telegram",
-                            &trigger_for_observation,
-                            observation_started_at,
-                        )
-                        .await;
-                    memory_extractor::extract_and_store_memories_with_options(
-                        &history,
-                        &memory_mgr,
-                        provider_for_mem,
-                        char_id_for_mem,
-                        extraction_options,
-                    )
-                    .await;
-                });
-            }
-        }
-    }
-
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        tracing::info!(
-            target: "telegram::memory",
-            "[Telegram/Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = turn.recent_committed_history(orchestrator, 10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.clone();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "telegram",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
+    trigger_telegram_memory_tasks(orchestrator, &llm_service, &turn, text, memory_work, true).await;
 
     // Sync assistant message to desktop UI
     let _ = app.emit(
@@ -884,6 +914,7 @@ async fn handle_photo(
     )
     .await?;
     if let Some((text, translation)) = &turn.previous_reply {
+        trigger_telegram_memory_tasks(orchestrator, &llm_service, &turn, &caption, turn.previous_memory_work, false).await;
         bot.send_message(chat_id, telegram_reply_text(&format_telegram_text(text), translation.as_deref())).await?;
         return Ok(());
     }
@@ -1071,86 +1102,9 @@ async fn handle_photo(
     }
 
     // 5. Persist
-    turn.save_reply(orchestrator, &canonical_response, translation.as_deref()).await?;
+    let memory_work = turn.save_reply(orchestrator, &canonical_response, translation.as_deref()).await?;
 
-    // Trigger periodic memory extraction (every 5 user messages)
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-    tracing::info!(
-        target: "telegram::memory",
-        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
-        msg_count, memory_msg_count, char_id
-    );
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        tracing::info!(
-            target: "telegram::memory",
-            "[Telegram/Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = turn.recent_committed_history(orchestrator, 10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.clone();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "telegram",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
+    trigger_telegram_memory_tasks(orchestrator, &llm_service, &turn, &caption, memory_work, false).await;
 
     // Sync to desktop
     let _ = app.emit(
@@ -1786,6 +1740,61 @@ mod tests {
         assert_ne!(second.target.conversation_id, first.target.conversation_id);
         assert_eq!(second.history.len(), 1);
     }
+    #[tokio::test]
+    async fn telegram_memory_cadence_follows_mixed_messages_and_new_sessions() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
+        let sessions = Sessions::default();
+        sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES ('memory-bot', 'Bot', '', '', 'test', 1, 1)")
+            .execute(&state.db).await.unwrap();
+        let mut extractions = 0;
+        let mut consolidations = 0;
+        for id in 1..=20 {
+            let fork = state.fork_with_isolated_history().await;
+            fork.apply_character_profile("memory-bot").await.unwrap();
+            let text = ["typed prompt", "photo caption", "voice transcript"][id as usize % 3];
+            let turn = begin_telegram_turn(&fork, "memory-bot", 10, id, text, false, &sessions)
+                .await
+                .unwrap();
+            let work = turn
+                .save_reply(&fork, "answer", None)
+                .await
+                .unwrap()
+                .unwrap();
+            extractions += usize::from(work.extract());
+            consolidations += usize::from(work.consolidate());
+            assert_eq!(work.count, id as u64);
+            assert!(!turn
+                .recent_committed_history(&fork, work, 10)
+                .await
+                .is_empty());
+        }
+        assert_eq!((extractions, consolidations), (4, 1));
+        start_new_telegram_session(&state, &sessions, "memory-bot", ChatId(10)).await;
+        let fork = state.fork_with_isolated_history().await;
+        let turn = begin_telegram_turn(&fork, "memory-bot", 10, 21, "new prompt", false, &sessions)
+            .await
+            .unwrap();
+        let work = turn
+            .save_reply(&fork, "new answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(work.count, 1);
+        let history = turn.recent_committed_history(&fork, work, 10).await;
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["new prompt", "new answer"]
+        );
+        assert_eq!(state.get_memory_trigger_count().await, 0);
+    }
+
     #[tokio::test]
     async fn telegram_initial_write_failure_propagates_before_text_or_photo_can_generate() {
         let sessions = Sessions::default();

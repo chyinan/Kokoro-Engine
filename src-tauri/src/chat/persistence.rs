@@ -1,3 +1,4 @@
+use super::external_memory::{MemoryTicket, MemoryWork};
 use crate::error::KokoroError;
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
@@ -400,6 +401,7 @@ struct PendingExternalReply {
     media: ExternalReplyMedia,
     expected_revision: i64,
     database_guard_generation: u64,
+    memory_ticket: Option<MemoryTicket>,
 }
 
 impl PendingExternalReply {
@@ -471,6 +473,9 @@ pub(crate) struct ExternalTurn {
     pub history: Vec<crate::ai::context::Message>,
     pub previous_reply: Option<(String, Option<String>)>,
     pub previous_reply_media: ExternalReplyMedia,
+    pub previous_memory_work: Option<MemoryWork>,
+    user_message_id: i64,
+    memory_ticket: Option<MemoryTicket>,
     request_id: String,
 }
 
@@ -527,7 +532,13 @@ impl ExternalTurn {
                 None,
             )
             .await?;
+        let memory_ticket = if saved[0].changed {
+            state.external_memory.admit(&target, saved[0].id, &state.memory_enabled_flag())
+        } else {
+            None
+        };
         let mut previous_reply_media = ExternalReplyMedia::default();
+        let mut previous_memory_work = None;
         let previous_reply = if saved[0].changed {
             None
         } else {
@@ -569,6 +580,8 @@ impl ExternalTurn {
                     &pending.text,
                     pending.translation.as_deref(),
                     &pending.media,
+                    saved[0].id,
+                    pending.memory_ticket.as_ref(),
                     Some(pending.expected_revision),
                 )
                 .await;
@@ -577,7 +590,7 @@ impl ExternalTurn {
                         .external_replies
                         .forget(&target.conversation_id, &request_id);
                 }
-                result?;
+                previous_memory_work = result?;
                 previous_reply_media = pending.media;
                 Some((pending.text, pending.translation))
             } else {
@@ -599,6 +612,9 @@ impl ExternalTurn {
             history,
             previous_reply,
             previous_reply_media,
+            previous_memory_work,
+            user_message_id: saved[0].id,
+            memory_ticket,
             request_id,
         })
     }
@@ -606,9 +622,16 @@ impl ExternalTurn {
     pub(crate) async fn recent_committed_history(
         &self,
         state: &crate::ai::context::AIOrchestrator,
+        work: MemoryWork,
         count: usize,
     ) -> Vec<crate::ai::context::Message> {
-        match state.saved_history_for(&self.target, None).await {
+        if !state.external_memory.is_current(work) {
+            return Vec::new();
+        }
+        match state
+            .saved_history_range(&self.target, work.first_message_id, work.through_message_id)
+            .await
+        {
             Ok(mut history) => {
                 history.retain(|message| {
                     matches!(message.role.as_str(), "user" | "assistant")
@@ -635,7 +658,7 @@ impl ExternalTurn {
         state: &crate::ai::context::AIOrchestrator,
         text: &str,
         translation: Option<&str>,
-    ) -> Result<(), KokoroError> {
+    ) -> Result<Option<MemoryWork>, KokoroError> {
         self.save_reply_with_media(state, text, translation, ExternalReplyMedia::default())
             .await
     }
@@ -646,7 +669,7 @@ impl ExternalTurn {
         text: &str,
         translation: Option<&str>,
         media: ExternalReplyMedia,
-    ) -> Result<(), KokoroError> {
+    ) -> Result<Option<MemoryWork>, KokoroError> {
         let _selection = state.conversation_switch_lock.lock().await;
         let revision = current_revision(&state.db, &self.target)
             .await
@@ -659,6 +682,8 @@ impl ExternalTurn {
             text,
             translation,
             &media,
+            self.user_message_id,
+            self.memory_ticket.as_ref(),
             None,
         )
         .await;
@@ -674,6 +699,7 @@ impl ExternalTurn {
                         expected_revision,
                         database_guard_generation:
                             crate::ai::context::database_operation_generation(),
+                        memory_ticket: self.memory_ticket.clone(),
                     },
                 );
             }
@@ -681,6 +707,7 @@ impl ExternalTurn {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_reply_locked(
         state: &crate::ai::context::AIOrchestrator,
         target: &ConversationTarget,
@@ -688,9 +715,12 @@ impl ExternalTurn {
         text: &str,
         translation: Option<&str>,
         media: &ExternalReplyMedia,
+        user_message_id: i64,
+        memory_ticket: Option<&MemoryTicket>,
         expected_revision: Option<i64>,
-    ) -> Result<(), KokoroError> {
+    ) -> Result<Option<MemoryWork>, KokoroError> {
         let mut metadata = serde_json::Map::new();
+        metadata.insert("external_user_message_id".into(), user_message_id.into());
         if let Some(translation) = translation {
             metadata.insert("translation".into(), serde_json::json!(translation));
         }
@@ -699,7 +729,7 @@ impl ExternalTurn {
         }
         let metadata =
             (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
-        state
+        let saved = state
             .save_messages_expected_locked(
                 target,
                 &[MessageWrite::new("assistant", text, metadata)
@@ -709,7 +739,11 @@ impl ExternalTurn {
                 expected_revision,
             )
             .await?;
-        Ok(())
+        Ok(if saved[0].changed {
+            state.external_memory.complete(target, memory_ticket, saved[0].id)
+        } else {
+            None
+        })
     }
 }
 
@@ -742,6 +776,231 @@ mod tests {
             conversation_id: conversation.into(),
             create,
         }
+    }
+
+    async fn external_turn(
+        state: &AIOrchestrator,
+        conversation: &str,
+        request: &str,
+    ) -> ExternalTurn {
+        ExternalTurn::begin(
+            state,
+            "default",
+            conversation.into(),
+            request.into(),
+            request,
+            false,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn external_memory_cadence_survives_twenty_fresh_forks_per_platform_and_chat() {
+        let state = state().await;
+        let mut extraction_counts = std::collections::HashMap::new();
+        let mut consolidation_counts = std::collections::HashMap::new();
+        for index in 1..=20 {
+            for conversation in [
+                "telegram-text-photo-voice",
+                "telegram-other-chat",
+                "line",
+                "discord",
+                "webhook",
+                "qq",
+            ] {
+                let fork = state.fork_with_isolated_history().await;
+                let request = format!("{conversation}-{index}");
+                let turn = external_turn(&fork, conversation, &request).await;
+                let work = turn
+                    .save_reply(&fork, &format!("answer-{request}"), None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(work.count, index);
+                // This is the former bug: every request-local counter is still 1.
+                assert_eq!(fork.get_memory_trigger_count().await, 1);
+                *extraction_counts.entry(conversation).or_insert(0) += usize::from(work.extract());
+                *consolidation_counts.entry(conversation).or_insert(0) +=
+                    usize::from(work.consolidate());
+                let history = turn.recent_committed_history(&fork, work, 10).await;
+                assert_eq!(history.len(), (index as usize * 2).min(10));
+                assert_eq!(history.last().unwrap().content, format!("answer-{request}"));
+                assert!(history
+                    .iter()
+                    .all(|message| message.content.contains(conversation)));
+                assert!(turn
+                    .save_reply(&fork, &format!("answer-{request}"), None)
+                    .await
+                    .unwrap()
+                    .is_none());
+                let replay_fork = state.fork_with_isolated_history().await;
+                let replay = external_turn(&replay_fork, conversation, &request).await;
+                assert!(replay.previous_reply.is_some());
+                assert!(replay.previous_memory_work.is_none());
+            }
+        }
+        assert!(extraction_counts.values().all(|count| *count == 4));
+        assert!(consolidation_counts.values().all(|count| *count == 1));
+        assert_eq!(state.get_memory_trigger_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn external_memory_counts_only_committed_replies_and_retries_the_fifth_once() {
+        let state = state().await;
+        for index in 1..=4 {
+            let fork = state.fork_with_isolated_history().await;
+            let turn = external_turn(&fork, "faults", &format!("request-{index}")).await;
+            assert_eq!(
+                turn.save_reply(&fork, "answer", None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .count,
+                index
+            );
+        }
+        sqlx::query("CREATE TRIGGER reject_memory_user BEFORE INSERT ON conversation_messages WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'user fault'); END")
+            .execute(&state.db).await.unwrap();
+        let fork = state.fork_with_isolated_history().await;
+        assert!(matches!(
+            ExternalTurn::begin(
+                &fork,
+                "default",
+                "faults".into(),
+                "fifth".into(),
+                "fifth",
+                false
+            )
+            .await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_memory_user")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let turn = external_turn(&fork, "faults", "fifth").await;
+        sqlx::query("CREATE TRIGGER reject_memory_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply fault'); END")
+            .execute(&state.db).await.unwrap();
+        assert!(matches!(
+            turn.save_reply(&fork, "fifth answer", None).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        assert!(matches!(
+            ExternalTurn::begin(
+                &fork,
+                "default",
+                "faults".into(),
+                "fifth".into(),
+                "fifth",
+                false
+            )
+            .await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_memory_reply")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let retry_fork = state.fork_with_isolated_history().await;
+        let replay = external_turn(&retry_fork, "faults", "fifth").await;
+        let work = replay.previous_memory_work.unwrap();
+        assert_eq!(work.count, 5);
+        assert!(work.extract());
+        assert_eq!(
+            replay
+                .recent_committed_history(&retry_fork, work, 10)
+                .await
+                .last()
+                .unwrap()
+                .content,
+            "fifth answer"
+        );
+        assert!(external_turn(&retry_fork, "faults", "fifth")
+            .await
+            .previous_memory_work
+            .is_none());
+        let sixth = external_turn(&retry_fork, "faults", "sixth").await;
+        assert_eq!(
+            sixth
+                .save_reply(&retry_fork, "answer", None)
+                .await
+                .unwrap()
+                .unwrap()
+                .count,
+            6
+        );
+    }
+
+    #[tokio::test]
+    async fn external_memory_switch_and_new_conversation_reset_counts_and_history_boundaries() {
+        let state = state().await;
+        let fork = state.fork_with_isolated_history().await;
+        let old = external_turn(&fork, "switch", "old").await;
+        let old_work = old
+            .save_reply(&fork, "old answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let in_flight = external_turn(&fork, "switch", "old in-flight").await;
+        state.set_memory_enabled(false).await;
+        assert!(!state.external_memory.is_current(old_work));
+        assert!(old
+            .recent_committed_history(&fork, old_work, 10)
+            .await
+            .is_empty());
+        let disabled = external_turn(&fork, "switch", "disabled").await;
+        assert!(disabled
+            .save_reply(&fork, "disabled answer", None)
+            .await
+            .unwrap()
+            .is_none());
+        state.set_memory_enabled(true).await;
+        let fresh = state.fork_with_isolated_history().await;
+        let current = external_turn(&fresh, "switch", "current").await;
+        // A pre-toggle generation can finish later but must not enter the new
+        // cadence or memory transcript, even though its assistant row is newer.
+        assert!(in_flight
+            .save_reply(&fork, "old in-flight answer", None)
+            .await
+            .unwrap()
+            .is_none());
+        let work = current
+            .save_reply(&fresh, "current answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(work.count, 1);
+        let history = current.recent_committed_history(&fresh, work, 10).await;
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["current", "current answer"]
+        );
+        let next = external_turn(&fresh, "new-session", "new-session").await;
+        let next_work = next
+            .save_reply(&fresh, "new answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_work.count, 1);
+        assert_eq!(
+            next.recent_committed_history(&fresh, next_work, 10)
+                .await
+                .len(),
+            2
+        );
+        assert_eq!(
+            current
+                .recent_committed_history(&fresh, work, 10)
+                .await
+                .len(),
+            2
+        );
+        let disabled_replay = external_turn(&fresh, "switch", "disabled").await;
+        assert!(disabled_replay.previous_memory_work.is_none());
     }
 
     #[tokio::test]
@@ -853,6 +1112,7 @@ mod tests {
             },
             expected_revision: 1,
             database_guard_generation: crate::ai::context::database_operation_generation(),
+            memory_ticket: None,
         };
         replies.remember("conversation", "first", pending.clone());
         replies.remember("conversation", "second", pending);

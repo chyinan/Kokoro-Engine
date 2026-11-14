@@ -6,6 +6,7 @@ use crate::ai::idle_behaviors::IdleBehaviorSystem;
 use crate::ai::initiative::InitiativeSystem;
 use crate::ai::memory::{MemoryManager, MemoryRetrievalMode, MemorySearchResult};
 use crate::ai::router::{ModelRouter, ModelType};
+use crate::chat::external_memory::ExternalMemory;
 use crate::chat::persistence::{self, ConversationTarget, ExternalReplies, MessageWrite, SavedMessage};
 use crate::error::KokoroError;
 use crate::llm::messages::user_text_message;
@@ -436,6 +437,7 @@ impl ActivationGate {
 pub struct AIOrchestrator {
     pub db: SqlitePool,
     pub(crate) external_replies: Arc<ExternalReplies>,
+    pub(crate) external_memory: Arc<ExternalMemory>,
     pub system_prompt: Arc<Mutex<String>>,
     pub history: Arc<Mutex<VecDeque<Message>>>,
     pub max_history_tokens: usize, // Soft limit for history
@@ -549,6 +551,7 @@ impl AIOrchestrator {
         Ok(Self {
             db: pool,
             external_replies: Arc::new(ExternalReplies::default()),
+            external_memory: Arc::new(ExternalMemory::default()),
             system_prompt: Arc::new(Mutex::new("You are a helpful assistant.".to_string())),
             history: Arc::new(Mutex::new(VecDeque::new())),
             max_history_tokens: 4000,
@@ -589,6 +592,7 @@ impl AIOrchestrator {
         Self {
             db: self.db.clone(),
             external_replies: self.external_replies.clone(),
+            external_memory: self.external_memory.clone(),
             system_prompt: Arc::new(Mutex::new(self.system_prompt.lock().await.clone())),
             history: Arc::new(Mutex::new(VecDeque::new())),
             max_history_tokens: self.max_history_tokens,
@@ -1006,17 +1010,30 @@ impl AIOrchestrator {
         target: &ConversationTarget,
         through_message_id: Option<i64>,
     ) -> Result<Vec<Message>, KokoroError> {
+        self.saved_history_range(target, 0, through_message_id.unwrap_or(i64::MAX))
+            .await
+    }
+
+    pub(crate) async fn saved_history_range(
+        &self,
+        target: &ConversationTarget,
+        first_message_id: i64,
+        through_message_id: i64,
+    ) -> Result<Vec<Message>, KokoroError> {
         let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT m.role, m.content, m.metadata FROM conversation_messages m
              JOIN conversations c ON c.id = m.conversation_id
              WHERE c.id = ? AND c.character_id = ?
-               AND m.id <= ?
+               AND m.id >= ? AND m.id <= ?
+               AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.external_user_message_id') END, m.id) >= ?
                AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.streaming_draft') END, 0) != 1
              ORDER BY m.id DESC LIMIT ?",
         )
         .bind(&target.conversation_id)
         .bind(&target.character_id)
-        .bind(through_message_id.unwrap_or(i64::MAX))
+        .bind(first_message_id)
+        .bind(through_message_id)
+        .bind(first_message_id)
         .bind(MAX_IN_MEMORY_HISTORY_MESSAGES as i64)
         .fetch_all(&self.db)
         .await
@@ -1278,7 +1295,7 @@ impl AIOrchestrator {
     }
 
     pub async fn set_memory_enabled(&self, enabled: bool) {
-        self.memory_enabled.store(enabled, Ordering::SeqCst);
+        self.external_memory.set_enabled(&self.memory_enabled, enabled);
         {
             let mut trigger_count = self.memory_trigger_count.lock().await;
             *trigger_count = 0;

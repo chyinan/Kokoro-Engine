@@ -8,6 +8,7 @@ use crate::ai::memory_event_ingress::{
     MemoryEventIngressOptions,
 };
 use crate::ai::memory_extractor;
+use crate::chat::external_memory::MemoryWork;
 use crate::chat::persistence::{
     self, ExternalReplyImage as BotReplyImage, ExternalReplyMedia, ExternalTurn,
 };
@@ -922,10 +923,12 @@ async fn generate_bot_reply(
     let request_id = request_id.map(|id| persistence::external_identity(platform, &[&conversation_key, id]))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let turn = ExternalTurn::begin(orchestrator, &char_id, conversation_id, request_id, &prompt_text, false).await?;
-    if let Some((reply, translation)) = turn.previous_reply {
+    if let Some((reply, translation)) = &turn.previous_reply {
+        trigger_bot_memory_tasks(platform, &prompt_text, &char_id, &turn,
+            orchestrator, &llm_service, turn.previous_memory_work).await;
         return Ok(BotReply {
-            reply: format_bot_text(&reply),
-            translation,
+            reply: format_bot_text(reply),
+            translation: translation.clone(),
             generated_image_count: turn.previous_reply_media.images.len(),
             images: turn.previous_reply_media.images,
             audio: None,
@@ -1136,7 +1139,7 @@ async fn generate_bot_reply(
         Some(compact_newlines(&all_translations.join(" ")))
     };
 
-    turn.save_reply_with_media(
+    let memory_work = turn.save_reply_with_media(
         orchestrator,
         &canonical_reply,
         translation.as_deref(),
@@ -1154,6 +1157,7 @@ async fn generate_bot_reply(
         &turn,
         orchestrator,
         &llm_service,
+        memory_work,
     )
     .await;
 
@@ -1210,9 +1214,13 @@ async fn trigger_bot_memory_tasks(
     turn: &ExternalTurn,
     orchestrator: &AIOrchestrator,
     llm_service: &LlmService,
+    memory_work: Option<MemoryWork>,
 ) {
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
+    let Some(work) = memory_work.filter(|work| orchestrator.external_memory.is_current(*work)) else {
+        return;
+    };
+    let msg_count = work.count;
+    let memory_msg_count = work.count;
     let upgrade_config =
         crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
     let ingress_options = MemoryEventIngressOptions {
@@ -1239,12 +1247,13 @@ async fn trigger_bot_memory_tasks(
                 .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
                 .await
             {
-                let history = turn.recent_committed_history(orchestrator, 10).await;
+                let history = turn.recent_committed_history(orchestrator, work, 10).await;
                 let memory_mgr = orchestrator.memory_manager.clone();
                 let provider_for_mem = llm_service.provider().await;
                 let char_id_for_mem = char_id.to_string();
                 let source = platform.to_string();
                 let memory_enabled = orchestrator.memory_enabled_flag();
+                let external_memory = orchestrator.external_memory.clone();
                 let observation_started_at = std::time::Instant::now();
                 let trigger = decision.trigger_label.to_string();
                 let extraction_options = memory_extractor::MemoryExtractionOptions {
@@ -1255,7 +1264,7 @@ async fn trigger_bot_memory_tasks(
                     target_language: Some(memory_target_language.clone()),
                 };
                 tauri::async_runtime::spawn(async move {
-                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) || !external_memory.is_current(work) {
                         return;
                     }
                     let _ = memory_mgr
@@ -1279,20 +1288,21 @@ async fn trigger_bot_memory_tasks(
         }
     }
 
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        let history = turn.recent_committed_history(orchestrator, 10).await;
+    if orchestrator.is_memory_enabled() && work.extract() {
+        let history = turn.recent_committed_history(orchestrator, work, 10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
         let provider_for_mem = llm_service.provider().await;
         let char_id_for_mem = char_id.to_string();
         let source = platform.to_string();
         let memory_enabled = orchestrator.memory_enabled_flag();
+        let external_memory = orchestrator.external_memory.clone();
         let observation_started_at = std::time::Instant::now();
         let extraction_options = memory_extractor::MemoryExtractionOptions {
             structured_memory_enabled: false,
             target_language: Some(memory_target_language.clone()),
         };
         tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) || !external_memory.is_current(work) {
                 return;
             }
             let _ = memory_mgr
@@ -1314,16 +1324,17 @@ async fn trigger_bot_memory_tasks(
         });
     }
 
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
+    if orchestrator.is_memory_enabled() && work.consolidate() {
         let memory_mgr = orchestrator.memory_manager.clone();
         let char_id_for_consolidation = char_id.to_string();
         let provider_for_consolidation = llm_service.provider().await;
         let memory_enabled = orchestrator.memory_enabled_flag();
+        let external_memory = orchestrator.external_memory.clone();
         let observation_started_at = std::time::Instant::now();
         let source = platform.to_string();
         let target_language_for_consolidation = memory_target_language.clone();
         tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) || !external_memory.is_current(work) {
                 return;
             }
             let _ = memory_mgr
