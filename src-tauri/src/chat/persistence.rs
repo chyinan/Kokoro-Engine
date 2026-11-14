@@ -472,6 +472,7 @@ pub(crate) struct ExternalTurn {
     pub target: ConversationTarget,
     pub history: Vec<crate::ai::context::Message>,
     pub previous_reply: Option<(String, Option<String>)>,
+    pub previous_reply_newly_committed: bool,
     pub previous_reply_media: ExternalReplyMedia,
     pub previous_memory_work: Option<MemoryWork>,
     user_message_id: i64,
@@ -539,6 +540,7 @@ impl ExternalTurn {
         };
         let mut previous_reply_media = ExternalReplyMedia::default();
         let mut previous_memory_work = None;
+        let mut previous_reply_newly_committed = false;
         let previous_reply = if saved[0].changed {
             None
         } else {
@@ -591,6 +593,7 @@ impl ExternalTurn {
                         .forget(&target.conversation_id, &request_id);
                 }
                 previous_memory_work = result?;
+                previous_reply_newly_committed = true;
                 previous_reply_media = pending.media;
                 Some((pending.text, pending.translation))
             } else {
@@ -611,12 +614,17 @@ impl ExternalTurn {
             },
             history,
             previous_reply,
+            previous_reply_newly_committed,
             previous_reply_media,
             previous_memory_work,
             user_message_id: saved[0].id,
             memory_ticket,
             request_id,
         })
+    }
+
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
     }
 
     pub(crate) async fn recent_committed_history(
