@@ -2569,6 +2569,14 @@ impl MemoryManager {
             let metadata_json = metadata_raw
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            if metadata_json
+                .as_ref()
+                .and_then(|metadata| metadata.get("streaming_draft"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                continue;
+            }
             let technical_type = metadata_json
                 .as_ref()
                 .and_then(|meta| meta.get("type"))
@@ -5063,6 +5071,27 @@ mod tests {
         assert_eq!(task.end_message_id, last_visible);
         assert!(task.transcript.contains("message-7"));
         assert!(!task.transcript.contains("foreign diagnostic"));
+    }
+
+    #[tokio::test]
+    async fn unfinished_drafts_do_not_enter_summary_transcripts() {
+        let pool = setup_test_pool().await;
+        let manager = MemoryManager::new(pool.clone());
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('draft-summary', 'character-a', 'summary', '1', '1')")
+            .execute(&pool).await.unwrap();
+        for index in 0..8 {
+            sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('draft-summary', 'user', ?, '1')")
+                .bind(format!("message-{index}")).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('draft-summary', 'assistant', 'uncommitted reply', '{\"streaming_draft\":true}', '1')")
+            .execute(&pool).await.unwrap();
+        let task = manager
+            .get_conversation_summary_task("draft-summary", "character-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(task.transcript.contains("message-7"));
+        assert!(!task.transcript.contains("uncommitted reply"));
     }
 
     #[tokio::test]

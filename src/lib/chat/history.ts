@@ -12,6 +12,7 @@ export interface ChatHistoryMessage {
     source?: string;
     turnId?: string;
     failureScope?: ChatFailureScope;
+    unfinished?: boolean;
 }
 
 function getStringMetadataValue(meta: Record<string, unknown> | null, key: string): string | undefined {
@@ -152,6 +153,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 text,
                 translation,
                 turnId,
+                ...(meta?.streaming_draft === true ? { unfinished: true } : {}),
                 tools: pendingTools && pendingTools.length > 0 ? pendingTools : undefined,
             });
 

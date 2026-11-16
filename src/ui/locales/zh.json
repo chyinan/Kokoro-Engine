@@ -1137,6 +1137,9 @@
     },
     "chat": {
         "speech_failed": "未能朗读这条回复：{{error}}",
+        "persistence_failed": "未能将本轮对话保存到数据库。",
+        "reply_unfinished": "未完成的回复",
+        "retry_save": "重试保存",
         "status": {
             "streaming": "生成中",
             "chat": "对话"

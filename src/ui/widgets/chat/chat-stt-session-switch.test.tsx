@@ -153,7 +153,7 @@ describe("ChatPanel draft preservation", () => {
         await loadImageDraft();
         chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: A chat turn is already in progress" });
         await send();
-        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: draftText.trim(), images: [draftImage] }));
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: draftText, images: [draftImage] }));
         expect(container.querySelector("textarea")?.value).toBe(draftText);
         expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
         expect(loadSavedCharacterDraft("draft-character")).toBe(draftText);
@@ -174,7 +174,7 @@ describe("ChatPanel draft preservation", () => {
         await send();
 
         expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
-            message: draftText.trim(), images: undefined, camera_frame: undefined,
+            message: draftText, images: undefined, camera_frame: undefined,
         }));
     });
     it("clears a submitted draft at persistence, before the generation finishes", async () => {

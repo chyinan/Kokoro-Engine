@@ -314,6 +314,10 @@ export async function streamChat(request: ChatRequest): Promise<StreamChatRespon
     return invoke<StreamChatResponse>("stream_chat", { request });
 }
 
+export function retryChatPersistence(clientRequestId: string): Promise<StreamChatResponse> {
+    return invoke("retry_chat_persistence", { clientRequestId });
+}
+
 export interface ChatTurnSnapshot {
     revision: number;
     completion_revision?: number;
@@ -333,6 +337,9 @@ export interface ChatTurnSnapshot {
     translation: string | null;
     tools: ChatTurnToolEvent[];
     error: string | null;
+    error_code?: string;
+    persistence_retryable?: boolean;
+    user_save_failed?: boolean;
     preparation_timed_out?: boolean;
     speech_error?: string;
 }

@@ -5,7 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// 统一的 Kokoro 错误类型，支持结构化序列化
-#[derive(Debug, Error, Serialize, Deserialize, Clone)]
+#[derive(Debug, Error, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "code", content = "message")]
 pub enum KokoroError {
     #[error("配置错误: {0}")]
@@ -43,6 +43,9 @@ pub enum KokoroError {
 
     #[error("聊天错误: {0}")]
     Chat(String),
+
+    #[error("聊天保存失败: {0}")]
+    ChatPersistence(String),
 
     #[error("校验错误: {0}")]
     Validation(String),
@@ -159,6 +162,7 @@ impl From<KokoroError> for FailureEvent {
             KokoroError::Unauthorized(_) => ("UNAUTHORIZED", false),
             KokoroError::Internal(_) => ("INTERNAL_ERROR", false),
             KokoroError::Chat(_) => ("CHAT_ERROR", true),
+            KokoroError::ChatPersistence(_) => ("CHAT_PERSISTENCE_ERROR", false),
             KokoroError::Validation(_) => ("VALIDATION_ERROR", false),
         };
 
@@ -174,6 +178,13 @@ impl From<KokoroError> for FailureEvent {
 }
 
 impl KokoroError {
+    pub(crate) const CHAT_PERSISTENCE_CODE: &'static str = "CHAT_PERSISTENCE_ERROR";
+
+    pub(crate) fn chat_persistence(error: impl std::fmt::Display) -> Self {
+        tracing::error!(target: "chat::persistence", "chat database write failed: {error}");
+        Self::ChatPersistence("Could not save chat messages to the database.".into())
+    }
+
     pub fn into_failure_event(
         self,
         stage: impl Into<String>,

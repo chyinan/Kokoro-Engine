@@ -101,6 +101,7 @@ pub fn run() {
             commands::database::init_db,
             commands::database::test_vector_store,
             commands::chat::stream_chat,
+            commands::chat::retry_chat_persistence,
             commands::chat::get_chat_runtime_snapshot,
             commands::chat::get_chat_view,
             commands::chat::recover_chat_draft_submission,
@@ -702,6 +703,7 @@ pub fn run() {
                                         | crate::error::KokoroError::Unauthorized(message)
                                         | crate::error::KokoroError::Internal(message)
                                         | crate::error::KokoroError::Chat(message)
+                                        | crate::error::KokoroError::ChatPersistence(message)
                                         | crate::error::KokoroError::Validation(message) => message.clone(),
                                     };
                                     if mgr.finish_connection_error(&cfg.name, generation, display_error.clone()) {

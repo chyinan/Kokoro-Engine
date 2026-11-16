@@ -30,6 +30,10 @@ pub(crate) fn find_safe_emit_boundary(text: &str) -> usize {
 
 /// Strip any `<tool_result>...</tool_result>` blocks or stray tags that the LLM may echo back.
 pub(crate) fn strip_leaked_tags(text: &str) -> String {
+    strip_markdown_emphasis_markers(strip_leaked_tool_results(text).trim())
+}
+
+pub(crate) fn strip_leaked_tool_results(text: &str) -> String {
     let mut result = text.to_string();
     // Remove <tool_result>...</tool_result> blocks (greedy within single block)
     while let Some(start) = result.find("<tool_result>") {
@@ -49,7 +53,7 @@ pub(crate) fn strip_leaked_tags(text: &str) -> String {
             result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
         }
     }
-    strip_markdown_emphasis_markers(result.trim())
+    result
 }
 
 /// Remove paired Markdown emphasis delimiters from text rendered as plain text.

@@ -7,6 +7,7 @@ const listeners = new Set<() => void>();
 const announcedFailures = new Set<string>();
 export const chatViewFixture = {
   getSnapshot: () => snapshot,
+  refresh: async () => snapshot,
   claimFailureAnnouncement: (id: string) => {
     if (announcedFailures.has(id)) return false;
     announcedFailures.add(id);
@@ -17,5 +18,6 @@ export const chatViewFixture = {
   send: vi.fn<(request: ChatRequest) => Promise<StreamChatResponse>>(async () => ({ conversation_id: "conv-1", status: "completed", text: "reply" })),
   cancel: vi.fn(async () => {}), selectConversation: vi.fn(async () => {}),
   clear: vi.fn(async () => {}), edit: vi.fn(async () => {}), continueFrom: vi.fn(async () => {}),
-  reset: () => { snapshot = initial(); announcedFailures.clear(); for (const fn of [chatViewFixture.send, chatViewFixture.cancel, chatViewFixture.selectConversation, chatViewFixture.clear, chatViewFixture.edit, chatViewFixture.continueFrom]) fn.mockClear(); },
+  retryPersistence: vi.fn(async (_id: string) => {}),
+  reset: () => { snapshot = initial(); announcedFailures.clear(); for (const fn of [chatViewFixture.send, chatViewFixture.cancel, chatViewFixture.selectConversation, chatViewFixture.clear, chatViewFixture.edit, chatViewFixture.continueFrom, chatViewFixture.retryPersistence]) fn.mockClear(); },
 };

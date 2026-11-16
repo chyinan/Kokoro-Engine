@@ -26,7 +26,7 @@ describe("pet chat display adapter", () => {
  afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); });
  it("submits directly without ChatPanel or an acceptance handshake", async () => {
   await act(async () => state.sendMessage("  hello  "));
-  expect(chat.send).toHaveBeenCalledWith({ message: "hello", client_request_id: expect.stringMatching(/^pet_/), character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1 });
+  expect(chat.send).toHaveBeenCalledWith({ message: "  hello  ", client_request_id: expect.stringMatching(/^pet_/), character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1 });
   expect(invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
  });
  it("coalesces duplicate clicks while the same user intent is in flight", async () => {

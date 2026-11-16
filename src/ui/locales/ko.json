@@ -1128,6 +1128,9 @@
     },
     "chat": {
         "speech_failed": "이 답변을 읽어 주지 못했습니다: {{error}}",
+        "persistence_failed": "채팅을 데이터베이스에 저장하지 못했습니다.",
+        "reply_unfinished": "미완료 답변",
+        "retry_save": "저장 다시 시도",
         "status": {
             "streaming": "생성 중",
             "chat": "채팅"

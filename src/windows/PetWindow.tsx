@@ -528,11 +528,10 @@ export default function PetWindow() {
     // exitDragMode removed — now handled inline in long press handler
 
     const handleSendChat = useCallback(async () => {
-        const text = chatInput.trim();
-        if (!text) return;
+        if (!chatInput.trim()) return;
         setChatInput("");
         setChatInputVisible(false);
-        await sendMessage(text);
+        await sendMessage(chatInput);
     }, [chatInput, sendMessage]);
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

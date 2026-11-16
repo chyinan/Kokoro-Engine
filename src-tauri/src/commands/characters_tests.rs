@@ -1671,7 +1671,7 @@ async fn test_active_stream_chat_turn_completes_when_activation_starts_concurren
             "User message during active turn".into(),
             "char-1",
         )
-        .await;
+        .await.unwrap();
 
     // 3. Concurrently, activation for char-2 begins in background
     let token2 = coordinator
@@ -1722,7 +1722,7 @@ async fn test_active_stream_chat_turn_completes_when_activation_starts_concurren
             "Assistant reply completing the turn".into(),
             "char-1",
         )
-        .await;
+        .await.unwrap();
     drop(chat_turn_guard);
 
     // 6. Activation completes
@@ -1877,7 +1877,7 @@ async fn test_non_webhook_bot_turn_during_activation_is_blocked_at_entry_without
     let guard = bot_turn_retry.unwrap();
     orchestrator
         .add_message("user".into(), "Hello to char 2".into(), "char-2")
-        .await;
+        .await.unwrap();
     let (messages, _) = orchestrator
         .compose_prompt_with_guard("Hello to char 2", false, None, false, "char-2", &guard)
         .await
@@ -2114,7 +2114,7 @@ async fn test_cancellation_after_apply_blocks_chat_until_recovered_consistently(
     // Add a message to char-1
     orchestrator
         .add_message("user".into(), "Hello to char 1".into(), "char-1")
-        .await;
+        .await.unwrap();
 
     // Prepare activation for char-2
     let token2 = coordinator
