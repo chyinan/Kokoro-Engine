@@ -15,8 +15,9 @@ pub struct TelegramConfig {
     /// Or read token from this environment variable.
     #[serde(default)]
     pub bot_token_env: Option<String>,
-    /// Chat ID whitelist — only these chats can interact with the bot.
-    /// Empty list = reject all.
+    /// Exact Telegram chat IDs, including the sign for groups, not sender IDs.
+    /// A listed group authorizes the chat as a whole, not individual members.
+    /// Empty or missing list = reject all; no value acts as a wildcard.
     #[serde(default)]
     pub allowed_chat_ids: Vec<i64>,
     /// Whether to also send a voice message alongside text replies (requires TTS).

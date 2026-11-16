@@ -502,7 +502,7 @@ function StringListEditor({
     const addValue = () => {
         const trimmed = input.trim();
         if (!trimmed) return;
-        if (numeric && !/^-?\d+$/.test(trimmed)) return;
+        if (numeric && (!/^-?\d+$/.test(trimmed) || !Number.isSafeInteger(Number(trimmed)))) return;
         if (values.includes(trimmed)) return;
         onChange([...values, trimmed]);
         setInput("");

@@ -1750,6 +1750,7 @@ export interface TelegramConfig {
     enabled: boolean;
     bot_token?: string;
     bot_token_env?: string;
+    /** Exact chat IDs (signed for groups), not sender IDs. Empty denies all. */
     allowed_chat_ids: number[];
     send_voice_reply: boolean;
     character_id?: string;
