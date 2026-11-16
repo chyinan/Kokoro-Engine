@@ -837,6 +837,7 @@ struct BotRequestBinding {
     character_id: String,
     conversation_id: String,
     request_id: String,
+    previous_request_ids: Vec<String>,
     _guard: crate::ai::context::ChatTurnGuard,
 }
 
@@ -865,15 +866,34 @@ impl BotRequestBinding {
         let key = conversation_key
             .filter(|key| !key.trim().is_empty())
             .unwrap_or(platform);
+        let previous_request_ids = request_id
+            .map(|id| {
+                vec![persistence::legacy_external_identity(
+                    platform,
+                    conversation_key.unwrap_or(platform),
+                    id,
+                )]
+            })
+            .unwrap_or_default();
+        let request_id = request_id
+            .map(|id| persistence::external_identity(platform, &[key, id]))
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        persistence::validate_external_request_owner(
+            &state.db,
+            &character_id,
+            platform,
+            &request_id,
+            &previous_request_ids,
+        )
+        .await?;
         Ok(Self {
             conversation_id: if platform == "webhook" {
                 webhook_conversation_id(&character_id, Some(key))
             } else {
                 persistence::external_identity(platform, &[&character_id, key])
             },
-            request_id: request_id
-                .map(|id| persistence::external_identity(platform, &[key, id]))
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            request_id,
+            previous_request_ids,
             character_id,
             _guard: guard,
         })
@@ -979,6 +999,7 @@ async fn submit_bound_bot_reply(
             character_id: Some(binding.character_id.clone()),
             conversation_id: Some(binding.conversation_id.clone()),
             client_request_id: Some(binding.request_id.clone()),
+            previous_request_ids: binding.previous_request_ids.clone(),
             external_input_text: input_text.map(str::to_owned),
             images: Some(input.images),
             audio: input.audio,
@@ -2631,8 +2652,11 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(matches!(
+            BotRequestBinding::new(&state, "webhook", Some("other"), Some("chat"), Some("message")).await,
+            Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:")
+        ));
         for (character, chat, request) in [
-            ("other", "chat", "message"),
             ("default", "other", "message"),
             ("default", "chat", "other"),
         ] {
@@ -2651,6 +2675,17 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(input.text, "new input");
+        }
+        sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES (?,'user','legacy transcript',?,'now')")
+            .bind(&binding.conversation_id)
+            .bind(serde_json::json!({"source":"webhook","client_request_id":persistence::legacy_external_identity("webhook", "chat", "legacy")}).to_string())
+            .execute(&state.db).await.unwrap();
+        // Binding precedes the download/transcription callback for every adapter.
+        for character in ["default", "other"] {
+            assert!(matches!(
+                BotRequestBinding::new(&state, "webhook", Some(character), Some("chat"), Some("legacy")).await,
+                Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:")
+            ));
         }
         sqlx::query("DROP TABLE conversation_messages")
             .execute(&state.db)

@@ -6,6 +6,47 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 /// preparation. The per-message context budget is applied separately.
 pub(crate) const MAX_USER_INPUT_BYTES: usize = 256 * 1024;
 
+/// Original PR2 transport identity, before main's length-prefixed identity was
+/// adopted. Only trusted adapters can derive this alias from a platform message.
+pub(crate) fn legacy_external_identity(platform: &str, peer: &str, message: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{platform}-{:x}",
+        Sha256::digest(serde_json::to_vec(&(peer, message)).expect("serializable identity"))
+    )
+}
+
+/// An accepted platform request cannot be executed again under another owner,
+/// including after a restart or a change to the adapter's configured character.
+/// Old PR2 rows lack the save identity required for safe recovery: fail closed.
+pub(crate) async fn validate_external_request_owner(
+    db: &SqlitePool,
+    character: &str,
+    source: &str,
+    request: &str,
+    previous_ids: &[String],
+) -> Result<(), KokoroError> {
+    let expected_save_id = format!("{request}:user");
+    for id in std::iter::once(request).chain(previous_ids.iter().map(String::as_str)) {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT c.character_id, CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END
+             FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
+             WHERE m.role='user' AND CASE WHEN json_valid(m.metadata) THEN
+               json_extract(m.metadata,'$.chat_save_id')=? OR
+               (json_extract(m.metadata,'$.source')=? AND json_extract(m.metadata,'$.client_request_id')=?) END",
+        ).bind(format!("{id}:user")).bind(source).bind(id).fetch_all(db).await.map_err(KokoroError::chat_persistence)?;
+        for (owner, save_id) in rows {
+            if owner != character {
+                return Err(KokoroError::Chat("chat_request_conflict: request identity was already accepted by another character".into()));
+            }
+            if save_id.as_deref() != Some(expected_save_id.as_str()) {
+                return Err(KokoroError::Chat("chat_request_conflict: this legacy request was already accepted and cannot be safely replayed".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_user_input(text: &str) -> Result<(), KokoroError> {
     if text.len() > MAX_USER_INPUT_BYTES {
         return Err(KokoroError::Validation(format!(

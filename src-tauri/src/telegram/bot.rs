@@ -477,6 +477,14 @@ fn telegram_request_id(chat_id: i64, message_id: i32) -> String {
     persistence::external_identity("telegram", &[&chat_id.to_string(), &message_id.to_string()])
 }
 
+fn telegram_previous_request_ids(chat_id: i64, message_id: i32) -> Vec<String> {
+    vec![persistence::legacy_external_identity(
+        "telegram",
+        &chat_id.to_string(),
+        &message_id.to_string(),
+    )]
+}
+
 struct TelegramPreparedInput {
     text: String,
     image: Option<String>,
@@ -496,6 +504,14 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<Option<TelegramPreparedInput>, TelegramDeliveryError>>,
 {
+    persistence::validate_external_request_owner(
+        &orchestrator.db,
+        character_id,
+        "telegram",
+        &telegram_request_id(chat_id, message_id),
+        &telegram_previous_request_ids(chat_id, message_id),
+    )
+    .await?;
     if let Some((_, text)) = ExternalTurn::saved_user_message(
         orchestrator,
         character_id,
@@ -654,11 +670,8 @@ async fn submit_message_input(
             character_id: Some(character_id.to_owned()),
             conversation_id: Some(conversation_id),
             // Telegram message identifiers are unique within each chat.
-            client_request_id: Some(channel_id(
-                "telegram",
-                &chat_id.0.to_string(),
-                &message_id.to_string(),
-            )),
+            client_request_id: Some(telegram_request_id(chat_id.0, message_id)),
+            previous_request_ids: telegram_previous_request_ids(chat_id.0, message_id),
             images: Some(images),
             external_input_text,
             ..Default::default()
@@ -1199,7 +1212,7 @@ mod tests {
             .execute(&state.db).await.unwrap();
         for (character, chat, message, transcript) in [
             ("default", 10, 1, "original"),
-            ("other", 10, 1, "other character"),
+            ("other", 10, 3, "other character"),
             ("default", 11, 1, "other chat"),
             ("default", 10, 2, "other message"),
         ] {
@@ -1232,6 +1245,35 @@ mod tests {
             .unwrap()
             .unwrap();
             assert_eq!(replay.text, transcript);
+        }
+        let conflict = prepare_telegram_media_input(&state, "other", 10, 1, || async {
+            panic!("a request owned by another character must not trigger media work")
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            matches!(conflict.downcast_ref::<KokoroError>(), Some(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+        );
+        let conversation: String =
+            sqlx::query_scalar("SELECT id FROM conversations WHERE character_id='default' LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES (?,'user','legacy transcript',?,'now')")
+            .bind(conversation)
+            .bind(serde_json::json!({"source":"telegram","client_request_id":persistence::legacy_external_identity("telegram", "10", "4")}).to_string())
+            .execute(&state.db).await.unwrap();
+        for character in ["default", "other"] {
+            let conflict = prepare_telegram_media_input(&state, character, 10, 4, || async {
+                panic!("legacy accepted input must not trigger media work")
+            })
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                matches!(conflict.downcast_ref::<KokoroError>(), Some(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+            );
         }
         // Read errors cannot be misinterpreted as a fresh request and trigger STT.
         state.db.close().await;

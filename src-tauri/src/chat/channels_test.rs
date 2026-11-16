@@ -169,6 +169,7 @@ impl LlmProvider for ControlledProvider {
             "[after-tool-stream-failure]",
             "[after-tool-final-save]",
             "[native-tool-only]",
+            "[formatted-replay]",
         ]
         .iter()
         .any(|label| last_user.contains(label));
@@ -192,6 +193,10 @@ impl LlmProvider for ControlledProvider {
                 }))
             } else if last_user.contains("[after-tool-stream-failure]") {
                 Err("fixture post-tool stream failed".into())
+            } else if last_user.contains("[formatted-replay]") {
+                Ok(LlmStreamEvent::Text(
+                    "**Review formatted answer**\n\n*Second paragraph*".into(),
+                ))
             } else {
                 Ok(LlmStreamEvent::Text("fixture final response".into()))
             };
@@ -288,6 +293,8 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     handle.manage(Arc::new(RwLock::new(registry)));
     handle.manage(Arc::new(RwLock::new(ToolSettings::default())));
     handle.manage(LlmService::for_test(provider.clone()));
+
+    verify_persisted_external_contracts(&handle, &provider, &tool_executions).await;
 
     let state = handle.state::<AIOrchestrator>();
     let desktop = |id: &'static str, text: &'static str, images: Option<Vec<String>>| {
@@ -759,6 +766,343 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     verify_external_tool_only_replies(&handle, &provider, &tool_executions).await;
     verify_audio_admission(&handle, &provider).await;
     verify_hidden_turn_scope(&handle, &tool_executions).await;
+}
+
+/// Exercise persisted identity and memory metadata through the real production
+/// handlers. Only the terminal journal is reset; SQLite remains authoritative.
+async fn verify_persisted_external_contracts(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+    tools: &AtomicUsize,
+) {
+    use crate::chat::persistence::{ConversationTarget, MessageWrite};
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    let mut defects = Vec::new();
+    for character in ["test-character", "other-character"] {
+        sqlx::query("INSERT INTO characters (id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,?, '', '', 'test',1,1)")
+            .bind(character).bind(character).execute(&state.db).await.unwrap();
+    }
+    let body = json!({"request_id":"format-committed","conversation_id":"review-contract","text":"[formatted-replay]"});
+    let first = webhook_body(app, body.clone()).await;
+    assert_eq!(first.0, 200, "{first:?}");
+    assert_eq!(
+        first.1["reply"],
+        "Review formatted answer\n\nSecond paragraph"
+    );
+    let canonical: String = sqlx::query_scalar(
+        "SELECT content FROM conversation_messages WHERE role='assistant' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        canonical,
+        "**Review formatted answer**\n\n*Second paragraph*"
+    );
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    runtime.forget_completed_for_restart_test();
+    let replay = webhook_body(app, body.clone()).await;
+    if replay != first {
+        defects.push(format!(
+            "P3 persisted replay differs: {replay:?} versus {first:?}"
+        ));
+    }
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed)
+        ),
+        before
+    );
+
+    sqlx::query("CREATE TRIGGER reject_contract_reply BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' AND json_extract(NEW.metadata,'$.type') IS NULL BEGIN SELECT RAISE(ABORT,'contract save failure'); END").execute(&state.db).await.unwrap();
+    let mut pending = body.clone();
+    pending["request_id"] = "format-pending".into();
+    assert_eq!(
+        webhook_body(app, pending.clone()).await.1["code"],
+        KokoroError::CHAT_PERSISTENCE_CODE
+    );
+    sqlx::query("DROP TRIGGER reject_contract_reply")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    let recovered = webhook_body(app, pending).await;
+    if recovered != first {
+        defects.push(format!(
+            "P3 save recovery differs: {recovered:?} versus {first:?}"
+        ));
+    }
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed)
+        ),
+        before
+    );
+
+    runtime.forget_completed_for_restart_test();
+    state.set_character_id("other-character".into()).await;
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    let foreign = webhook_body(app, body).await;
+    if foreign.0 != 409
+        || (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed),
+        ) != before
+    {
+        defects.push(format!(
+            "P1 cross-character persisted request executed: {foreign:?}"
+        ));
+    }
+    // Original PR2 uses SHA256(JSON(owner,id)), whereas main uses length prefixes.
+    for (id, character) in [
+        ("legacy-owned", "test-character"),
+        ("legacy-foreign", "other-character"),
+    ] {
+        use sha2::{Digest, Sha256};
+        let legacy = format!(
+            "webhook-{:x}",
+            Sha256::digest(serde_json::to_vec(&("private:unknown:review-contract", id)).unwrap())
+        );
+        sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES ('desktop','user','old accepted input',?,'now')")
+            .bind(json!({"source":"webhook","client_request_id":legacy}).to_string()).execute(&state.db).await.unwrap();
+        state.set_character_id(character.into()).await;
+        runtime.forget_completed_for_restart_test();
+        let before = (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed),
+        );
+        let reply = webhook_body(app, json!({"request_id":id,"conversation_id":"review-contract","text":"old accepted input"})).await;
+        if reply.0 != 409
+            || (
+                provider.prompts.lock().unwrap().len(),
+                tools.load(Ordering::Relaxed),
+            ) != before
+        {
+            defects.push(format!("P1 legacy request {id} executed: {reply:?}"));
+        }
+    }
+
+    state.set_character_id("test-character".into()).await;
+    state.set_memory_enabled(true).await;
+    crate::commands::chat::stream_chat(
+        app.clone(),
+        ChatRequest {
+            message: "[origin-desktop]".into(),
+            character_id: Some("test-character".into()),
+            conversation_id: Some("desktop".into()),
+            client_request_id: Some("origin-desktop".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let continued = SessionMode::Desktop {
+        character_id: "test-character".into(),
+        conversation_id: "desktop".into(),
+    };
+    submit_message(
+        app,
+        ChatId(777),
+        1,
+        "[origin-shared-external]",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    // Telegram goes directly through shared admission (without BotRequestBinding).
+    runtime.forget_completed_for_restart_test();
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    let rejected = submit_message(
+        app,
+        ChatId(777),
+        1,
+        "[origin-shared-external]",
+        vec![],
+        &SessionMode::Private,
+        "other-character",
+    )
+    .await;
+    assert!(
+        matches!(rejected, Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+    );
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed)
+        ),
+        before
+    );
+    for (id, character) in [(98, "test-character"), (99, "other-character")] {
+        use sha2::{Digest, Sha256};
+        let legacy = format!(
+            "telegram-{:x}",
+            Sha256::digest(serde_json::to_vec(&("777", id.to_string())).unwrap())
+        );
+        sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES ('desktop','user','old Telegram input',?,'now')")
+            .bind(json!({"source":"telegram","client_request_id":legacy}).to_string()).execute(&state.db).await.unwrap();
+        runtime.forget_completed_for_restart_test();
+        let rejected = submit_message(
+            app,
+            ChatId(777),
+            id,
+            "old Telegram input",
+            vec![],
+            &SessionMode::Private,
+            character,
+        )
+        .await;
+        assert!(
+            matches!(rejected, Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+        );
+        assert_eq!(
+            (
+                provider.prompts.lock().unwrap().len(),
+                tools.load(Ordering::Relaxed)
+            ),
+            before
+        );
+    }
+    let target = ConversationTarget {
+        character_id: "test-character".into(),
+        conversation_id: "desktop".into(),
+        create: false,
+    };
+    // Existing main metadata and original PR2 source metadata remain readable.
+    for (role, content, metadata) in [
+        (
+            "user",
+            "old-main-external",
+            json!({"chat_save_id":"old-main:user"}),
+        ),
+        (
+            "user",
+            "old-desktop",
+            json!({"chat_save_id":"old-desktop:user","client_request_id":"old-desktop"}),
+        ),
+        (
+            "user",
+            "old-pr2-external",
+            json!({"source":"telegram","client_request_id":"old-pr2"}),
+        ),
+        (
+            "assistant",
+            "old-pr2-assistant",
+            json!({"source":"telegram"}),
+        ),
+    ] {
+        let message = MessageWrite::new(role, content, Some(metadata.to_string()));
+        crate::chat::persistence::save(&state.db, &target, &[message])
+            .await
+            .unwrap();
+        state
+            .push_history_message(crate::ai::context::Message {
+                role: role.into(),
+                content: content.into(),
+                metadata: Some(metadata),
+            })
+            .await;
+    }
+    let external = state
+        .saved_external_memory_history(&target, 0, i64::MAX)
+        .await
+        .unwrap();
+    for (role, text) in [
+        ("user", "[origin-shared-external]"),
+        ("user", "old-main-external"),
+        ("user", "old-pr2-external"),
+        ("assistant", "old-pr2-assistant"),
+    ] {
+        if !external
+            .iter()
+            .any(|row| row.role == role && row.content == text)
+        {
+            defects.push(format!("P2 external SQL lost {text}"));
+        }
+    }
+    assert!(!external
+        .iter()
+        .any(|row| row.content == "[origin-desktop]" || row.content == "old-desktop"));
+    let desktop = state.get_recent_memory_history(100).await;
+    for text in [
+        "[origin-shared-external]",
+        "old-main-external",
+        "old-pr2-external",
+        "old-pr2-assistant",
+    ] {
+        if desktop.iter().any(|row| row.content == text) {
+            defects.push(format!("P2 desktop SQL admitted {text}"));
+        }
+    }
+    assert!(desktop.iter().any(|row| row.content == "[origin-desktop]"));
+    assert!(desktop.iter().any(|row| row.content == "old-desktop"));
+    state.set_memory_history_boundary(0).await; // exercise the in-memory fallback too
+    let fallback = state.get_recent_memory_history(100).await;
+    for text in [
+        "[origin-shared-external]",
+        "old-main-external",
+        "old-pr2-external",
+        "old-pr2-assistant",
+    ] {
+        if fallback.iter().any(|row| row.content == text) {
+            defects.push(format!("P2 desktop memory admitted {text}"));
+        }
+    }
+    let webhook_conversation: String = sqlx::query_scalar("SELECT conversation_id FROM conversation_messages WHERE role='user' AND content='[formatted-replay]' ORDER BY id LIMIT 1").fetch_one(&state.db).await.unwrap();
+    let webhook_target = ConversationTarget {
+        conversation_id: webhook_conversation,
+        ..target
+    };
+    let history = state
+        .saved_external_memory_history(&webhook_target, 0, i64::MAX)
+        .await
+        .unwrap();
+    if !history
+        .iter()
+        .any(|row| row.role == "user" && row.content == "[formatted-replay]")
+    {
+        defects.push("P2 actual Webhook user absent from extraction history".into());
+    }
+    assert!(
+        defects.is_empty(),
+        "Production contract regressions: {defects:#?}"
+    );
+
+    // Return this shared fixture to the initial state for the existing scenarios.
+    state.set_memory_enabled(false).await;
+    state.history.lock().await.clear();
+    state.set_memory_history_boundary(0).await;
+    runtime.forget_completed_for_restart_test();
+    sqlx::query("DELETE FROM conversation_messages")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM conversations WHERE id != 'desktop'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM characters WHERE id IN ('test-character','other-character')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    provider.prompts.lock().unwrap().clear();
+    tools.store(0, Ordering::Relaxed);
 }
 
 async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsize) {

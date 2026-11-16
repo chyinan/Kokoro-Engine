@@ -1211,6 +1211,9 @@ pub struct ChatRequest {
     /// Original transport text, separate from fallible media preparation.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub(crate) external_input_text: Option<String>,
+    /// Compatibility identities calculated by trusted transport adapters only.
+    #[serde(skip)]
+    pub(crate) previous_request_ids: Vec<String>,
     /// One-shot vision context, excluded from the journal and history previews.
     pub camera_frame: Option<String>,
     pub character_id: Option<String>,
@@ -2799,6 +2802,14 @@ async fn execute_chat_with_pending(
             .clone()
             .or_else(|| request.audio.as_ref().map(|_| request.message.clone()));
         if !desktop {
+            persistence::validate_external_request_owner(
+                &state.db,
+                &char_id,
+                policy.source(),
+                &client_request_id,
+                &request.previous_request_ids,
+            )
+            .await?;
             let saved: Option<(String, Option<String>)> = sqlx::query_as(
                 "SELECT m.content,m.metadata FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.character_id=? AND m.role='user' AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?"
             ).bind(&char_id).bind(format!("{client_request_id}:user")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
@@ -3444,6 +3455,7 @@ async fn execute_chat_with_pending(
 
     if let Some(turn) = external_turn.as_ref() {
         if let Some((text, translation)) = &turn.previous_reply {
+            let displayed_text = strip_leaked_tags(text);
             super::follow_up::schedule_external_memory_tasks(
                 policy.source(),
                 &request.message,
@@ -3455,11 +3467,11 @@ async fn execute_chat_with_pending(
                 turn.previous_memory_work,
             )
             .await;
-            let _ = policy.emit(app, "chat-turn-text-complete", serde_json::json!({"turn_id":assistant_turn_id,"text":text,"translation":translation})).await;
+            let _ = policy.emit(app, "chat-turn-text-complete", serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation})).await;
             let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND json_extract(metadata,'$.chat_save_id')=?")
                 .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
             return Ok(StreamChatResponse {
-                text: text.clone(),
+                text: displayed_text,
                 translation: translation.clone(),
                 conversation_id: turn.target.conversation_id.clone(),
                 user_message_id,
@@ -6531,6 +6543,12 @@ mod tests {
         let null_conv_req: ChatRequest =
             serde_json::from_str(r#"{"message":"hi","conversation_id":null}"#).unwrap();
         assert_eq!(null_conv_req.conversation_id, None);
+
+        let untrusted: ChatRequest = serde_json::from_value(serde_json::json!({
+            "message": "hi", "previous_request_ids": ["injected-alias"],
+        }))
+        .unwrap();
+        assert!(untrusted.previous_request_ids.is_empty());
     }
 
     #[test]

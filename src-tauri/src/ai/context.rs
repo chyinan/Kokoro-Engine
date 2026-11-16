@@ -98,13 +98,19 @@ struct DesktopMemoryBoundary {
 }
 
 fn is_external_chat_message(message: &Message) -> bool {
-    // ExternalTurn already persists these identities. Desktop user writes also
-    // have a client_request_id, so old replies and save retries need no migration.
+    // Keep the in-memory and SQL predicates aligned: main's legacy user save
+    // IDs, original PR2 source tags, and the shared owner's fingerprint all
+    // identify external input. A client_request_id alone is also used by desktop.
     message.metadata.as_ref().is_some_and(|metadata| {
         metadata["external_user_message_id"].is_i64()
+            || matches!(
+                metadata["source"].as_str(),
+                Some("webhook" | "telegram" | "line" | "discord" | "qq")
+            )
             || (message.role == "user"
-                && metadata["chat_save_id"].is_string()
-                && metadata.get("client_request_id").is_none())
+                && (metadata["external_request_fingerprint"].is_string()
+                    || (metadata["chat_save_id"].is_string()
+                        && metadata.get("client_request_id").is_none())))
     })
 }
 
@@ -1133,8 +1139,11 @@ impl AIOrchestrator {
                AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.streaming_draft') END, 0) != 1
                AND (? = 0 OR COALESCE(CASE WHEN json_valid(m.metadata) THEN
                    json_type(m.metadata, '$.external_user_message_id') = 'integer'
-                   OR (m.role = 'user' AND json_type(m.metadata, '$.chat_save_id') = 'text'
-                       AND json_type(m.metadata, '$.client_request_id') IS NULL)
+                   OR json_extract(m.metadata, '$.source') IN ('webhook','telegram','line','discord','qq')
+                   OR (m.role = 'user' AND (
+                       json_type(m.metadata, '$.external_request_fingerprint') = 'text'
+                       OR (json_type(m.metadata, '$.chat_save_id') = 'text'
+                           AND json_type(m.metadata, '$.client_request_id') IS NULL)))
                    END, 0) = ?)
              ORDER BY m.id DESC LIMIT ?",
         )

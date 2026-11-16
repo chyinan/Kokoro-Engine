@@ -80,6 +80,16 @@ pub struct ChatRuntimeState(
 );
 
 impl ChatRuntimeState {
+    #[cfg(test)]
+    pub(crate) fn forget_completed_for_restart_test(&self) {
+        let mut journal = self.0.lock().unwrap();
+        assert!(journal
+            .entries
+            .values()
+            .all(|entry| entry.outcome.borrow().is_some()));
+        *journal = Journal::default();
+    }
+
     /// The caller holds the exclusive database gate after a successful import.
     /// Keep request tombstones so duplicate delivery cannot execute old intent
     /// against a different database, and keep revisions monotonic for subscribers.
