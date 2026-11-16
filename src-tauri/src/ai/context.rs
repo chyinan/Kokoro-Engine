@@ -114,6 +114,13 @@ fn is_external_chat_message(message: &Message) -> bool {
     })
 }
 
+fn linked_user_message_id(message: &Message) -> Option<i64> {
+    message
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata["user_message_id"].as_i64())
+}
+
 pub fn is_vision_context_message(message: &Message) -> bool {
     message.role == "context"
         || message
@@ -1131,20 +1138,29 @@ impl AIOrchestrator {
         origin: Option<ChatMessageOrigin>,
     ) -> Result<Vec<Message>, KokoroError> {
         let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT m.role, m.content, m.metadata FROM conversation_messages m
-             JOIN conversations c ON c.id = m.conversation_id
-             WHERE c.id = ? AND c.character_id = ?
-               AND m.id >= ? AND m.id <= ?
-               AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.external_user_message_id') END, m.id) >= ?
-               AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.streaming_draft') END, 0) != 1
-               AND (? = 0 OR COALESCE(CASE WHEN json_valid(m.metadata) THEN
+            "WITH scoped_messages AS (
+               SELECT m.id, m.role, m.content, m.metadata,
+                 COALESCE(CASE WHEN json_valid(m.metadata) THEN
                    json_type(m.metadata, '$.external_user_message_id') = 'integer'
                    OR json_extract(m.metadata, '$.source') IN ('webhook','telegram','line','discord','qq')
                    OR (m.role = 'user' AND (
                        json_type(m.metadata, '$.external_request_fingerprint') = 'text'
                        OR (json_type(m.metadata, '$.chat_save_id') = 'text'
                            AND json_type(m.metadata, '$.client_request_id') IS NULL)))
-                   END, 0) = ?)
+                 END, 0) AS external
+               FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
+               WHERE c.id=? AND c.character_id=?
+             )
+             SELECT m.role, m.content, m.metadata FROM scoped_messages m
+             LEFT JOIN scoped_messages u ON u.role='user' AND u.id=CASE WHEN json_valid(m.metadata) THEN
+               CASE WHEN json_type(m.metadata,'$.user_message_id')='integer' THEN json_extract(m.metadata,'$.user_message_id') END END
+             WHERE m.id >= ? AND m.id <= ?
+               AND COALESCE(CASE WHEN json_valid(m.metadata) THEN
+                 CASE WHEN json_type(m.metadata,'$.external_user_message_id')='integer' THEN json_extract(m.metadata,'$.external_user_message_id') END END,
+                 CASE WHEN u.external THEN u.id END, m.id) >= ?
+               AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.streaming_draft') END, 0) != 1
+               AND (? = 0 OR (m.external OR COALESCE(u.external,0)) = ?)
+               AND (? = 0 OR (m.role IN ('user','assistant') AND COALESCE(CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.type') END,'') != 'assistant_tool_calls'))
              ORDER BY m.id DESC LIMIT ?",
         )
         .bind(&target.conversation_id)
@@ -1153,6 +1169,9 @@ impl AIOrchestrator {
         .bind(through_message_id)
         .bind(first_message_id)
         .bind(origin.is_some())
+        .bind(matches!(origin, Some(ChatMessageOrigin::External)))
+        // ExternalTurn already excludes technical messages from extraction;
+        // apply that rule before LIMIT so a long tool batch cannot evict text.
         .bind(matches!(origin, Some(ChatMessageOrigin::External)))
         .bind(MAX_IN_MEMORY_HISTORY_MESSAGES as i64)
         .fetch_all(&self.db)
@@ -1431,15 +1450,57 @@ impl AIOrchestrator {
         }
         // Keep the existing bounded fallback for legacy/manually supplied history
         // and an unavailable database; memory must not block ordinary chat.
-        let history = self.history.lock().await;
-        let boundary = (*self.memory_history_boundary.lock().await).min(history.len());
-        let filtered = history
+        let history = {
+            let history = self.history.lock().await;
+            let boundary = (*self.memory_history_boundary.lock().await).min(history.len());
+            history.iter().skip(boundary).cloned().collect::<Vec<_>>()
+        };
+        // Old native rows carry only user_message_id, and their user can already
+        // be outside the rolling window. Resolve those anchors in this scope;
+        // builtin/mcp identifies the tool provider, not the chat entry point.
+        let linked_ids = history
             .iter()
-            .skip(boundary)
+            .filter(|message| !is_external_chat_message(message))
+            .filter_map(linked_user_message_id)
+            .collect::<Vec<_>>();
+        let selected_conversation = self.current_conversation_id.lock().await.clone();
+        let linked_external = if linked_ids.is_empty() {
+            Some(HashSet::new())
+        } else if let Some(conversation) = selected_conversation {
+            let character = self.get_character_id().await;
+            let rows: Result<Vec<(i64, Option<String>)>, sqlx::Error> = sqlx::query_as(
+                "SELECT m.id,m.metadata FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
+                 WHERE c.id=? AND c.character_id=? AND m.role='user' AND m.id IN (SELECT value FROM json_each(?))"
+            ).bind(conversation).bind(character).bind(serde_json::json!(linked_ids).to_string()).fetch_all(&self.db).await;
+            match rows {
+                Ok(rows) => Some(
+                    rows.into_iter()
+                        .filter_map(|(id, metadata)| {
+                            is_external_chat_message(&Message {
+                                role: "user".into(),
+                                content: String::new(),
+                                metadata: metadata.and_then(|raw| serde_json::from_str(&raw).ok()),
+                            })
+                            .then_some(id)
+                        })
+                        .collect::<HashSet<_>>(),
+                ),
+                Err(error) => {
+                    tracing::warn!(target: "memory", "Failed to resolve legacy memory origin: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let filtered = history
+            .into_iter()
             .filter(|message| {
                 is_memory_candidate_message(message) && !is_external_chat_message(message)
+                    // When anchors cannot be read, omit ambiguous legacy rows
+                    // instead of treating a tool provider as desktop origin.
+                    && linked_user_message_id(message).is_none_or(|id| linked_external.as_ref().is_some_and(|external| !external.contains(&id)))
             })
-            .cloned()
             .collect::<Vec<_>>();
         let start = filtered.len().saturating_sub(n);
         filtered.into_iter().skip(start).collect()
@@ -2047,6 +2108,51 @@ mod tests {
         let (prompt, _) = orchestrator.compose_prompt("hello", false, None, true, "default").await.unwrap();
         assert!(prompt.iter().any(|message| message.content == "saved prompt"));
         assert!(prompt.iter().all(|message| message.content != "foreign diagnostic"));
+    }
+
+    #[tokio::test]
+    async fn legacy_native_memory_fallback_does_not_guess_origin_when_database_is_unavailable() {
+        let state = setup_test_orchestrator().await;
+        *state.current_conversation_id.lock().await = Some("offline-conversation".into());
+        for (content, metadata) in [
+            ("desktop text", None),
+            (
+                "hidden desktop tool",
+                Some(
+                    serde_json::json!({"type":"tool_result","source":"builtin","user_message_id":null}),
+                ),
+            ),
+            (
+                "unresolved legacy tool",
+                Some(
+                    serde_json::json!({"type":"tool_result","source":"builtin","user_message_id":1}),
+                ),
+            ),
+            (
+                "known external tool",
+                Some(
+                    serde_json::json!({"type":"tool_result","source":"mcp","user_message_id":2,"external_user_message_id":2}),
+                ),
+            ),
+        ] {
+            state
+                .push_history_message(Message {
+                    role: "assistant".into(),
+                    content: content.into(),
+                    metadata,
+                })
+                .await;
+        }
+        state.set_memory_history_boundary(0).await;
+        state.db.close().await;
+        let history = state.get_recent_memory_history(20).await;
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["desktop text", "hidden desktop tool"]
+        );
     }
 
     async fn setup_test_orchestrator() -> AIOrchestrator {

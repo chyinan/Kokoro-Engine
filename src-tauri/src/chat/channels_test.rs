@@ -170,6 +170,7 @@ impl LlmProvider for ControlledProvider {
             "[after-tool-final-save]",
             "[native-tool-only]",
             "[formatted-replay]",
+            "[memory-native]",
         ]
         .iter()
         .any(|label| last_user.contains(label));
@@ -1083,6 +1084,7 @@ async fn verify_persisted_external_contracts(
         defects.is_empty(),
         "Production contract regressions: {defects:#?}"
     );
+    verify_shared_native_memory_origin(app, provider, tools).await;
 
     // Return this shared fixture to the initial state for the existing scenarios.
     state.set_memory_enabled(false).await;
@@ -1103,6 +1105,187 @@ async fn verify_persisted_external_contracts(
         .unwrap();
     provider.prompts.lock().unwrap().clear();
     tools.store(0, Ordering::Relaxed);
+}
+
+async fn verify_shared_native_memory_origin(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+    tools: &AtomicUsize,
+) {
+    let state = app.state::<AIOrchestrator>();
+    state.set_memory_history_boundary(0).await;
+    let desktop = crate::commands::chat::stream_chat(
+        app.clone(),
+        ChatRequest {
+            message: "[memory-native] desktop".into(),
+            character_id: Some("test-character".into()),
+            conversation_id: Some("desktop".into()),
+            client_request_id: Some("memory-desktop".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mode = SessionMode::Desktop {
+        character_id: "test-character".into(),
+        conversation_id: "desktop".into(),
+    };
+    sqlx::query("CREATE TRIGGER reject_memory_batch BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' AND json_extract(NEW.metadata,'$.type') IS NULL BEGIN SELECT RAISE(ABORT,'memory batch failure'); END").execute(&state.db).await.unwrap();
+    assert!(matches!(
+        submit_message(
+            app,
+            ChatId(777),
+            2,
+            "[memory-native] external",
+            vec![],
+            &mode,
+            "test-character"
+        )
+        .await,
+        Err(KokoroError::ChatPersistence(_))
+    ));
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    sqlx::query("DROP TRIGGER reject_memory_batch")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let external = submit_message(
+        app,
+        ChatId(777),
+        2,
+        "[memory-native] external",
+        vec![],
+        &mode,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed)
+        ),
+        before
+    );
+    let desktop_user = desktop.user_message_id.unwrap();
+    let external_user = external.user_message_id.unwrap();
+    let target = crate::chat::persistence::ConversationTarget {
+        character_id: "test-character".into(),
+        conversation_id: "desktop".into(),
+        create: false,
+    };
+    let linked = |message: &crate::ai::context::Message, id| {
+        message
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta["user_message_id"].as_i64())
+            == Some(id)
+    };
+    let technical = |message: &crate::ai::context::Message| {
+        matches!(
+            message
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta["type"].as_str()),
+            Some("assistant_tool_calls" | "tool_result")
+        )
+    };
+    let mut defects = Vec::new();
+    let rows: Vec<(String,String,Option<String>)> = sqlx::query_as("SELECT role,content,metadata FROM conversation_messages WHERE conversation_id='desktop' AND json_extract(metadata,'$.user_message_id')=?").bind(external_user).fetch_all(&state.db).await.unwrap();
+    assert_eq!(rows.len(), 2); // actual native call/result; final uses external_user_message_id
+    for (_, _, metadata) in &rows {
+        let metadata: Value = serde_json::from_str(metadata.as_ref().unwrap()).unwrap();
+        if metadata["external_user_message_id"] != external_user {
+            defects.push(format!("External batch lost origin: {metadata}"));
+        }
+    }
+    for legacy in [false, true] {
+        if legacy {
+            // Real old batches used user_message_id and builtin/mcp tool source.
+            sqlx::query("UPDATE conversation_messages SET metadata=json_remove(metadata,'$.external_user_message_id') WHERE conversation_id='desktop' AND json_extract(metadata,'$.user_message_id')=? AND json_extract(metadata,'$.type') IN ('assistant_tool_calls','tool_result')").bind(external_user).execute(&state.db).await.unwrap();
+            for message in state
+                .history
+                .lock()
+                .await
+                .iter_mut()
+                .filter(|message| linked(message, external_user) && technical(message))
+            {
+                message
+                    .metadata
+                    .as_mut()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("external_user_message_id");
+            }
+        }
+        let history = state.get_recent_memory_history(20).await;
+        if history.iter().any(|message| linked(message, external_user)) {
+            defects.push(format!(
+                "Desktop SQL includes external native batch (legacy={legacy})"
+            ));
+        }
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| linked(message, desktop_user) && technical(message))
+                .count(),
+            2
+        );
+    }
+    // A long legacy external batch must not consume either extraction window.
+    let tool = rows.iter().find(|(role, _, _)| role == "tool").unwrap();
+    for index in 0..25 {
+        sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES ('desktop','tool',?,json_remove(?,'$.external_user_message_id','$.chat_save_id'),'now')")
+            .bind(format!("external native result {index}")).bind(&tool.2).execute(&state.db).await.unwrap();
+    }
+    let history = state.get_recent_memory_history(20).await;
+    if !history
+        .iter()
+        .any(|message| message.content == "[memory-native] desktop")
+    {
+        defects.push("External native rows consumed the desktop SQL window".into());
+    }
+    let history = state
+        .saved_external_memory_history(&target, external_user, i64::MAX)
+        .await
+        .unwrap();
+    if !history
+        .iter()
+        .any(|message| message.role == "user" && message.content == "[memory-native] external")
+        || history.iter().any(|message| technical(message))
+    {
+        defects.push("Native technical rows consumed the external extraction window".into());
+    }
+    // The user anchor can be outside the rolling in-memory window.
+    let recent: Vec<_> = state
+        .history
+        .lock()
+        .await
+        .iter()
+        .filter(|message| technical(message))
+        .cloned()
+        .collect();
+    state.sync_history_from_rows(recent).await;
+    state.set_memory_history_boundary(0).await;
+    let history = state.get_recent_memory_history(20).await;
+    if history.iter().any(|message| linked(message, external_user)) {
+        defects.push("Desktop in-memory fallback includes legacy external native rows".into());
+    }
+    assert_eq!(
+        history
+            .iter()
+            .filter(|message| linked(message, desktop_user) && technical(message))
+            .count(),
+        2
+    );
+    assert!(
+        defects.is_empty(),
+        "Native memory origin regressions: {defects:#?}"
+    );
 }
 
 async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsize) {

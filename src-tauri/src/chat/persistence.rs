@@ -903,7 +903,6 @@ impl ExternalTurn {
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default();
-        metadata.insert("external_user_message_id".into(), user_message_id.into());
         if let Some(translation) = translation {
             metadata.insert("translation".into(), serde_json::json!(translation));
         }
@@ -916,6 +915,19 @@ impl ExternalTurn {
         let metadata =
             (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
         batch.push(MessageWrite::new("assistant", text, metadata).with_save_id(final_save_id));
+        // The whole atomic exchange belongs to this external input, including
+        // native call/result rows whose `source` names a tool provider. Apply on
+        // every save attempt so pending-batch recovery preserves the same origin.
+        for message in &mut batch {
+            let mut metadata = message
+                .metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            metadata.insert("external_user_message_id".into(), user_message_id.into());
+            message.metadata = Some(serde_json::Value::Object(metadata).to_string());
+        }
         let saved = state
             .save_external_messages_locked(target, &batch, false, expected_revision)
             .await?;
