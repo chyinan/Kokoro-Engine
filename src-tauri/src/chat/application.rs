@@ -276,7 +276,7 @@ impl TurnCancellationState {
                     entry.reason =
                         reason.or_else(|| Some(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
                 }
-                let _ = entry.cancel_tx.send(true);
+                entry.cancel_tx.send_replace(true);
             }
         }
 
@@ -317,7 +317,7 @@ impl TurnCancellationState {
             if entry.reason.is_none() {
                 entry.reason = reason;
             }
-            let _ = entry.cancel_tx.send(true);
+            entry.cancel_tx.send_replace(true);
             return Ok(());
         }
 
@@ -326,7 +326,7 @@ impl TurnCancellationState {
                 if entry.reason.is_none() {
                     entry.reason = reason;
                 }
-                let _ = entry.cancel_tx.send(true);
+                entry.cancel_tx.send_replace(true);
                 return Ok(());
             }
         }
@@ -346,11 +346,11 @@ impl TurnCancellationState {
     async fn is_cancelled(&self, turn_id: &str) -> bool {
         let inner = self.inner.read().await;
         if let Some(v) = inner.cancelled.get(turn_id) {
-            return v.reason.is_some();
+            return *v.cancel_tx.borrow();
         }
         if let Some(tid) = inner.request_to_turn.get(turn_id) {
             if let Some(v) = inner.cancelled.get(tid) {
-                return v.reason.is_some();
+                return *v.cancel_tx.borrow();
             }
         }
         inner.tombstones.contains_key(turn_id)
@@ -406,11 +406,19 @@ impl TurnCancellationState {
         target_id: &str,
         reason: Option<String>,
         timeout: std::time::Duration,
+        approval_state: &PendingToolApprovalState,
     ) -> Result<(), String> {
         let mut rx = self.finished_tx.subscribe();
         self.cancel_turn(target_id, reason).await?;
 
         let resolved_turn_id = self.resolve_turn_id(target_id).await;
+
+        // Publish cancellation before dropping approval senders. Otherwise a
+        // worker can observe a closed approval channel as an unexpected error.
+        if let Some(turn_id) = resolved_turn_id.as_deref() {
+            approval_state.cancel_turn(turn_id).await;
+        }
+        approval_state.cancel_turn(target_id).await;
 
         let Some(resolved_turn_id) = resolved_turn_id else {
             return Ok(());
@@ -672,6 +680,7 @@ async fn cleanup_turn_artifacts(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_conversation_created_for_hidden_turn(
     state: &AIOrchestrator,
     char_id: &str,
@@ -680,6 +689,7 @@ async fn ensure_conversation_created_for_hidden_turn(
     turn_id: &str,
     bound_generation: u64,
     cancel_state: &TurnCancellationState,
+    runtime: &crate::chat::runtime::ChatRuntimeState,
 ) -> Result<String, KokoroError> {
     if let Some(ref cid) = conversation_id {
         return Ok(cid.clone());
@@ -727,7 +737,17 @@ async fn ensure_conversation_created_for_hidden_turn(
     .map_err(|e| KokoroError::Database(e.to_string()))?;
 
     *state.current_conversation_id.lock().await = Some(new_id.clone());
-    state.bump_conversation_generation();
+    let generation = state.bump_conversation_generation();
+    // Keep the journal and selected conversation in the same scope before a
+    // subscriber can refresh, including while the next tool awaits approval.
+    runtime.event(
+        "chat-turn-scope",
+        &serde_json::json!({
+            "turn_id": turn_id,
+            "conversation_id": new_id,
+            "conversation_generation": generation,
+        }),
+    );
     if state.persist_conversation_selection {
         crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
     }
@@ -1069,9 +1089,15 @@ pub(crate) async fn cancel_chat_turn_inner(
     turn_id: String,
     reason: Option<String>,
     cancel_state: Arc<TurnCancellationState>,
+    approval_state: &PendingToolApprovalState,
 ) -> Result<(), String> {
     cancel_state
-        .cancel_turn_and_wait(&turn_id, reason, std::time::Duration::from_millis(1000))
+        .cancel_turn_and_wait(
+            &turn_id,
+            reason,
+            std::time::Duration::from_millis(1000),
+            approval_state,
+        )
         .await
 }
 
@@ -3762,6 +3788,7 @@ async fn execute_chat(
                     &assistant_turn_id,
                     bound_generation,
                     cancel_state.as_ref(),
+                    app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().inner(),
                 )
                 .await
                 {
@@ -4254,6 +4281,7 @@ async fn execute_chat(
             ensure_conversation_created_for_hidden_turn(
                 state, &char_id, &mut conversation_id, &mut is_newly_created_for_hidden,
                 &assistant_turn_id, bound_generation, cancel_state.as_ref(),
+                app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().inner(),
             ).await?;
         }
         let cid = conversation_id.as_deref().ok_or_else(|| KokoroError::Database("Missing final reply conversation".into()))?;
@@ -5944,7 +5972,9 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_chat_turn_unblocks_tool_approval_wait() {
         let cancel_state = Arc::new(TurnCancellationState::new());
-        cancel_state.register_turn("turn-unblock-test").await;
+        cancel_state
+            .register_turn_with_request("turn-unblock-test", Some("request-unblock"))
+            .await;
         let approval_state = Arc::new(PendingToolApprovalState::new());
 
         let req_id = approval_state
@@ -5960,33 +5990,35 @@ mod tests {
             .await
             .expect("receiver should exist");
 
-        let cancel_state_task = cancel_state.clone();
-        let approval_state_task = approval_state.clone();
-
-        let cancel_handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            approval_state_task.cancel_turn("turn-unblock-test").await;
-            cancel_chat_turn_inner(
-                "turn-unblock-test".to_string(),
-                Some("stopped_by_user".into()),
-                cancel_state_task,
-            )
-            .await
-        });
-
-        let start = std::time::Instant::now();
-        let wait_res = wait_for_tool_approval_decision(
+        let mut waiting = Box::pin(wait_for_tool_approval_decision(
             &approval_state,
             &cancel_state,
             "turn-unblock-test",
             &req_id,
             receiver,
-        )
-        .await;
-        let elapsed = start.elapsed();
+        ));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
 
-        assert!(elapsed < std::time::Duration::from_millis(500), "Waiting must unblock promptly, took {elapsed:?}");
-        cancel_handle.await.unwrap().unwrap();
+        // Hold cleanup at a deterministic boundary: the cancellation signal must
+        // already be visible while the pending approval sender is still alive.
+        let pending = approval_state.pending.lock().await;
+        let mut cancelling = Box::pin(cancel_chat_turn_inner(
+            "request-unblock".into(),
+            None,
+            cancel_state.clone(),
+            &approval_state,
+        ));
+        assert!(futures::poll!(cancelling.as_mut()).is_pending());
+        assert!(cancel_state.is_cancelled("turn-unblock-test").await);
+        assert!(cancel_state.is_cancelled("request-unblock").await);
+        assert!(
+            ensure_turn_not_cancelled(&cancel_state, "turn-unblock-test")
+                .await
+                .is_err()
+        );
+        drop(pending);
+        assert!(futures::poll!(cancelling.as_mut()).is_pending());
+        let wait_res = waiting.await;
 
         match wait_res {
             Err(KokoroError::Chat(msg)) => {
@@ -5994,6 +6026,12 @@ mod tests {
             }
             other => panic!("expected cancelled error, got {other:?}"),
         }
+        assert!(!approval_state.is_pending(&req_id).await);
+        assert!(approve_tool_approval_inner(&approval_state, req_id)
+            .await
+            .is_err());
+        cancel_state.clear_turn("turn-unblock-test").await;
+        cancelling.await.unwrap();
     }
 
     #[tokio::test]
@@ -6052,7 +6090,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_chat_turn_returns_error_for_empty_target_id() {
         let state = Arc::new(TurnCancellationState::new());
-        let result = cancel_chat_turn_inner("   ".to_string(), Some("user".into()), state).await;
+        let result = cancel_chat_turn_inner("   ".to_string(), Some("user".into()), state, &PendingToolApprovalState::new()).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("cannot be empty"));
     }
@@ -6066,6 +6104,7 @@ mod tests {
             "req-unborn-1".to_string(),
             Some("cancelled_before_registration".into()),
             state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(res.is_ok(), "Cancellation before registration must succeed via tombstone");
@@ -6097,6 +6136,7 @@ mod tests {
             "turn-unborn-2".to_string(),
             Some("cancelled_early".into()),
             state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(res.is_ok());
@@ -6124,6 +6164,7 @@ mod tests {
                 "req-concurrent-timing".to_string(),
                 Some("stopped_by_user".into()),
                 cancel_state,
+                &PendingToolApprovalState::new(),
             )
             .await
         });
@@ -6182,6 +6223,7 @@ mod tests {
             "req-client-456".to_string(),
             Some("new_conversation_started".into()),
             state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(res.is_ok());
@@ -6609,6 +6651,7 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_conversation_created_for_hidden_turn_creates_and_binds() {
         let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let runtime = crate::chat::runtime::ChatRuntimeState::default();
         assert!(state.current_conversation_id.lock().await.is_none());
 
         let mut conv_id: Option<String> = None;
@@ -6616,6 +6659,24 @@ mod tests {
 
         let cancel_state = Arc::new(TurnCancellationState::new());
         let bound_generation = state.current_conversation_generation();
+        for id in ["hidden", "unrelated"] {
+            runtime
+                .begin(&ChatRequest {
+                    client_request_id: Some(id.into()),
+                    character_id: Some("test_char".into()),
+                    conversation_generation: Some(bound_generation),
+                    hidden: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            runtime.event(
+                "chat-turn-start",
+                &serde_json::json!({
+                    "client_request_id": id,
+                    "turn_id": if id == "hidden" { "turn-1" } else { "other-turn" },
+                }),
+            );
+        }
         let created_id = ensure_conversation_created_for_hidden_turn(
             &state,
             "test_char",
@@ -6624,6 +6685,7 @@ mod tests {
             "turn-1",
             bound_generation,
             cancel_state.as_ref(),
+            &runtime,
         )
         .await
         .unwrap();
@@ -6634,6 +6696,19 @@ mod tests {
             state.current_conversation_id.lock().await.as_deref(),
             Some(created_id.as_str())
         );
+        let (revision, turns) = runtime.journal_snapshot();
+        let bound = turns
+            .iter()
+            .find(|turn| turn.client_request_id == "hidden")
+            .unwrap();
+        assert_eq!(bound.conversation_id.as_deref(), Some(created_id.as_str()));
+        assert_eq!(bound.conversation_generation, Some(bound_generation + 1));
+        let unrelated = turns
+            .iter()
+            .find(|turn| turn.client_request_id == "unrelated")
+            .unwrap();
+        assert!(unrelated.conversation_id.is_none());
+        assert_eq!(unrelated.conversation_generation, Some(bound_generation));
 
         // Subsequent call reuses existing conversation without re-creating
         let mut second_newly_created = false;
@@ -6645,12 +6720,14 @@ mod tests {
             "turn-1",
             bound_generation,
             cancel_state.as_ref(),
+            &runtime,
         )
         .await
         .unwrap();
 
         assert_eq!(second_id, created_id);
         assert!(!second_newly_created);
+        assert_eq!(runtime.journal_snapshot().0, revision);
     }
 
     #[tokio::test]
@@ -6670,6 +6747,7 @@ mod tests {
             "turn-1",
             bound_generation,
             cancel_state.as_ref(),
+            &crate::chat::runtime::ChatRuntimeState::default(),
         )
         .await
         .unwrap();
@@ -6734,6 +6812,7 @@ mod tests {
             "turn-1",
             bound_generation,
             cancel_state.as_ref(),
+            &crate::chat::runtime::ChatRuntimeState::default(),
         )
         .await
         .unwrap();
@@ -6794,6 +6873,7 @@ mod tests {
             "turn-hidden-1",
             bound_generation,
             cancel_state.as_ref(),
+            &crate::chat::runtime::ChatRuntimeState::default(),
         )
         .await;
 
@@ -6837,6 +6917,7 @@ mod tests {
             "turn-hidden-2",
             bound_generation,
             cancel_state.as_ref(),
+            &crate::chat::runtime::ChatRuntimeState::default(),
         )
         .await;
 
@@ -6863,6 +6944,7 @@ mod tests {
             "turn-1",
             bound_generation,
             cancel_state.as_ref(),
+            &crate::chat::runtime::ChatRuntimeState::default(),
         )
         .await
         .unwrap();
@@ -6964,6 +7046,7 @@ mod tests {
             "turn-2",
             bound_generation,
             cancel_state.as_ref(),
+            &crate::chat::runtime::ChatRuntimeState::default(),
         )
         .await
         .unwrap();
@@ -7132,6 +7215,7 @@ mod tests {
             "turn-hung-1".to_string(),
             Some("user_stop".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok(), "cancellation should succeed");
@@ -7463,6 +7547,7 @@ mod tests {
             "turn-tool-cancel-1".to_string(),
             Some("user_stop".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok(), "cancellation should succeed");
@@ -7541,6 +7626,7 @@ mod tests {
             "turn-after-action-cancel-1".to_string(),
             Some("user_stop".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok());
@@ -7812,6 +7898,7 @@ mod tests {
             "turn-prompt-cancel-1".to_string(),
             Some("user_stop".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok());
@@ -8073,6 +8160,7 @@ mod tests {
             "turn-fallback-cancel-1".to_string(),
             Some("new_chat_or_user_stop".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok(), "cancellation should succeed");
@@ -8154,6 +8242,7 @@ mod tests {
             "turn-prep-sysprov-cancel-1".to_string(),
             Some("user_stop".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok());
@@ -8293,6 +8382,7 @@ mod tests {
             "turn-prep-convlock-cancel-1".to_string(),
             Some("new_chat".to_string()),
             cancel_state.clone(),
+            &PendingToolApprovalState::new(),
         )
         .await;
         assert!(cancel_res.is_ok());

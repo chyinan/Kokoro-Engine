@@ -1,4 +1,4 @@
-use crate::actions::registry::{ActionError, ActionHandler, ActionParam};
+use crate::actions::registry::{ActionError, ActionHandler, ActionParam, ActionPermissionLevel};
 use crate::actions::{tool_settings::ToolSettings, ActionContext, ActionRegistry, ActionResult};
 use crate::ai::context::AIOrchestrator;
 use crate::characters::activation::ActivationCoordinator;
@@ -31,18 +31,30 @@ use warp::Filter;
 
 type FixtureStream<T> = Pin<Box<dyn Stream<Item = Result<T, String>> + Send>>;
 
-struct CountToolExecutions(Arc<AtomicUsize>);
+struct CountToolExecutions(Arc<AtomicUsize>, bool);
 
 #[async_trait::async_trait]
 impl ActionHandler for CountToolExecutions {
     fn name(&self) -> &str {
-        "count_executions"
+        if self.1 {
+            "approved_execution"
+        } else {
+            "count_executions"
+        }
     }
     fn description(&self) -> &str {
         "Test sentinel tool"
     }
     fn parameters(&self) -> Vec<ActionParam> {
         Vec::new()
+    }
+
+    fn permission_level(&self) -> ActionPermissionLevel {
+        if self.1 {
+            ActionPermissionLevel::Elevated
+        } else {
+            ActionPermissionLevel::Safe
+        }
     }
 
     async fn execute(
@@ -126,6 +138,32 @@ impl LlmProvider for ControlledProvider {
             .rev()
             .find(|message| message["role"] == "user");
         let last_user = last_user.map(Value::to_string).unwrap_or_default();
+        if last_user.contains("[hidden-scope]") {
+            let result_count = payload
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .count();
+            self.prompts.lock().unwrap().push(payload);
+            let response = match result_count {
+                0 => vec![LlmStreamEvent::ToolCall(LlmToolCall {
+                    id: "hidden-first".into(),
+                    name: "count_executions".into(),
+                    args: HashMap::new(),
+                })],
+                1 => vec![
+                    LlmStreamEvent::Text("Waiting for approval".into()),
+                    LlmStreamEvent::ToolCall(LlmToolCall {
+                        id: "hidden-approved".into(),
+                        name: "approved_execution".into(),
+                        args: HashMap::new(),
+                    }),
+                ],
+                _ => vec![LlmStreamEvent::Text("Approved action finished".into())],
+            };
+            return Ok(Box::pin(stream::iter(response.into_iter().map(Ok))));
+        }
         let native_fixture = [
             "[native-exchange-failure]",
             "[after-tool-stream-failure]",
@@ -224,7 +262,8 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let mut registry = ActionRegistry::new();
     crate::actions::builtin::register_builtins(&mut registry);
     let tool_executions = Arc::new(AtomicUsize::new(0));
-    registry.register(CountToolExecutions(tool_executions.clone()));
+    registry.register(CountToolExecutions(tool_executions.clone(), false));
+    registry.register(CountToolExecutions(tool_executions.clone(), true));
     let runtime = Arc::new(ChatRuntimeState::default());
     let cancellation = Arc::new(TurnCancellationState::default());
     let imagegen = ImageGenService::init_from_config(&Default::default()).await;
@@ -597,9 +636,14 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         .iter()
         .any(|turn| turn.client_request_id == "pending" && turn.status == "streaming"));
     let mut completion = runtime.outcome("pending").unwrap();
-    crate::chat::application::cancel_chat_turn_inner("pending".into(), None, cancellation)
-        .await
-        .unwrap();
+    crate::chat::application::cancel_chat_turn_inner(
+        "pending".into(),
+        None,
+        cancellation,
+        handle.state::<Arc<PendingToolApprovalState>>().inner(),
+    )
+    .await
+    .unwrap();
     completion
         .wait_for(|outcome| outcome.is_some())
         .await
@@ -675,6 +719,135 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
 
     verify_external_tool_only_replies(&handle, &provider, &tool_executions).await;
     verify_audio_admission(&handle, &provider).await;
+    verify_hidden_turn_scope(&handle, &tool_executions).await;
+}
+
+async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsize) {
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    let settings = app.state::<Arc<RwLock<ToolSettings>>>();
+    for approve in [false, true] {
+        settings.write().await.max_permission_level = ActionPermissionLevel::Safe;
+        let generation = {
+            let _selection = state.conversation_switch_lock.lock().await;
+            *state.current_conversation_id.lock().await = None;
+            state.history.lock().await.clear();
+            state.bump_conversation_generation()
+        };
+        let request = ChatRequest {
+            message: "[hidden-scope]".into(),
+            hidden: true,
+            client_request_id: Some(format!("hidden-scope-{approve}")),
+            character_id: Some("test-character".into()),
+            conversation_generation: Some(generation),
+            ..Default::default()
+        };
+        let before = executions.load(Ordering::Relaxed);
+        let worker = tokio::spawn(crate::commands::chat::stream_chat(
+            app.clone(),
+            request.clone(),
+        ));
+        let (view, approval_id) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let view = super::runtime::get_chat_view(&state, &runtime, None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let approval_id = view
+                    .turns
+                    .iter()
+                    .find(|turn| {
+                        turn.client_request_id == request.client_request_id.as_deref().unwrap()
+                    })
+                    .and_then(|turn| {
+                        turn.tools
+                            .iter()
+                            .find(|event| event["approval_status"] == "requested")
+                    })
+                    .and_then(|event| event["approval_request_id"].as_str())
+                    .map(str::to_owned);
+                if let Some(approval_id) = approval_id {
+                    break (view, approval_id);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let turn = view
+            .turns
+            .iter()
+            .find(|turn| turn.client_request_id == request.client_request_id.as_deref().unwrap())
+            .unwrap();
+        assert!(view.conversation_id.is_some());
+        assert_eq!(view.version.generation, generation + 1);
+        assert_eq!(
+            turn.character_id.as_deref(),
+            Some(view.character_id.as_str())
+        );
+        assert_eq!(turn.conversation_id, view.conversation_id);
+        assert_eq!(turn.conversation_generation, Some(view.version.generation));
+        assert_eq!(turn.status, "streaming");
+        assert!(turn.text.contains("Waiting for approval"));
+        assert_eq!(executions.load(Ordering::Relaxed), before + 1);
+        assert!(
+            turn.user_message_id.is_none(),
+            "Hidden prompt must stay hidden"
+        );
+        if approve {
+            // Execution rechecks the current permission ceiling after approval.
+            settings.write().await.max_permission_level = ActionPermissionLevel::Elevated;
+            crate::commands::chat::approve_tool_approval(approval_id.clone(), app.state())
+                .await
+                .unwrap();
+        } else {
+            crate::commands::chat::cancel_chat_turn(
+                turn.client_request_id.clone(),
+                None,
+                app.state(),
+                app.state(),
+                app.state(),
+            )
+            .await
+            .unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.status.as_deref(),
+            Some(if approve { "completed" } else { "cancelled" })
+        );
+        assert_eq!(
+            executions.load(Ordering::Relaxed),
+            before + if approve { 2 } else { 1 }
+        );
+        assert!(
+            !app.state::<Arc<PendingToolApprovalState>>()
+                .is_pending(&approval_id)
+                .await
+        );
+        let scope = state.conversation_state_snapshot().await;
+        assert_eq!(
+            crate::commands::chat::stream_chat(app.clone(), request)
+                .await
+                .unwrap(),
+            result
+        );
+        assert_eq!(
+            state.conversation_state_snapshot().await,
+            scope,
+            "Replay must not select another scope"
+        );
+        if approve {
+            assert_eq!(
+                persisted_assistant_text(&state.db, result.assistant_message_id.unwrap()).await,
+                result.text
+            );
+        }
+    }
 }
 
 async fn verify_external_tool_only_replies(
@@ -914,6 +1087,7 @@ async fn verify_audio_admission(app: &tauri::AppHandle, provider: &ControlledPro
         snapshot.client_request_id,
         None,
         app.state::<Arc<TurnCancellationState>>().inner().clone(),
+        app.state::<Arc<PendingToolApprovalState>>().inner(),
     )
     .await
     .unwrap();

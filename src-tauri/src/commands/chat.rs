@@ -34,12 +34,14 @@ pub async fn cancel_chat_turn(
     runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
     approval_state: State<'_, Arc<PendingToolApprovalState>>,
 ) -> Result<(), String> {
-    if let Some(resolved_turn_id) = cancel_state.resolve_turn_id(&turn_id).await {
-        approval_state.cancel_turn(&resolved_turn_id).await;
-    }
-    approval_state.cancel_turn(&turn_id).await;
     let outcome = runtime.outcome(&turn_id);
-    cancel_chat_turn_inner(turn_id, reason, cancel_state.inner().clone()).await?;
+    cancel_chat_turn_inner(
+        turn_id,
+        reason,
+        cancel_state.inner().clone(),
+        &approval_state,
+    )
+    .await?;
     if let Some(mut outcome) = outcome {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {

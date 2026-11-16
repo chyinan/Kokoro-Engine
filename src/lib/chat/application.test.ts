@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatApplication, emptyChatView, type ChatTransport } from "./application";
 import type { ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
-import { projectMessages } from "./projection";
+import { isActiveTurn, projectMessages, turnMatchesView } from "./projection";
 import { canSubmitApproval } from "./turn-state";
 
 function deferred<T>() {
@@ -180,6 +180,31 @@ describe("UI-independent chat application", () => {
     expect(tools()).toMatchObject([{ approvalStatus: "approved", text: "done" }]);
     expect(tools().some(canSubmitApproval)).toBe(false);
     stop();
+  });
+  it("keeps a hidden turn visible and cancellable after its first native tool creates a conversation", async () => {
+    const h = harness();
+    const hidden = { ...turn("hidden", 1), hidden: true, conversation_id: null, conversation_generation: 1, user_message_id: null, assistant_message_id: null, text: "" };
+    h.set({ revision: 1, busy: true, conversation_id: null, turns: [hidden] });
+    const stop = h.app.subscribe(() => {});
+    try {
+      await h.app.refresh();
+      const bound = { ...hidden, revision: 3, conversation_id: "created-by-hidden-turn", conversation_generation: 2, text: "Waiting for approval", tools: [
+        { turn_id: "turn_hidden", tool: "approved_execution", tool_trace_id: "1:0", approval_request_id: "hidden_approval", approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval" },
+      ] };
+      h.set({ revision: 3, conversation_id: bound.conversation_id, generation: 2, turns: [bound] });
+      h.emit(bound);
+      await h.app.refresh();
+      const view = h.app.getSnapshot();
+      expect(view.turns.find(current => isActiveTurn(current) && turnMatchesView(view, current))?.client_request_id).toBe("hidden");
+      const messages = projectMessages(view);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ role: "kokoro", text: "Waiting for approval" });
+      expect(messages[0].tools?.filter(canSubmitApproval)).toMatchObject([{ approvalRequestId: "hidden_approval" }]);
+      await h.app.cancel();
+      expect(h.io.cancel).toHaveBeenCalledWith("hidden", "stopped_by_user");
+      expect(projectMessages({ ...view, character_id: "other-character" })).toEqual([]);
+      expect(projectMessages({ ...view, generation: 3 })).toEqual([]);
+    } finally { stop(); }
   });
   it.each([false, true])("keeps completed tool results when revisiting a conversation with text=%s", async withText => {
     const h = harness();
