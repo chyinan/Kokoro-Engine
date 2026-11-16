@@ -481,6 +481,27 @@ pub(crate) struct ExternalTurn {
 }
 
 impl ExternalTurn {
+    /// Look up the original accepted input before repeating fallible transport
+    /// preparation such as speech recognition. Keep character ownership in the
+    /// lookup even though platform request identities may be shared by characters.
+    pub(crate) async fn saved_user_message(
+        state: &crate::ai::context::AIOrchestrator,
+        character_id: &str,
+        request_id: &str,
+    ) -> Result<Option<(String, String)>, KokoroError> {
+        sqlx::query_as(
+            "SELECT m.conversation_id, m.content FROM conversation_messages m
+             JOIN conversations c ON c.id = m.conversation_id
+             WHERE c.character_id = ? AND m.role = 'user'
+               AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?",
+        )
+        .bind(character_id)
+        .bind(format!("{request_id}:user"))
+        .fetch_optional(&state.db)
+        .await
+        .map_err(KokoroError::chat_persistence)
+    }
+
     pub(crate) async fn begin(
         state: &crate::ai::context::AIOrchestrator,
         character_id: &str,
@@ -502,17 +523,9 @@ impl ExternalTurn {
             None
         };
         let save_id = format!("{request_id}:user");
-        let existing: Option<String> = sqlx::query_scalar(
-            "SELECT m.conversation_id FROM conversation_messages m
-             JOIN conversations c ON c.id = m.conversation_id
-             WHERE c.character_id = ? AND m.role = 'user'
-               AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?",
-        )
-        .bind(character_id)
-        .bind(&save_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(KokoroError::chat_persistence)?;
+        let existing = Self::saved_user_message(state, character_id, &request_id)
+            .await?
+            .map(|(conversation, _)| conversation);
         let create = existing.is_none() && owned_selected.is_none();
         let target = ConversationTarget {
             character_id: character_id.to_owned(),

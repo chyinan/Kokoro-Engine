@@ -431,6 +431,41 @@ async fn handle_command(
     Ok(())
 }
 
+fn telegram_request_id(chat_id: i64, message_id: i32) -> String {
+    persistence::external_identity("telegram", &[&chat_id.to_string(), &message_id.to_string()])
+}
+
+struct TelegramPreparedInput {
+    text: String,
+    image: Option<String>,
+}
+
+/// The committed user row is authoritative on redelivery. Only a new platform
+/// message needs downloading/transcription, and preparation must succeed before
+/// its user row is written so a transient download failure remains retryable.
+async fn prepare_telegram_media_input<F, Fut>(
+    orchestrator: &AIOrchestrator,
+    character_id: &str,
+    chat_id: i64,
+    message_id: i32,
+    prepare: F,
+) -> Result<Option<TelegramPreparedInput>, TelegramDeliveryError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<TelegramPreparedInput>, TelegramDeliveryError>>,
+{
+    if let Some((_, text)) = ExternalTurn::saved_user_message(
+        orchestrator,
+        character_id,
+        &telegram_request_id(chat_id, message_id),
+    )
+    .await?
+    {
+        return Ok(Some(TelegramPreparedInput { text, image: None }));
+    }
+    prepare().await
+}
+
 async fn begin_telegram_turn(
     orchestrator: &AIOrchestrator,
     character_id: &str,
@@ -450,8 +485,7 @@ async fn begin_telegram_turn(
         Some(SessionMode::New { conversation_id }) => conversation_id.clone(),
         _ => persistence::external_identity("telegram", &[character_id, &chat_key]),
     };
-    let request_id =
-        persistence::external_identity("telegram", &[&chat_key, &message_id.to_string()]);
+    let request_id = telegram_request_id(chat_id, message_id);
     ExternalTurn::begin(
         orchestrator,
         character_id,
@@ -641,11 +675,27 @@ async fn trigger_telegram_memory_tasks(
     }
 }
 
+enum TelegramTextInput<'a> {
+    Text(&'a str),
+    Voice,
+}
+
 /// Handle a plain text message — run through the LLM pipeline and reply.
 async fn handle_text(
     bot: &Bot,
     msg: &Message,
     text: &str,
+    config: &Arc<TelegramConfig>,
+    sessions: &Sessions,
+    app: &tauri::AppHandle,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    handle_text_input(bot, msg, TelegramTextInput::Text(text), config, sessions, app).await
+}
+
+async fn handle_text_input(
+    bot: &Bot,
+    msg: &Message,
+    input: TelegramTextInput<'_>,
     config: &Arc<TelegramConfig>,
     sessions: &Sessions,
     app: &tauri::AppHandle,
@@ -683,6 +733,24 @@ async fn handle_text(
         &isolated
     } else {
         &*orchestrator
+    };
+    // Resolve voice input under the same activation guard and character binding
+    // as persistence. Redelivery never depends on STT availability or output.
+    let transcript;
+    let text = match input {
+        TelegramTextInput::Text(text) => text,
+        TelegramTextInput::Voice => {
+            let Some(prepared) =
+                prepare_telegram_media_input(orchestrator, &char_id, chat_id.0, msg.id.0, || {
+                    transcribe_telegram_voice(bot, msg, app)
+                })
+                .await?
+            else {
+                return Ok(());
+            };
+            transcript = prepared.text;
+            &transcript
+        }
     };
     let turn = begin_telegram_turn(
         orchestrator,
@@ -900,7 +968,7 @@ async fn handle_text(
     }, &TelegramDelivery { bot, chat_id, app }).await
 }
 
-/// Handle voice messages — download, transcribe via STT, then process as text.
+/// Handle voice messages with the same character binding as text messages.
 async fn handle_voice(
     bot: &Bot,
     msg: &Message,
@@ -908,6 +976,14 @@ async fn handle_voice(
     sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    handle_text_input(bot, msg, TelegramTextInput::Voice, config, sessions, app).await
+}
+
+async fn transcribe_telegram_voice(
+    bot: &Bot,
+    msg: &Message,
+    app: &tauri::AppHandle,
+) -> Result<Option<TelegramPreparedInput>, TelegramDeliveryError> {
     let chat_id = msg.chat.id;
     let voice = msg.voice().ok_or("No voice data")?;
 
@@ -917,7 +993,7 @@ async fn handle_voice(
             bot.send_message(chat_id, "⚠️ STT service not available.")
                 .await
                 .ok();
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -938,7 +1014,7 @@ async fn handle_voice(
             bot.send_message(chat_id, "⚠️ Failed to transcribe voice message.")
                 .await
                 .ok();
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -946,11 +1022,13 @@ async fn handle_voice(
         bot.send_message(chat_id, "🔇 (Could not recognize speech)")
             .await
             .ok();
-        return Ok(());
+        return Ok(None);
     }
 
-    // Process as regular text
-    handle_text(bot, msg, &transcription, config, sessions, app).await
+    Ok(Some(TelegramPreparedInput {
+        text: transcription,
+        image: None,
+    }))
 }
 
 /// Handle photo messages — download image, convert to base64, send to LLM with vision.
@@ -984,22 +1062,6 @@ async fn handle_photo(
         .enter_chat_turn()
         .map_err(|e| format!("Character activation is in progress: {e}"))?;
 
-    // Download photo file
-    let file = bot.get_file(&photo.file.id).await?;
-    let mut buf = Vec::new();
-    teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
-
-    // Convert to base64 data URL
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-    // Detect mime from file extension or default to jpeg
-    let mime = if file.path.ends_with(".png") {
-        "image/png"
-    } else {
-        "image/jpeg"
-    };
-    let data_url = format!("data:{};base64,{}", mime, b64);
-
     // Use caption as the user message, or a default prompt
     let caption = msg
         .caption()
@@ -1027,6 +1089,26 @@ async fn handle_photo(
     } else {
         &*orchestrator
     };
+    let prepared =
+        prepare_telegram_media_input(orchestrator, &char_id, chat_id.0, msg.id.0, || async {
+            let file = bot.get_file(&photo.file.id).await?;
+            let mut buf = Vec::new();
+            teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+            let mime = if file.path.ends_with(".png") {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+            Ok(Some(TelegramPreparedInput {
+                text: caption,
+                image: Some(format!("data:{mime};base64,{b64}")),
+            }))
+        })
+        .await?
+        .ok_or("No prepared Telegram photo")?;
+    let caption = prepared.text;
     let turn = begin_telegram_turn(
         orchestrator,
         &char_id,
@@ -1047,6 +1129,8 @@ async fn handle_photo(
             images: false,
         }, &TelegramDelivery { bot, chat_id, app }).await;
     }
+
+    let data_url = prepared.image.ok_or("New Telegram photo has no image")?;
 
     // Sync user message to desktop UI
     let _ = app.emit(
@@ -1624,6 +1708,265 @@ mod tests {
             delivery,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn telegram_media_replay_reuses_committed_input_before_preparation() {
+        for photos in [false, true] {
+            for fail_save in [false, true] {
+                let state = AIOrchestrator::new("sqlite::memory:")
+                    .await
+                    .unwrap()
+                    .fork_with_isolated_history()
+                    .await;
+                let sessions = Sessions::default();
+                let delivery = RecordingDelivery::default();
+                let generations = std::sync::atomic::AtomicUsize::new(0);
+                let preparations = std::sync::atomic::AtomicUsize::new(0);
+                let original = "  Original transcript, with punctuation!\n";
+                let input = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+                    preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Some(TelegramPreparedInput {
+                        text: original.into(),
+                        image: photos.then(|| "data:image/jpeg;base64,aW1hZ2U=".into()),
+                    }))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(input.image.is_some(), photos);
+                if fail_save {
+                    sqlx::query("CREATE TRIGGER reject_media_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply save fault'); END")
+                        .execute(&state.db).await.unwrap();
+                }
+                let first = delivery_attempt(
+                    &state,
+                    &sessions,
+                    &input.text,
+                    photos,
+                    &generations,
+                    &delivery,
+                )
+                .await;
+                assert_eq!(first.is_err(), fail_save);
+                let original_conversation: String = sqlx::query_scalar(
+                    "SELECT conversation_id FROM conversation_messages WHERE role = 'user'",
+                )
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+                // Reproduce the old path: a second STT result with only spacing
+                // and punctuation changes is rejected before reply recovery.
+                let error = begin_telegram_turn(
+                    &state,
+                    "default",
+                    10,
+                    1,
+                    "Original transcript with punctuation",
+                    false,
+                    &sessions,
+                )
+                .await
+                .err()
+                .unwrap();
+                // The public error intentionally redacts SQLite details.
+                assert!(matches!(error, KokoroError::ChatPersistence(_)));
+                // Both a new /new session and a fresh request orchestrator must
+                // still recover the original request's transcript and target.
+                start_new_telegram_session(&state, &sessions, "default", ChatId(10)).await;
+                if fail_save {
+                    // A drifted second STT result must not be attempted, even
+                    // while the final SQLite write is still failing.
+                    let fresh = state.fork_with_isolated_history().await;
+                    let replay = prepare_telegram_media_input(&fresh, "default", 10, 1, || async {
+                        preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(Some(TelegramPreparedInput {
+                            text: "Original transcript with punctuation".into(),
+                            image: None,
+                        }))
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(replay.text, original);
+                    assert!(delivery_attempt(
+                        &fresh,
+                        &sessions,
+                        &replay.text,
+                        photos,
+                        &generations,
+                        &delivery
+                    )
+                    .await
+                    .is_err());
+                    sqlx::query("DROP TRIGGER reject_media_reply")
+                        .execute(&state.db)
+                        .await
+                        .unwrap();
+                }
+                for _ in 0..2 {
+                    let fresh = state.fork_with_isolated_history().await;
+                    let replay = prepare_telegram_media_input(&fresh, "default", 10, 1, || async {
+                        preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Err(std::io::Error::other("STT unavailable / Telegram file expired").into())
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(replay.text, original);
+                    assert!(replay.image.is_none());
+                    delivery_attempt(
+                        &fresh,
+                        &sessions,
+                        &replay.text,
+                        photos,
+                        &generations,
+                        &delivery,
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert_eq!(preparations.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(
+                    delivery.texts.lock().unwrap().len(),
+                    if fail_save { 2 } else { 3 }
+                );
+                assert_eq!(delivery.voices.lock().unwrap().len(), 1);
+                assert_eq!(delivery.images.lock().unwrap().len(), usize::from(!photos));
+                let rows: Vec<(String, String, String)> = sqlx::query_as(
+                    "SELECT conversation_id, role, content FROM conversation_messages ORDER BY id",
+                )
+                .fetch_all(&state.db)
+                .await
+                .unwrap();
+                assert_eq!(
+                    rows,
+                    [
+                        (
+                            original_conversation.clone(),
+                            "user".into(),
+                            original.into()
+                        ),
+                        (
+                            original_conversation,
+                            "assistant".into(),
+                            "**answer** [IMAGE_PROMPT:a forest]".into()
+                        ),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_media_preparation_failure_keeps_new_input_retryable() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
+        // Download/network failure and unrecognized/unavailable STT produce no
+        // user row, so the same platform message can be prepared successfully.
+        assert!(
+            prepare_telegram_media_input(&state, "default", 10, 1, || async {
+                Err(std::io::Error::other("download failed").into())
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            prepare_telegram_media_input(&state, "default", 10, 1, || async { Ok(None) })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let input = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+            Ok(Some(TelegramPreparedInput {
+                text: "retry succeeded".into(),
+                image: None,
+            }))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let sessions = Sessions::default();
+        let turn = begin_telegram_turn(&state, "default", 10, 1, &input.text, false, &sessions)
+            .await
+            .unwrap();
+        turn.save_reply(&state, "answer", None).await.unwrap();
+        let replay = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+            panic!("completed request must not download or transcribe again")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.text, "retry succeeded");
+    }
+
+    #[tokio::test]
+    async fn telegram_saved_media_input_is_scoped_to_character_chat_and_message() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .fork_with_isolated_history()
+            .await;
+        let sessions = Sessions::default();
+        sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES ('other', 'Other', '', '', 'test', 1, 1)")
+            .execute(&state.db).await.unwrap();
+        for (character, chat, message, transcript) in [
+            ("default", 10, 1, "original"),
+            ("other", 10, 1, "other character"),
+            ("default", 11, 1, "other chat"),
+            ("default", 10, 2, "other message"),
+        ] {
+            let input = prepare_telegram_media_input(&state, character, chat, message, || async {
+                Ok(Some(TelegramPreparedInput {
+                    text: transcript.into(),
+                    image: None,
+                }))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(input.text, transcript);
+            let turn = begin_telegram_turn(
+                &state,
+                character,
+                chat,
+                message,
+                &input.text,
+                false,
+                &sessions,
+            )
+            .await
+            .unwrap();
+            turn.save_reply(&state, "answer", None).await.unwrap();
+            let replay = prepare_telegram_media_input(&state, character, chat, message, || async {
+                panic!("scoped committed input must be reused")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(replay.text, transcript);
+        }
+        // Read errors cannot be misinterpreted as a fresh request and trigger STT.
+        state.db.close().await;
+        let error = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+            panic!("failed persisted-input read must not trigger media work")
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<KokoroError>(),
+            Some(KokoroError::ChatPersistence(_))
+        ));
     }
 
     #[tokio::test]
