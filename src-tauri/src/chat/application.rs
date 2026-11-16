@@ -1214,6 +1214,10 @@ pub struct ChatRequest {
     /// Compatibility identities calculated by trusted transport adapters only.
     #[serde(skip)]
     pub(crate) previous_request_ids: Vec<String>,
+    /// Journal eviction may reload a committed reply, but must never regenerate
+    /// an old request whose persisted history was subsequently deleted.
+    #[serde(skip)]
+    pub(crate) require_saved_external_reply: bool,
     /// One-shot vision context, excluded from the journal and history previews.
     pub camera_frame: Option<String>,
     pub character_id: Option<String>,
@@ -2253,9 +2257,10 @@ pub(crate) async fn submit_chat(
         .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
         .inner()
         .clone();
-    let (created, outcome) = runtime
+    let (created, outcome, replay_only) = runtime
         .begin_with_policy(&request, policy)
         .map_err(KokoroError::Chat)?;
+    request.require_saved_external_reply = replay_only;
     if created {
         let execution_app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -2813,6 +2818,11 @@ async fn execute_chat_with_pending(
             let saved: Option<(String, Option<String>)> = sqlx::query_as(
                 "SELECT m.content,m.metadata FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.character_id=? AND m.role='user' AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?"
             ).bind(&char_id).bind(format!("{client_request_id}:user")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+            if request.require_saved_external_reply && saved.is_none() {
+                return Err(KokoroError::Chat(
+                    "chat_request_conflict: the committed reply is no longer available".into(),
+                ));
+            }
             if let Some((text, metadata)) = saved {
                 let metadata = metadata
                     .as_deref()
@@ -3468,7 +3478,7 @@ async fn execute_chat_with_pending(
             )
             .await;
             let _ = policy.emit(app, "chat-turn-text-complete", serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation})).await;
-            let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND json_extract(metadata,'$.chat_save_id')=?")
+            let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
                 .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
             return Ok(StreamChatResponse {
                 text: displayed_text,
@@ -4549,7 +4559,7 @@ async fn execute_chat_with_pending(
             .with_save_id(format!("{client_request_id}:assistant")));
         let work = turn.save_reply_batch(state, &canonical_response, final_translation.as_deref(), external_media.clone(), pending_tool_messages).await?;
         super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, llm_state, &memory_target_language, work).await;
-        let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND json_extract(metadata,'$.chat_save_id')=?")
+        let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
             .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
         let _ = policy.emit(app, "chat-turn-finish", serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"})).await;
         return Ok(Some(row));

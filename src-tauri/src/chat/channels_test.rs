@@ -784,6 +784,7 @@ async fn verify_persisted_external_contracts(
         sqlx::query("INSERT INTO characters (id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,?, '', '', 'test',1,1)")
             .bind(character).bind(character).execute(&state.db).await.unwrap();
     }
+    verify_legacy_metadata_and_retired_media(app, provider, tools).await;
     let body = json!({"request_id":"format-committed","conversation_id":"review-contract","text":"[formatted-replay]"});
     let first = webhook_body(app, body.clone()).await;
     assert_eq!(first.0, 200, "{first:?}");
@@ -1105,6 +1106,169 @@ async fn verify_persisted_external_contracts(
         .unwrap();
     provider.prompts.lock().unwrap().clear();
     tools.store(0, Ordering::Relaxed);
+}
+
+async fn verify_legacy_metadata_and_retired_media(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+    tools: &AtomicUsize,
+) {
+    use crate::chat::application::StreamChatResponse;
+    use crate::chat::persistence::{ExternalReplyImage, ExternalReplyMedia};
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    sqlx::query("INSERT INTO conversations (id,character_id,created_at,updated_at) VALUES ('legacy-replay','test-character','now','now')")
+        .execute(&state.db).await.unwrap();
+    for role in ["user", "assistant"] {
+        for metadata in [None, Some(""), Some("not-json"), Some("{"), Some("null")] {
+            sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES ('legacy-replay',?,'legacy text',?,'now')")
+                .bind(role).bind(metadata).execute(&state.db).await.unwrap();
+        }
+    }
+    let continued = SessionMode::Desktop {
+        character_id: "test-character".into(),
+        conversation_id: "legacy-replay".into(),
+    };
+    let first = submit_message(
+        app,
+        ChatId(778),
+        1,
+        "fresh legacy turn",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    assert!(first.assistant_message_id.is_some());
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    runtime.forget_completed_for_restart_test();
+    let replay = submit_message(
+        app,
+        ChatId(778),
+        1,
+        "fresh legacy turn",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.text, first.text);
+    assert_eq!(replay.assistant_message_id, first.assistant_message_id);
+    assert!(!replay.newly_committed);
+
+    // Persist fixture media after the reply entered the journal: seeing it on
+    // redelivery proves eviction actually reloads SQLite instead of cached data.
+    let media = ExternalReplyMedia {
+        images: vec![ExternalReplyImage {
+            prompt: "saved picture".into(),
+            mime_type: "image/png".into(),
+            file_name: "saved.png".into(),
+            data_base64: "AQID".into(),
+        }],
+        output_warnings: vec!["fixture warning".into()],
+        ..Default::default()
+    };
+    sqlx::query("UPDATE conversation_messages SET metadata=json_set(metadata,'$.external_reply_media',json(?)) WHERE id=?")
+        .bind(serde_json::to_string(&media).unwrap()).bind(first.assistant_message_id)
+        .execute(&state.db).await.unwrap();
+    let evict = |round| {
+        for index in 0..256 {
+            let id = format!("eviction-{round}-{index}");
+            runtime
+                .begin(&ChatRequest {
+                    message: "fixture".into(),
+                    client_request_id: Some(id.clone()),
+                    ..Default::default()
+                })
+                .unwrap();
+            runtime.complete(
+                &id,
+                Ok(StreamChatResponse {
+                    status: Some("completed".into()),
+                    ..Default::default()
+                }),
+            );
+        }
+        assert!(runtime
+            .turn_scope(first.client_request_id.as_deref().unwrap())
+            .is_none());
+    };
+    evict(0);
+    let conflict = submit_message(
+        app,
+        ChatId(778),
+        1,
+        "changed text",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await;
+    assert!(
+        matches!(conflict, Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+    );
+    let replay = submit_message(
+        app,
+        ChatId(778),
+        1,
+        "fresh legacy turn",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.text, first.text);
+    assert_eq!(replay.external_media, media);
+    assert_eq!(replay.output_warnings, media.output_warnings);
+    assert_eq!(replay.assistant_message_id, first.assistant_message_id);
+    assert!(!replay.newly_committed);
+
+    // Deleting history must not turn a compact tombstone into a fresh request.
+    evict(1);
+    sqlx::query("DELETE FROM conversation_messages WHERE conversation_id='legacy-replay'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let missing = submit_message(
+        app,
+        ChatId(778),
+        1,
+        "fresh legacy turn",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await;
+    assert!(
+        matches!(missing, Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+    );
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed)
+        ),
+        before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id='legacy-replay'"
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap(),
+        0
+    );
+    sqlx::query("DELETE FROM conversations WHERE id='legacy-replay'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    runtime.forget_completed_for_restart_test();
 }
 
 async fn verify_shared_native_memory_origin(

@@ -658,7 +658,7 @@ impl ExternalTurn {
             create,
         };
         let previous_metadata: Option<Option<String>> = sqlx::query_scalar(
-            "SELECT metadata FROM conversation_messages WHERE conversation_id=? AND role='user' AND json_extract(metadata,'$.chat_save_id')=?"
+            "SELECT metadata FROM conversation_messages WHERE conversation_id=? AND role='user' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?"
         ).bind(&target.conversation_id).bind(&save_id).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
         let metadata = previous_metadata.unwrap_or_else(|| metadata.map(|value| value.to_string()));
         let saved = state

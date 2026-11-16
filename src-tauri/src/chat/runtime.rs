@@ -49,6 +49,12 @@ pub struct ChatTurnSnapshot {
 }
 
 type Outcome = Result<StreamChatResponse, KokoroError>;
+enum RetiredOutcome {
+    Terminal(Box<Outcome>),
+    /// Only the fingerprint survives eviction. The response and its media are
+    /// reloaded from SQLite under the normal admission and ownership guards.
+    SavedExternalReply,
+}
 struct Entry {
     fingerprint: String,
     desktop: bool,
@@ -69,7 +75,7 @@ pub(crate) enum SaveRetry {
 struct Journal {
     revision: u64,
     entries: HashMap<String, Entry>,
-    retired: HashMap<String, (String, Outcome)>,
+    retired: HashMap<String, (String, RetiredOutcome)>,
     abandoned_drafts: HashMap<String, HashSet<String>>,
 }
 #[derive(Default)]
@@ -100,12 +106,16 @@ impl ChatRuntimeState {
         ));
         for (id, entry) in std::mem::take(&mut journal.entries) {
             entry.outcome.send_replace(Some(replaced.clone()));
-            journal
-                .retired
-                .insert(id, (entry.fingerprint, replaced.clone()));
+            journal.retired.insert(
+                id,
+                (
+                    entry.fingerprint,
+                    RetiredOutcome::Terminal(Box::new(replaced.clone())),
+                ),
+            );
         }
         for (_, outcome) in journal.retired.values_mut() {
-            *outcome = replaced.clone();
+            *outcome = RetiredOutcome::Terminal(Box::new(replaced.clone()));
         }
         journal.revision += 1;
         drop(journal);
@@ -156,13 +166,14 @@ impl ChatRuntimeState {
         request: &ChatRequest,
     ) -> Result<(bool, watch::Receiver<Option<Outcome>>), String> {
         self.begin_with_policy(request, ChatPolicy::Desktop)
+            .map(|(created, outcome, _)| (created, outcome))
     }
 
     pub(crate) fn begin_with_policy(
         &self,
         request: &ChatRequest,
         policy: ChatPolicy,
-    ) -> Result<(bool, watch::Receiver<Option<Outcome>>), String> {
+    ) -> Result<(bool, watch::Receiver<Option<Outcome>>, bool), String> {
         let id = request
             .client_request_id
             .as_deref()
@@ -177,6 +188,7 @@ impl ChatRuntimeState {
         }) {
             return Err("chat_draft_abandoned: the draft was restored before admission".into());
         }
+        let mut replay_only = false;
         if let Some((original, result)) = journal.retired.get(id) {
             if original != &fingerprint {
                 return Err(
@@ -184,8 +196,13 @@ impl ChatRuntimeState {
                         .into(),
                 );
             }
-            let (_, receiver) = watch::channel(Some(result.clone()));
-            return Ok((false, receiver));
+            match result {
+                RetiredOutcome::Terminal(result) => {
+                    let (_, receiver) = watch::channel(Some(result.as_ref().clone()));
+                    return Ok((false, receiver, false));
+                }
+                RetiredOutcome::SavedExternalReply => replay_only = true,
+            }
         }
         if let Some(entry) = journal.entries.get(id) {
             if entry.fingerprint != fingerprint {
@@ -196,7 +213,8 @@ impl ChatRuntimeState {
             }
             let retryable = !entry.desktop
                 && entry.outcome.borrow().as_ref().is_some_and(|outcome| {
-                    matches!(outcome, Err(KokoroError::ChatPersistence(_)))
+                    (replay_only && outcome.is_err())
+                        || matches!(outcome, Err(KokoroError::ChatPersistence(_)))
                         || (outcome.is_err()
                             && entry.snapshot.user_message_id.is_none()
                             && !entry
@@ -207,7 +225,7 @@ impl ChatRuntimeState {
                                 .contains("chat_turn_busy"))
                 });
             if !retryable {
-                return Ok((false, entry.outcome.subscribe()));
+                return Ok((false, entry.outcome.subscribe(), replay_only));
             }
             journal.entries.remove(id);
         }
@@ -231,7 +249,16 @@ impl ChatRuntimeState {
                         || (entry.snapshot.user_message_id.is_some()
                             && !matches!(outcome, Err(KokoroError::ChatPersistence(_))))
                     {
-                        journal.retired.insert(id, (entry.fingerprint, outcome));
+                        let retired = if !entry.desktop
+                            && outcome
+                                .as_ref()
+                                .is_ok_and(|reply| reply.assistant_message_id.is_some())
+                        {
+                            RetiredOutcome::SavedExternalReply
+                        } else {
+                            RetiredOutcome::Terminal(Box::new(outcome))
+                        };
+                        journal.retired.insert(id, (entry.fingerprint, retired));
                     }
                 }
             }
@@ -280,7 +307,7 @@ impl ChatRuntimeState {
                 user_save_retry_in_flight: false,
             },
         );
-        Ok((true, rx))
+        Ok((true, rx, replay_only))
     }
 
     #[cfg(test)]
@@ -1368,6 +1395,63 @@ mod tests {
         let mut changed = request("0");
         changed.message = "collision".into();
         assert!(journal.begin(&changed).is_err());
+    }
+    #[test]
+    fn external_retirement_drops_reply_payloads_but_keeps_replay_and_import_guards() {
+        let runtime = ChatRuntimeState::default();
+        let policy = ChatPolicy::External {
+            create_conversation: true,
+            image_output: true,
+            source: "webhook",
+        };
+        for index in 0..300 {
+            let id = index.to_string();
+            runtime.begin_with_policy(&request(&id), policy).unwrap();
+            let mut reply = result(&id).unwrap();
+            reply
+                .external_media
+                .images
+                .push(super::super::persistence::ExternalReplyImage {
+                    prompt: "generated image".into(),
+                    mime_type: "image/png".into(),
+                    file_name: "image.png".into(),
+                    data_base64: "A".repeat(64 * 1024),
+                });
+            runtime.complete(&id, Ok(reply));
+        }
+        {
+            let journal = runtime.0.lock().unwrap();
+            assert_eq!(journal.entries.len(), 256);
+            assert_eq!(journal.retired.len(), 44);
+            assert!(journal.retired.values().all(|(fingerprint, outcome)| {
+                fingerprint.len() == 64 && matches!(outcome, RetiredOutcome::SavedExternalReply)
+            }));
+        }
+        let mut changed = request("0");
+        changed.message = "different input".into();
+        assert!(runtime.begin_with_policy(&changed, policy).is_err());
+        let (created, _, replay_only) = runtime.begin_with_policy(&request("0"), policy).unwrap();
+        assert!(created && replay_only);
+        let (duplicate, _, replay_only) = runtime.begin_with_policy(&request("0"), policy).unwrap();
+        assert!(
+            !duplicate && replay_only,
+            "Concurrent replays share one worker"
+        );
+        runtime.complete(
+            "0",
+            Err(KokoroError::Chat("chat_turn_busy: fixture".into())),
+        );
+        let (retry, _, replay_only) = runtime.begin_with_policy(&request("0"), policy).unwrap();
+        assert!(
+            retry && replay_only,
+            "A busy reload must not poison a saved reply"
+        );
+        runtime.invalidate_imported_history();
+        let (created, response, _) = runtime.begin_with_policy(&request("0"), policy).unwrap();
+        assert!(!created);
+        assert!(
+            matches!(response.borrow().as_ref(), Some(Err(KokoroError::Chat(error))) if error.starts_with("chat_history_replaced:"))
+        );
     }
     #[test]
     fn cancellation_completion_race_has_one_terminal_outcome() {
