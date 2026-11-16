@@ -657,17 +657,21 @@ service before the request is sent to the LLM. An image-only request uses the
 placeholder `The user sent an image:` when no caption is supplied.
 
 Use the same `request_id` when retrying delivery of the same message. Kokoro
-scopes it to the webhook conversation identity and returns the original chat
-outcome without rerunning the model or tools. Reusing an ID with different
-input returns HTTP 409. After a process restart, an ID whose user message
-already reached storage also returns HTTP 409. Omit `request_id` to submit
-each HTTP request as a new chat turn.
+scopes it to the webhook conversation identity. Once the final reply is
+committed, duplicate delivery can reload it from SQLite, including after a
+process restart, without rerunning the model or tools. If only the user message
+is committed and no saved reply or recoverable pending batch remains, the
+request is rejected instead of generating again. Pending save recovery is
+limited to the current process and its bounded cache. Reusing an ID with
+different input returns HTTP 409. Omit `request_id` to submit each HTTP request
+as a new chat turn.
 
 Audio identity uses the submitted bytes and format, together with the text,
-images, and conversation scope. Duplicate requests share the original outcome
-without transcribing again, including while the first transcription is pending.
-Transcription failures are retained for that request ID; use a new ID for a new
-attempt after correcting the STT configuration.
+images, and conversation scope. Concurrent duplicates share the in-flight
+transcription and chat outcome. Once the input is committed, later redelivery
+reuses it without transcribing again. If initial STT or media preparation fails
+before the user message is committed, the same ID and input can be retried
+after correcting the service configuration.
 
 ### `WebhookReply`
 
