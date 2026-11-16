@@ -426,8 +426,23 @@ impl ChatRuntimeState {
     }
 
     pub(crate) fn prepare_save_retry(&self, id: &str, pending: PendingChatSave) {
-        if let Some(entry) = self.0.lock().unwrap().entries.get_mut(id) {
-            entry.pending_save = Some(pending);
+        const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+        let mut journal = self.0.lock().unwrap();
+        if let Some(entry) = journal.entries.get_mut(id) {
+            entry.pending_save = (pending.byte_len() <= MAX_PENDING_BYTES).then_some(pending);
+        }
+        while journal.entries.values().filter_map(|entry| entry.pending_save.as_ref())
+            .map(PendingChatSave::byte_len).sum::<usize>() > MAX_PENDING_BYTES
+        {
+            let oldest = journal.entries.iter().filter(|(_, entry)| entry.pending_save.is_some())
+                .min_by_key(|(_, entry)| entry.snapshot.revision).map(|(id, _)| id.clone());
+            let Some(oldest) = oldest else { break; };
+            journal.revision += 1;
+            let revision = journal.revision;
+            let entry = journal.entries.get_mut(&oldest).unwrap();
+            entry.pending_save = None;
+            entry.snapshot.persistence_retryable = false;
+            entry.snapshot.revision = revision;
         }
     }
 
@@ -738,6 +753,39 @@ pub fn speak_completed_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pending_with_memory_bytes(bytes: usize) -> PendingChatSave {
+        PendingChatSave {
+            target: super::super::persistence::ConversationTarget { character_id:"character-a".into(), conversation_id:"conversation-a".into(), create:false },
+            messages:vec![], expected_revision:0, turn_id:"turn".into(), user_message_id:Some(1), creation_generation:None,
+            text:"answer".into(), has_assistant_text:true, speech:None,
+            post_commit:super::super::post_commit::DesktopPostCommit {
+                character_id:"character-a".into(), conversation_id:Some("conversation-a".into()), generation:0, database_generation:0,
+                provider:Arc::new(crate::llm::provider::OpenAIProvider::new("fixture".into(),Some("http://127.0.0.1:9".into()),None)),
+                memory:Some(super::super::post_commit::DesktopMemoryWork {
+                    epoch:0, count:5, history:vec![crate::ai::context::Message {role:"user".into(),content:"x".repeat(bytes),metadata:None}],
+                    language:"en".into(),event:None,structured:false,
+                }), background:None,
+            },
+        }
+    }
+
+    #[test]
+    fn deferred_history_counts_toward_the_bounded_save_retry_cache() {
+        let runtime = ChatRuntimeState::default();
+        for id in ["first","second"] {
+            runtime.begin(&request(id)).unwrap();
+            runtime.prepare_save_retry(id,pending_with_memory_bytes(9*1024*1024));
+            runtime.complete(id,Err(KokoroError::ChatPersistence("fixture".into())));
+        }
+        assert!(runtime.save_retry("first").is_err());
+        assert!(!runtime.turn_scope("first").unwrap().persistence_retryable);
+        assert!(matches!(runtime.save_retry("second"),Ok(SaveRetry::Pending(_))));
+        runtime.begin(&request("oversized")).unwrap();
+        runtime.prepare_save_retry("oversized",pending_with_memory_bytes(17*1024*1024));
+        runtime.complete("oversized",Err(KokoroError::ChatPersistence("fixture".into())));
+        assert!(runtime.save_retry("oversized").is_err());
+    }
+
     fn request(id: &str) -> ChatRequest {
         serde_json::from_value(serde_json::json!({"message":"question", "client_request_id":id,"character_id":"character-a","conversation_id":"conversation-a"})).unwrap()
     }

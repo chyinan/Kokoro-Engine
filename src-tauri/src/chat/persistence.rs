@@ -363,6 +363,16 @@ pub(crate) struct PendingChatSave {
     pub text: String,
     pub has_assistant_text: bool,
     pub speech: Option<crate::characters::activation::ResolvedTts>,
+    pub post_commit: super::post_commit::DesktopPostCommit,
+}
+
+impl PendingChatSave {
+    pub(crate) fn byte_len(&self) -> usize {
+        self.text.len() + self.messages.iter().map(|message| {
+            message.content.len() + message.metadata.as_deref().map_or(0, str::len)
+                + message.save_id.as_deref().map_or(0, str::len)
+        }).sum::<usize>() + self.post_commit.byte_len()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -510,6 +520,21 @@ impl ExternalTurn {
         text: &str,
         continue_selected: bool,
     ) -> Result<Self, KokoroError> {
+        Self::begin_with_input_text(state, character_id, external_conversation_id, request_id, text, continue_selected, None).await
+    }
+
+    /// Media transports retain the caller's text separately from fallible STT.
+    /// Plain-text callers still compare their complete input at the write boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn begin_with_input_text(
+        state: &crate::ai::context::AIOrchestrator,
+        character_id: &str,
+        external_conversation_id: String,
+        request_id: String,
+        text: &str,
+        continue_selected: bool,
+        input_text: Option<&str>,
+    ) -> Result<Self, KokoroError> {
         validate_user_input(text)?;
         let _selection = state.conversation_switch_lock.lock().await;
         let selected = state.current_conversation_id.lock().await.clone();
@@ -541,7 +566,7 @@ impl ExternalTurn {
         let saved = state
             .save_external_messages_locked(
                 &target,
-                &[MessageWrite::new("user", text, None).with_save_id(save_id)],
+                &[MessageWrite::new("user", text, input_text.map(|text| serde_json::json!({"external_input_text":text}).to_string())).with_save_id(save_id)],
                 select_new && create,
                 None,
             )

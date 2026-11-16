@@ -14,10 +14,9 @@ use crate::actions::{
 use crate::ai::context::AIOrchestrator;
 use crate::ai::context::Message;
 use crate::ai::memory_event_ingress::{
-    build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
+    select_memory_ingress_decision, should_use_structured_extraction,
     MemoryEventIngressOptions,
 };
-use crate::ai::memory_extractor;
 use crate::chat::persistence::{self, ConversationTarget, MessageWrite, PendingChatSave, PendingUserSave};
 use crate::chat::retry::{FailureRetry, Regeneration, RegenerationPlan, ReplyRegeneration};
 use crate::chat::tags::{
@@ -2119,6 +2118,8 @@ struct PreparedChatTurn {
     conversation_id: Option<String>,
     user_message_id: Option<i64>,
     bound_generation: u64,
+    completion_generation: u64,
+    memory_epoch: u64,
     regeneration: Option<RegenerationPlan>,
     selected_vision_observation: Option<crate::vision::context::VisionObservation>,
     prompt_messages: Vec<crate::ai::context::Message>,
@@ -2294,7 +2295,9 @@ pub async fn retry_chat_persistence(
             client_request_id: Some(client_request_id.clone()),
             status: Some("completed".into()),
         };
+        drop(_selection);
         if let Some(snapshot) = runtime.complete_save_retry(&client_request_id, response.clone()) {
+            pending.post_commit.dispatch(app.clone());
             let _ = app.emit("chat-runtime-changed", snapshot);
             let _ = crate::chat::runtime::emit_chat_event(&app, "chat-turn-finish", serde_json::json!({
                 "turn_id": pending.turn_id,
@@ -2485,7 +2488,7 @@ async fn execute_chat(
         // 2. Update History with User Message under conversation_switch_lock
         let system_provider = llm_state.system_provider().await;
 
-        let (conversation_id, user_message_id, history_snapshot, bound_generation, regeneration) = 'bind: {
+        let (conversation_id, user_message_id, history_snapshot, bound_generation, completion_generation, memory_epoch, regeneration) = 'bind: {
             let _switch_guard = state.conversation_switch_lock.lock().await;
             let current_conv_id = state.current_conversation_id.lock().await.clone();
             let current_generation = state.current_conversation_generation();
@@ -2546,7 +2549,7 @@ async fn execute_chat(
                 let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
                 let plan = RegenerationPlan::prepare(&state, &runtime, regeneration, &char_id, conversation, &request.message).await?;
                 let history = plan.prompt_history(&request.message);
-                break 'bind (current_conv_id, Some(plan.user_message_id), history, bound_generation, Some(plan));
+                break 'bind (current_conv_id, Some(plan.user_message_id), history, bound_generation, current_generation, state.external_memory.epoch(), Some(plan));
             }
 
             let trailing_visible_user = if request.regenerate {
@@ -2683,7 +2686,7 @@ async fn execute_chat(
             let history_snapshot: Vec<crate::ai::context::Message> =
                 state.history.lock().await.iter().cloned().collect();
 
-            (cid, mid, history_snapshot, bound_generation, None)
+            (cid, mid, history_snapshot, bound_generation, state.current_conversation_generation(), state.external_memory.epoch(), None)
         };
 
         if let Ok(mut guard) = active_conv_id_for_prep.lock() {
@@ -2831,6 +2834,8 @@ async fn execute_chat(
             conversation_id,
             user_message_id,
             bound_generation,
+            completion_generation,
+            memory_epoch,
             regeneration,
             selected_vision_observation,
             prompt_messages,
@@ -2913,6 +2918,8 @@ async fn execute_chat(
         mut conversation_id,
         user_message_id,
         bound_generation,
+        completion_generation,
+        memory_epoch,
         regeneration,
         selected_vision_observation,
         prompt_messages,
@@ -4010,6 +4017,43 @@ async fn execute_chat(
         ).await;
     }
 
+    let upgrade_config = crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
+    let ingress_options = MemoryEventIngressOptions {
+        enabled:upgrade_config.event_trigger_enabled,
+        event_cooldown_secs:upgrade_config.event_cooldown_secs,
+        intent_routing_enabled:upgrade_config.intent_routing_enabled,
+    };
+    let memory = {
+        let _selection = state.conversation_switch_lock.lock().await;
+        if !request.hidden && state.is_memory_enabled() && state.external_memory.epoch() == memory_epoch
+            && state.current_conversation_generation() == completion_generation
+            && conversation_id.is_some() && *state.current_conversation_id.lock().await == conversation_id
+        {
+            let mut history = state.get_recent_memory_history(10).await;
+            if !full_response.is_empty() {
+                history.push(crate::ai::context::Message { role:"assistant".into(), content:canonical_response.clone(), metadata:None });
+                history.drain(..history.len().saturating_sub(10));
+            }
+            Some(crate::chat::post_commit::DesktopMemoryWork {
+                epoch:memory_epoch, count:state.get_memory_trigger_count().await, history,
+                language:memory_target_language,
+                event:select_memory_ingress_decision(&request.message, &ingress_options),
+                structured:should_use_structured_extraction(upgrade_config.structured_memory_enabled, &ingress_options),
+            })
+        } else { None }
+    };
+    let mut post_commit = crate::chat::post_commit::DesktopPostCommit {
+        character_id:char_id.clone(), conversation_id:conversation_id.clone(),
+        generation:completion_generation + u64::from(conversation_id.is_none()),
+        database_generation:crate::ai::context::database_operation_generation(),
+        provider:system_provider.clone(), memory,
+        background:if request.allow_image_gen.unwrap_or(false) && !full_response.is_empty() && !bg_generated_by_tool {
+            Some(crate::chat::post_commit::DesktopBackgroundWork {
+                reply:full_response.clone(), size:window_size_state.get().await, service:imagegen_state.inner().clone(),
+            })
+        } else { None },
+    };
+
     // The assistant, its related context and native tool rows, and conversation
     // metadata become visible as committed history in one short transaction.
     if !full_response.is_empty() || !pending_tool_messages.is_empty() {
@@ -4064,7 +4108,7 @@ async fn execute_chat(
                 if let Some(expected_revision) = retry_revision {
                     let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
                     runtime.prepare_save_retry(&client_request_id, PendingChatSave {
-                        target,
+                        target: target.clone(),
                         messages,
                         expected_revision,
                         turn_id: assistant_turn_id.clone(),
@@ -4073,6 +4117,7 @@ async fn execute_chat(
                         text: full_response.clone(),
                         has_assistant_text: !full_response.is_empty(),
                         speech: speech.clone(),
+                        post_commit: { post_commit.conversation_id = Some(target.conversation_id.clone()); post_commit },
                     });
                 }
                 return Err(error);
@@ -4082,242 +4127,8 @@ async fn execute_chat(
         conversation_id = Some(target.conversation_id);
     }
 
-    // Event-driven + periodic memory extraction
-    let committed_memory_history = if !request.hidden && state.is_memory_enabled() {
-        let _selection = state.conversation_switch_lock.lock().await;
-        if conversation_id.is_some()
-            && *state.current_conversation_id.lock().await == conversation_id
-        {
-            Some(state.get_recent_memory_history(10).await)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let msg_count = state.get_message_count().await;
-    let memory_msg_count = state.get_memory_trigger_count().await;
-    let upgrade_config =
-        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
-    let ingress_options = MemoryEventIngressOptions {
-        enabled: upgrade_config.event_trigger_enabled,
-        event_cooldown_secs: upgrade_config.event_cooldown_secs,
-        intent_routing_enabled: upgrade_config.intent_routing_enabled,
-    };
-    tracing::info!(
-        target: "memory",
-        "[Memory] User message count: {}, memory trigger count: {}",
-        msg_count, memory_msg_count
-    );
-
-    if let (Some(history), Some(cid)) = (&committed_memory_history, &conversation_id) {
-            if let Some(decision) = select_memory_ingress_decision(&request.message, &ingress_options) {
-                let conversation_key = cid.clone();
-                let cooldown_key =
-                    build_cooldown_key(&char_id, &conversation_key, decision.event.event_type);
-                if state
-                    .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
-                    .await
-                {
-                    tracing::info!(
-                        target: "memory",
-                        "[Memory] Triggering event-driven extraction (trigger={}, count={})",
-                        decision.trigger_label,
-                        msg_count
-                    );
-
-                    let history = history.clone();
-                    let memory_mgr = state.memory_manager.clone();
-                    let char_id_for_mem = char_id.clone();
-                    let provider_for_mem = system_provider.clone();
-                    let memory_enabled = state.memory_enabled_flag();
-                    let observation_started_at = std::time::Instant::now();
-                    let trigger_for_observation = decision.trigger_label.to_string();
-                    let extraction_options = memory_extractor::MemoryExtractionOptions {
-                        structured_memory_enabled: should_use_structured_extraction(
-                            upgrade_config.structured_memory_enabled,
-                            &ingress_options,
-                        ),
-                        target_language: Some(memory_target_language.clone()),
-                    };
-                    tauri::async_runtime::spawn(async move {
-                        if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                            return;
-                        }
-                        let _ = memory_mgr
-                            .record_periodic_write_if_enabled(
-                                &char_id_for_mem,
-                                "chat",
-                                &trigger_for_observation,
-                                observation_started_at,
-                            )
-                            .await;
-                        memory_extractor::extract_and_store_memories_with_options(
-                            &history,
-                            &memory_mgr,
-                            provider_for_mem,
-                            char_id_for_mem,
-                            extraction_options,
-                        )
-                        .await;
-                    });
-                }
-            }
-    }
-
-    if let Some(history) = committed_memory_history.as_ref().filter(|_| memory_msg_count > 0 && memory_msg_count % 5 == 0) {
-        tracing::info!(
-            target: "memory",
-            "[Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = history.clone();
-        let memory_mgr = state.memory_manager.clone();
-        let char_id_for_mem = char_id.clone();
-        let provider_for_mem = system_provider.clone();
-        let memory_enabled = state.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_chat(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-
-    // Periodic memory consolidation (every 20 user messages)
-    if committed_memory_history.is_some() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = state.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = system_provider.clone();
-        let memory_enabled = state.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "chat",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "memory", "[Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "memory", "[Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // Background image generation: analyze reply and optionally generate a scene image
-    // Skip if the main LLM already triggered set_background via tool call
-    if request.allow_image_gen.unwrap_or(false)
-        && !full_response.is_empty()
-        && !bg_generated_by_tool
-    {
-        let imagegen_svc = imagegen_state.inner().clone();
-        let system_provider = llm_state.system_provider().await;
-        let reply_for_analysis = full_response.clone();
-        let window_for_img = app.clone();
-        let window_size = window_size_state.get().await;
-
-        tauri::async_runtime::spawn(async move {
-            let analyze_messages = vec![
-                system_message(crate::ai::prompts::BG_IMAGE_ANALYZER_PROMPT.to_string()),
-                user_text_message(format!("Character reply: {}", reply_for_analysis)),
-            ];
-
-            let json_str = match system_provider.chat(analyze_messages, None).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(target: "imagegen", "[ImageGen] BG analyzer LLM failed: {}", e);
-                    return;
-                }
-            };
-
-            let clean = json_str
-                .trim()
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```");
-
-            #[derive(serde::Deserialize)]
-            struct BgAnalysis {
-                should_generate: bool,
-                image_prompt: Option<String>,
-            }
-
-            let analysis: BgAnalysis = match serde_json::from_str(clean) {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::error!(
-                        target: "imagegen",
-                        "[ImageGen] BG analyzer parse failed: {} | raw: {}",
-                        e, json_str
-                    );
-                    return;
-                }
-            };
-
-            if !analysis.should_generate {
-                tracing::info!(target: "imagegen", "[ImageGen] BG analyzer: no image needed");
-                return;
-            }
-
-            let prompt = match analysis.image_prompt {
-                Some(p) if !p.is_empty() => p,
-                _ => return,
-            };
-
-            tracing::info!(
-                target: "imagegen",
-                "[ImageGen] BG analyzer triggered generation (prompt_chars={})",
-                prompt.chars().count()
-            );
-
-            match imagegen_svc
-                .generate(prompt.clone(), None, None, Some(window_size))
-                .await
-            {
-                Ok(result) => {
-                    let _ = window_for_img.emit("imagegen:done", &result);
-                    tracing::info!(target: "imagegen", "[ImageGen] BG image generated: {}", result.image_url);
-                }
-                Err(e) => {
-                    tracing::error!(target: "imagegen", "[ImageGen] BG generation failed: {}", e);
-                    let _ = window_for_img.emit("imagegen:error", e.to_string());
-                }
-            }
-        });
-    }
+    post_commit.conversation_id = conversation_id.clone();
+    post_commit.dispatch(app.clone());
 
         crate::chat::runtime::emit_chat_event(&app,
             "chat-turn-finish",

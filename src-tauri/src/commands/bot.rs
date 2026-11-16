@@ -839,16 +839,93 @@ fn reply_text_with_translation(reply: &BotReply) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Bind identity before transport preparation and retain the activation/database
+/// guards until generation or replay has completed.
+struct BotRequestBinding {
+    character_id: String,
+    conversation_id: String,
+    request_id: String,
+    guard: crate::ai::context::ChatTurnGuard,
+}
+
+impl BotRequestBinding {
+    async fn new(
+        state: &AIOrchestrator,
+        platform: &str,
+        character_id: Option<&str>,
+        conversation_key: Option<&str>,
+        request_id: Option<&str>,
+    ) -> Result<Self, KokoroError> {
+        let guard = state.enter_chat_turn().map_err(|e| KokoroError::Chat(format!("Character activation is in progress: {e}")))?;
+        let character_id = match character_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => resolve_webhook_character_id(Some(id), None, None),
+            None => {
+                let id = state.get_character_id().await;
+                if id.is_empty() || id == "default" {
+                    AIOrchestrator::load_active_character_id().unwrap_or_else(|| "default".into())
+                } else { id }
+            }
+        };
+        let key = conversation_key.filter(|key| !key.trim().is_empty()).unwrap_or(platform);
+        Ok(Self {
+            conversation_id: if platform == "webhook" { webhook_conversation_id(&character_id, Some(key)) }
+                else { persistence::external_identity(platform, &[&character_id, key]) },
+            request_id: request_id.map(|id| persistence::external_identity(platform, &[key, id]))
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            character_id,
+            guard,
+        })
+    }
+}
+
+struct BotMediaInput {
+    text: String,
+    images: Vec<String>,
+    input_text: Option<String>,
+}
+
+async fn prepare_bot_media_input<F, Fut>(
+    state: &AIOrchestrator,
+    binding: &BotRequestBinding,
+    input_text: &str,
+    prepare: F,
+) -> Result<BotMediaInput, KokoroError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(String, Vec<String>), KokoroError>>,
+{
+    persistence::validate_user_input(input_text)?;
+    let saved: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT m.content, m.metadata FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
+         WHERE c.character_id=? AND m.role='user'
+         AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?",
+    ).bind(&binding.character_id).bind(format!("{}:user", binding.request_id))
+        .fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+    if let Some((text, metadata)) = saved {
+        let original_input = metadata.as_deref().and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value["external_input_text"].as_str().map(str::to_owned));
+        let matches = original_input.as_ref().map_or_else(
+            || input_text.trim().is_empty() || text == input_text
+                || text.starts_with(&format!("{input_text}\n\nVoice message transcript: ")),
+            |original| original == input_text,
+        );
+        if !matches {
+            return Err(KokoroError::Validation("Request identity was reused with different text".into()));
+        }
+        return Ok(BotMediaInput { text, images: Vec::new(), input_text: original_input });
+    }
+    let (text, images) = prepare().await?;
+    Ok(BotMediaInput { text, images, input_text: Some(input_text.to_owned()) })
+}
+
 async fn generate_bot_reply(
     app: &tauri::AppHandle,
     platform: &str,
     text: &str,
     image_urls: Vec<String>,
-    character_id: Option<&str>,
-    conversation_key: Option<&str>,
     orchestrator_override: Option<&AIOrchestrator>,
-    request_id: Option<&str>,
+    binding: &BotRequestBinding,
+    input_text: Option<&str>,
 ) -> Result<BotReply, KokoroError> {
     let trimmed = text.trim();
     if trimmed.is_empty() && image_urls.is_empty() {
@@ -861,8 +938,6 @@ async fn generate_bot_reply(
     };
 
     persistence::validate_user_input(&prompt_text)?;
-    let _database_guard = crate::ai::context::try_acquire_database_operation_read_guard()
-        .map_err(|error| KokoroError::Chat(error.into()))?;
     let managed_orchestrator = app
         .try_state::<AIOrchestrator>()
         .ok_or_else(|| KokoroError::Chat("AIOrchestrator not available".into()))?;
@@ -874,9 +949,7 @@ async fn generate_bot_reply(
         )));
     }
 
-    let _chat_turn_guard = orchestrator
-        .enter_chat_turn()
-        .map_err(|e| KokoroError::Chat(format!("Character activation is in progress: {e}")))?;
+    let _chat_turn_guard = &binding.guard;
 
     let llm_service = app
         .try_state::<LlmService>()
@@ -888,22 +961,7 @@ async fn generate_bot_reply(
         .try_state::<Arc<RwLock<ToolSettings>>>()
         .ok_or_else(|| KokoroError::Chat("ToolSettings not available".into()))?;
 
-    let char_id = match character_id.filter(|id| !id.trim().is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
-    let conversation_key = conversation_key
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(platform)
-        .to_string();
+    let char_id = binding.character_id.clone();
 
     let isolated;
     let orchestrator = if orchestrator_override.is_none() && orchestrator.get_character_id().await != char_id {
@@ -915,14 +973,7 @@ async fn generate_bot_reply(
     } else {
         orchestrator
     };
-    let conversation_id = if platform == "webhook" {
-        webhook_conversation_id(&char_id, Some(&conversation_key))
-    } else {
-        persistence::external_identity(platform, &[&char_id, &conversation_key])
-    };
-    let request_id = request_id.map(|id| persistence::external_identity(platform, &[&conversation_key, id]))
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let turn = ExternalTurn::begin(orchestrator, &char_id, conversation_id, request_id, &prompt_text, false).await?;
+    let turn = ExternalTurn::begin_with_input_text(orchestrator, &char_id, binding.conversation_id.clone(), binding.request_id.clone(), &prompt_text, false, input_text).await?;
     if let Some((reply, translation)) = &turn.previous_reply {
         trigger_bot_memory_tasks(platform, &prompt_text, &char_id, &turn,
             orchestrator, &llm_service, turn.previous_memory_work).await;
@@ -973,7 +1024,7 @@ async fn generate_bot_reply(
             &char_id,
             Some(&turn.target.conversation_id),
             Some(turn.history.clone()),
-            &_chat_turn_guard,
+            _chat_turn_guard,
         )
         .await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
@@ -1192,15 +1243,17 @@ pub(crate) async fn generate_bot_text_reply(
     orchestrator: Option<&AIOrchestrator>,
     request_id: Option<&str>,
 ) -> Result<String, String> {
+    let managed = app.state::<AIOrchestrator>();
+    let binding = BotRequestBinding::new(orchestrator.unwrap_or(&managed), platform, character_id, conversation_key, request_id)
+        .await.map_err(|error| error.to_string())?;
     let reply = generate_bot_reply(
         app,
         platform,
         text,
         Vec::new(),
-        character_id,
-        conversation_key,
         orchestrator,
-        request_id,
+        &binding,
+        None,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -2377,52 +2430,31 @@ async fn handle_generic_webhook(
         Ok(value) => value,
         Err(error) => return bad_request(&error),
     };
-    let text = if let Some(audio) = parsed.audio {
-        let format = parsed
-            .audio_format
-            .unwrap_or_else(|| audio_format_from_mime_or_name(None, None));
-        match transcribe_bot_audio(&app, "webhook", audio, format).await {
-            Ok(transcription) => text_with_transcription(parsed.text, transcription),
-            Err(error) => return server_error(&error),
-        }
-    } else {
-        parsed.text
-    };
-
-    if text.trim().is_empty() {
-        return bad_request("Missing text or media");
-    }
-
-    let active_character_id = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-        orchestrator.get_character_id().await
-    } else {
-        AIOrchestrator::load_active_character_id().unwrap_or_else(|| "default".to_string())
-    };
-    let character_id = resolve_webhook_character_id(
-        parsed.character_id.as_deref(),
-        config.character_id.as_deref(),
-        Some(&active_character_id),
-    );
-
     let base_orchestrator = match app.try_state::<AIOrchestrator>() {
         Some(orchestrator) => orchestrator,
         None => return server_error("AIOrchestrator not available"),
     };
-    if base_orchestrator.is_activating() {
-        return json_response(
-            json!({ "error": "Character activation is in progress" }),
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
-    }
+    let explicit_character_id = parsed.character_id.as_deref().filter(|id| !id.trim().is_empty())
+        .or(config.character_id.as_deref().filter(|id| !id.trim().is_empty()));
+    let binding = match BotRequestBinding::new(&base_orchestrator, "webhook", explicit_character_id,
+        parsed.conversation_key.as_deref(), parsed.request_id.as_deref()).await {
+        Ok(binding) => binding,
+        Err(error) => return bot_error_response(&error),
+    };
+    let character_id = binding.character_id.clone();
+    let input = if let Some(audio) = parsed.audio {
+        match prepare_bot_media_input(&base_orchestrator, &binding, &parsed.text, || async {
+            let format = parsed.audio_format.unwrap_or_else(|| audio_format_from_mime_or_name(None, None));
+            let transcription = transcribe_bot_audio(&app, "webhook", audio, format).await.map_err(KokoroError::Stt)?;
+            let text = text_with_transcription(parsed.text.clone(), transcription);
+            if text.trim().is_empty() { return Err(KokoroError::Validation("Missing text or media".into())); }
+            Ok((text, parsed.images))
+        }).await {
+            Ok(input) => input,
+            Err(error) => return bot_error_response(&error),
+        }
+    } else { BotMediaInput { text:parsed.text, images:parsed.images, input_text:None } };
     let webhook_orchestrator = base_orchestrator.fork_with_isolated_history().await;
-    let explicit_character_id = parsed
-        .character_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .or(config
-            .character_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty()));
     match webhook_orchestrator
         .apply_character_profile(&character_id)
         .await
@@ -2439,14 +2471,8 @@ async fn handle_generic_webhook(
         Err(error) => return server_error(&format!("Failed to load character profile: {error}")),
     }
     match generate_bot_reply(
-        &app,
-        "webhook",
-        &text,
-        parsed.images,
-        Some(&character_id),
-        parsed.conversation_key.as_deref(),
-        Some(&webhook_orchestrator),
-        parsed.request_id.as_deref(),
+        &app, "webhook", &input.text, input.images, Some(&webhook_orchestrator),
+        &binding, input.input_text.as_deref(),
     )
     .await
     {
@@ -2542,84 +2568,40 @@ async fn handle_line_webhook(
             continue;
         };
 
-        let mut image_urls = Vec::new();
-        let text = match message.message_type.as_str() {
-            "text" => message.text.unwrap_or_default(),
-            "image" => {
-                let Some(message_id) = message.id.as_deref() else {
-                    continue;
-                };
-                let url = format!(
-                    "https://api-data.line.me/v2/bot/message/{}/content",
-                    message_id
-                );
-                match download_url_bytes(&reqwest::Client::new(), &url, Some(&access_token)).await {
-                    Ok((data, content_type)) => {
-                        let mime_type = content_type.as_deref().unwrap_or("image/jpeg");
-                        image_urls.push(image_data_url(&data, mime_type));
-                        "The user sent an image:".to_string()
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "bot::line", "failed to download LINE image: {}", error);
-                        continue;
-                    }
-                }
-            }
-            "audio" => {
-                let Some(message_id) = message.id.as_deref() else {
-                    continue;
-                };
-                let url = format!(
-                    "https://api-data.line.me/v2/bot/message/{}/content",
-                    message_id
-                );
-                match download_url_bytes(&reqwest::Client::new(), &url, Some(&access_token)).await {
-                    Ok((data, content_type)) => {
-                        let format = audio_format_from_mime_or_name(content_type.as_deref(), None);
-                        match transcribe_bot_audio(&app, "line", data, format).await {
-                            Ok(Some(transcription)) => transcription,
-                            Ok(None) => {
-                                let _ = send_line_reply(
-                                    &access_token,
-                                    &reply_token,
-                                    "(Could not recognize speech)",
-                                )
-                                .await;
-                                continue;
-                            }
-                            Err(error) => {
-                                tracing::error!(target: "bot::line", "failed to transcribe LINE audio: {}", error);
-                                let _ = send_line_reply(
-                                    &access_token,
-                                    &reply_token,
-                                    "Failed to transcribe audio message.",
-                                )
-                                .await;
-                                continue;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "bot::line", "failed to download LINE audio: {}", error);
-                        continue;
-                    }
-                }
-            }
-            _ => continue,
+        let state = app.state::<AIOrchestrator>();
+        let binding = match BotRequestBinding::new(&state, "line", config.character_id.as_deref(), user_id.as_deref(), message.id.as_deref()).await {
+            Ok(binding) => binding,
+            Err(error) => { tracing::error!(target:"bot::line", "{error}"); continue; }
         };
-        if text.trim().is_empty() && image_urls.is_empty() {
-            continue;
-        }
+        let input = if message.message_type == "text" {
+            BotMediaInput { text:message.text.unwrap_or_default(), images:vec![], input_text:None }
+        } else if matches!(message.message_type.as_str(), "image" | "audio") {
+            let prepared = prepare_bot_media_input(&state, &binding, "", || async {
+                let message_id = message.id.as_deref().ok_or_else(|| KokoroError::Validation("Missing LINE message identity".into()))?;
+                let url = format!("https://api-data.line.me/v2/bot/message/{message_id}/content");
+                let (data, content_type) = download_url_bytes(&reqwest::Client::new(), &url, Some(&access_token)).await.map_err(KokoroError::Chat)?;
+                if message.message_type == "image" {
+                    Ok(("The user sent an image:".into(), vec![image_data_url(&data, content_type.as_deref().unwrap_or("image/jpeg"))]))
+                } else {
+                    let format = audio_format_from_mime_or_name(content_type.as_deref(), None);
+                    let text = transcribe_bot_audio(&app, "line", data, format).await.map_err(KokoroError::Stt)?
+                        .ok_or_else(|| KokoroError::Stt("Could not recognize speech".into()))?;
+                    Ok((text, vec![]))
+                }
+            }).await;
+            match prepared {
+                Ok(input) => input,
+                Err(error) => {
+                    tracing::error!(target:"bot::line", "Failed to prepare or recover LINE media: {error}");
+                    let _ = send_line_reply(&access_token, &reply_token, &error.to_string()).await;
+                    continue;
+                }
+            }
+        } else { continue; };
+        if input.text.trim().is_empty() && input.images.is_empty() { continue; }
 
         match generate_bot_reply(
-            &app,
-            "line",
-            &text,
-            image_urls,
-            config.character_id.as_deref(),
-            user_id.as_deref(),
-            None,
-            message.id.as_deref(),
+            &app, "line", &input.text, input.images, None, &binding, input.input_text.as_deref(),
         )
         .await
         {
@@ -2906,76 +2888,49 @@ async fn handle_discord_message(
         .map(|author| format!("{}:{}", channel_id, author))
         .unwrap_or_else(|| channel_id.clone());
 
-    let mut image_urls = Vec::new();
-    let mut audio_transcriptions = Vec::new();
-    if let Some(attachments) = message.get("attachments").and_then(Value::as_array) {
-        for attachment in attachments {
-            let url = attachment
-                .get("url")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if url.is_empty() {
-                continue;
-            }
-            let filename = attachment.get("filename").and_then(Value::as_str);
-            let content_type = attachment.get("content_type").and_then(Value::as_str);
-            if is_image_media(content_type, filename) {
-                match download_url_bytes(client, url, None).await {
-                    Ok((data, downloaded_content_type)) => {
-                        let mime_type = downloaded_content_type
-                            .as_deref()
-                            .or(content_type)
-                            .unwrap_or_else(|| image_mime_from_name(filename.unwrap_or_default()));
-                        image_urls.push(image_data_url(&data, mime_type));
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "bot::discord", "failed to download Discord image: {}", error);
-                    }
-                }
-            } else if is_audio_media(content_type, filename) {
-                match download_url_bytes(client, url, None).await {
-                    Ok((data, downloaded_content_type)) => {
-                        let format = audio_format_from_mime_or_name(
-                            downloaded_content_type.as_deref().or(content_type),
-                            filename,
-                        );
-                        match transcribe_bot_audio(app, "discord", data, format).await {
-                            Ok(Some(transcription)) => audio_transcriptions.push(transcription),
-                            Ok(None) => {}
-                            Err(error) => {
-                                tracing::error!(target: "bot::discord", "failed to transcribe Discord audio: {}", error);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "bot::discord", "failed to download Discord audio: {}", error);
-                    }
+    let state = app.state::<AIOrchestrator>();
+    let binding = match BotRequestBinding::new(&state, "discord", cfg.character_id.as_deref(), Some(&conversation_key), message.get("id").and_then(Value::as_str)).await {
+        Ok(binding) => binding,
+        Err(error) => { tracing::error!(target:"bot::discord", "{error}"); return; }
+    };
+    let attachments = message.get("attachments").and_then(Value::as_array);
+    let has_media = attachments.is_some_and(|items| items.iter().any(|attachment| {
+        let mime = attachment.get("content_type").and_then(Value::as_str);
+        let name = attachment.get("filename").and_then(Value::as_str);
+        is_image_media(mime, name) || is_audio_media(mime, name)
+    }));
+    let input = if has_media {
+        match prepare_bot_media_input(&state, &binding, &content, || async {
+            let mut images = Vec::new();
+            let mut text = content.clone();
+            for attachment in attachments.into_iter().flatten() {
+                let filename = attachment.get("filename").and_then(Value::as_str);
+                let content_type = attachment.get("content_type").and_then(Value::as_str);
+                if !is_image_media(content_type, filename) && !is_audio_media(content_type, filename) { continue; }
+                let url = attachment.get("url").and_then(Value::as_str).filter(|url| !url.is_empty())
+                    .ok_or_else(|| KokoroError::Validation("Missing Discord attachment URL".into()))?;
+                let (data, downloaded_type) = download_url_bytes(client, url, None).await.map_err(KokoroError::Chat)?;
+                if is_image_media(content_type, filename) {
+                    let mime = downloaded_type.as_deref().or(content_type).unwrap_or_else(|| image_mime_from_name(filename.unwrap_or_default()));
+                    images.push(image_data_url(&data, mime));
+                } else {
+                    let format = audio_format_from_mime_or_name(downloaded_type.as_deref().or(content_type), filename);
+                    let transcript = transcribe_bot_audio(app, "discord", data, format).await.map_err(KokoroError::Stt)?
+                        .ok_or_else(|| KokoroError::Stt("Could not recognize speech".into()))?;
+                    text = text_with_transcription(text, Some(transcript));
                 }
             }
+            if text.trim().is_empty() && !images.is_empty() { text = "The user sent an image:".into(); }
+            Ok((text, images))
+        }).await {
+            Ok(input) => input,
+            Err(error) => { tracing::error!(target:"bot::discord", "Failed to prepare or recover Discord media: {error}"); return; }
         }
-    }
-
-    let mut content = audio_transcriptions
-        .into_iter()
-        .fold(content, |text, transcription| {
-            text_with_transcription(text, Some(transcription))
-        });
-    if content.trim().is_empty() && !image_urls.is_empty() {
-        content = "The user sent an image:".to_string();
-    }
-    if content.trim().is_empty() && image_urls.is_empty() {
-        return;
-    }
+    } else { BotMediaInput { text:content, images:vec![], input_text:None } };
+    if input.text.trim().is_empty() && input.images.is_empty() { return; }
 
     match generate_bot_reply(
-        app,
-        "discord",
-        &content,
-        image_urls,
-        cfg.character_id.as_deref(),
-        Some(&conversation_key),
-        None,
-        message.get("id").and_then(Value::as_str),
+        app, "discord", &input.text, input.images, None, &binding, input.input_text.as_deref(),
     )
     .await
     {
@@ -3137,6 +3092,58 @@ fn truncate_for_platform(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn media_replay_skips_preparation_and_keeps_text_identity_for_all_generic_platforms() {
+        use super::*;
+        for platform in ["webhook", "line", "discord"] {
+            for fail_save in [false, true] {
+                let state = AIOrchestrator::new("sqlite::memory:").await.unwrap().fork_with_isolated_history().await;
+                let binding = BotRequestBinding::new(&state, platform, Some("default"), Some("chat"), Some("message")).await.unwrap();
+                let prepared = prepare_bot_media_input(&state, &binding, "caption", || async {
+                    Ok(("caption\n\nVoice message transcript: Original, transcript!".into(), vec!["image".into()]))
+                }).await.unwrap();
+                let turn = ExternalTurn::begin_with_input_text(&state, "default", binding.conversation_id.clone(), binding.request_id.clone(), &prepared.text, false, prepared.input_text.as_deref()).await.unwrap();
+                if fail_save {
+                    sqlx::query("CREATE TRIGGER fail_media_reply BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'final failure'); END").execute(&state.db).await.unwrap();
+                }
+                assert_eq!(turn.save_reply(&state, "reply", None).await.is_err(), fail_save);
+                if fail_save { sqlx::query("DROP TRIGGER fail_media_reply").execute(&state.db).await.unwrap(); }
+                for _ in 0..2 {
+                    let replay = prepare_bot_media_input(&state, &binding, "caption", || async {
+                        panic!("saved input must bypass STT and attachment download")
+                    }).await.unwrap();
+                    assert_eq!(replay.text, prepared.text);
+                    assert!(replay.images.is_empty());
+                    let turn = ExternalTurn::begin_with_input_text(&state, "default", binding.conversation_id.clone(), binding.request_id.clone(), &replay.text, false, replay.input_text.as_deref()).await.unwrap();
+                    assert_eq!(turn.previous_reply.unwrap().0, "reply");
+                }
+                assert!(matches!(prepare_bot_media_input(&state, &binding, "edited caption", || async { panic!("conflict before preparation") }).await, Err(KokoroError::Validation(_))));
+                let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages").fetch_one(&state.db).await.unwrap();
+                assert_eq!(rows, 2);
+                // Text-only requests retain their original full-content check.
+                assert!(ExternalTurn::begin(&state, "default", binding.conversation_id.clone(), binding.request_id.clone(), "different text", false).await.is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_media_preparation_does_not_admit_identity_and_lookup_is_scoped() {
+        use super::*;
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap().fork_with_isolated_history().await;
+        let binding = BotRequestBinding::new(&state, "webhook", Some("default"), Some("chat"), Some("message")).await.unwrap();
+        assert!(prepare_bot_media_input(&state, &binding, "", || async { Err(KokoroError::Stt("unavailable".into())) }).await.is_err());
+        assert!(ExternalTurn::saved_user_message(&state,"default",&binding.request_id).await.unwrap().is_none());
+        let prepared = prepare_bot_media_input(&state, &binding, "", || async { Ok(("transcript".into(),vec![])) }).await.unwrap();
+        ExternalTurn::begin_with_input_text(&state,"default",binding.conversation_id.clone(),binding.request_id.clone(),&prepared.text,false,prepared.input_text.as_deref()).await.unwrap();
+        for (character, chat, request) in [("other", "chat", "message"),("default","other","message"),("default","chat","other")] {
+            let other = BotRequestBinding::new(&state,"webhook",Some(character),Some(chat),Some(request)).await.unwrap();
+            let input = prepare_bot_media_input(&state,&other,"",||async {Ok(("new input".into(),vec![]))}).await.unwrap();
+            assert_eq!(input.text,"new input");
+        }
+        sqlx::query("DROP TABLE conversation_messages").execute(&state.db).await.unwrap();
+        assert!(matches!(prepare_bot_media_input(&state,&binding,"",||async {panic!("lookup failure must not start media")}).await,Err(KokoroError::ChatPersistence(_))));
+    }
+
     use super::*;
 
     #[test]

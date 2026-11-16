@@ -9,7 +9,9 @@ $chatRepo = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $chatRepo
 $chatOutput = Join-Path $chatRepo $(if ($Persistence) { 'output/playwright/chat-lifecycle/persistence' } else { 'output/playwright/chat-lifecycle' })
 New-Item -ItemType Directory -Path $chatOutput -Force | Out-Null
-$chatExecutable = Join-Path $chatRepo 'src-tauri/target/debug/tauri-appkokoro-engine.exe'
+$chatTarget = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $chatRepo 'src-tauri/target' }
+if (-not [IO.Path]::IsPathRooted($chatTarget)) { $chatTarget = Join-Path $chatRepo $chatTarget }
+$chatExecutable = [IO.Path]::GetFullPath((Join-Path $chatTarget 'debug/tauri-appkokoro-engine.exe'))
 # Stop only this fixture's recorded executable/command, never arbitrary PID reuse.
 foreach ($chatPidFile in @('app.pid','fixture.pid')) {
   $chatPidPath = Join-Path $chatOutput $chatPidFile
@@ -19,7 +21,7 @@ foreach ($chatPidFile in @('app.pid','fixture.pid')) {
   }
 }
 $chatRun = Get-Date -Format 'yyyyMMdd-HHmmss'
-foreach ($chatArtifact in @('native-report.json','persistence-report.json','controlled-model-calls.json')) {
+foreach ($chatArtifact in @('native-report.json','persistence-report.json','controlled-model-calls.json','recovery-report.json','recovery-model-calls.json','recovery-check.log')) {
   $chatSource = Join-Path $chatOutput $chatArtifact
   if (Test-Path -LiteralPath $chatSource) { Copy-Item -LiteralPath $chatSource -Destination (Join-Path $chatOutput ($chatRun + '-previous-' + $chatArtifact)) }
 }
@@ -60,6 +62,11 @@ try {
   node $chatCheck $chatOutput *> (Join-Path $chatOutput 'native-check.log')
   if ($LASTEXITCODE -ne 0) { Get-Content -Tail 80 (Join-Path $chatOutput 'native-check.log'); throw 'Native assertions failed; see the report in the validation output directory' }
   Get-Content -LiteralPath (Join-Path $chatOutput 'native-check.log')
+  if ($Persistence) {
+    node 'scripts/chat-persistence-recovery-check.mjs' $chatOutput *> (Join-Path $chatOutput 'recovery-check.log')
+    if ($LASTEXITCODE -ne 0) { Get-Content -Tail 80 (Join-Path $chatOutput 'recovery-check.log'); throw 'Native recovery assertions failed; see recovery-report.json' }
+    Get-Content -LiteralPath (Join-Path $chatOutput 'recovery-check.log')
+  }
 } finally {
   if (-not $KeepRunning) {
     Stop-Process -Id $chatApp.Id,$chatModel.Id -ErrorAction SilentlyContinue

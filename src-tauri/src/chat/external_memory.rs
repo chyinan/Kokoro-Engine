@@ -59,6 +59,13 @@ impl MemoryState {
 pub(crate) struct ExternalMemory(Mutex<MemoryState>);
 
 impl ExternalMemory {
+    /// Shared memory-switch epoch, also used to fence deferred desktop work.
+    pub fn epoch(&self) -> u64 {
+        let mut state = self.0.lock().unwrap();
+        state.sync_database();
+        state.epoch
+    }
+
     pub fn set_enabled(&self, flag: &AtomicBool, enabled: bool) {
         let mut state = self.0.lock().unwrap();
         state.epoch += 1;
