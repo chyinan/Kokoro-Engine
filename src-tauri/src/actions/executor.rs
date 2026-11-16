@@ -21,6 +21,20 @@ pub struct ToolInvocation {
     pub args: HashMap<String, String>,
 }
 
+pub(crate) fn build_tool_invocation_from_input(
+    registry: &ActionRegistry,
+    input: &str,
+    args: HashMap<String, String>,
+    tool_call_id: Option<String>,
+) -> Result<ToolInvocation, crate::actions::registry::ActionError> {
+    let action_id = registry.resolve_action_id_for_input(input)?;
+    Ok(ToolInvocation {
+        tool_call_id,
+        name: action_id,
+        args,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolExecutionOutcome {
     pub invocation: ToolInvocation,
@@ -1263,17 +1277,26 @@ pub(crate) async fn emit_after_action_invoke_with_protection(
     }
 }
 
-pub async fn execute_tool_calls_with_cancellation(
+pub(crate) struct ToolExecutionScope<'a> {
+    pub character_id: &'a str,
+    pub conversation_id: Option<&'a str>,
+    pub source: &'a str,
+    pub allow_hooks: bool,
+    pub allowed_tool_ids: Option<&'a std::collections::HashSet<String>>,
+}
+
+pub(crate) async fn execute_tool_calls_with_cancellation(
     app: &tauri::AppHandle,
     registry_state: &Arc<RwLock<ActionRegistry>>,
     tool_settings_state: &Arc<RwLock<ToolSettings>>,
-    character_id: &str,
+    scope: &ToolExecutionScope<'_>,
     tool_calls: &[ToolInvocation],
     mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
     tool_timeout: Option<std::time::Duration>,
 ) -> Result<Vec<ToolExecutionOutcome>, ToolCancellationError> {
     let mut outcomes = Vec::with_capacity(tool_calls.len());
-    let hook_runtime = app.try_state::<HookRuntime>();
+    let hook_runtime = scope.allow_hooks.then(|| app.try_state::<HookRuntime>()).flatten();
+    let conversation_id = || scope.conversation_id.map(str::to_owned);
 
     for tool_call in tool_calls {
         if let Some(rx) = cancel_rx.as_ref() {
@@ -1295,9 +1318,9 @@ pub async fn execute_tool_calls_with_cancellation(
                             hooks.emit_action_gate(
                                 &HookEvent::BeforeActionInvoke,
                                 &build_action_hook_payload(
-                                    None,
-                                    character_id,
-                                    Some("chat".to_string()),
+                                    conversation_id(),
+                                    scope.character_id,
+                                    Some(scope.source.to_owned()),
                                     tool_call,
                                     None,
                                     None,
@@ -1312,9 +1335,9 @@ pub async fn execute_tool_calls_with_cancellation(
                             .emit_action_gate(
                                 &HookEvent::BeforeActionInvoke,
                                 &build_action_hook_payload(
-                                    None,
-                                    character_id,
-                                    Some("chat".to_string()),
+                                    conversation_id(),
+                                    scope.character_id,
+                                    Some(scope.source.to_owned()),
                                     tool_call,
                                     None,
                                     None,
@@ -1362,7 +1385,9 @@ pub async fn execute_tool_calls_with_cancellation(
                             tool_settings.is_enabled(&action.id)
                         };
 
-                        if !enabled {
+                        if scope.allowed_tool_ids.is_some_and(|ids| !ids.contains(&action.id)) {
+                            (None, Err(format!("Tool '{}' is unavailable in this chat", action.id)))
+                        } else if !enabled {
                             (None, Err(format!("Tool '{}' is disabled", action.id)))
                         } else {
                             let permission_decision = {
@@ -1372,9 +1397,9 @@ pub async fn execute_tool_calls_with_cancellation(
                             match permission_decision.clone() {
                                 PermissionDecision::Allow => {
                                     let mut args_payload = build_before_action_args_payload(
-                                        None,
-                                        character_id,
-                                        Some("chat".to_string()),
+                                        conversation_id(),
+                                        scope.character_id,
+                                        Some(scope.source.to_owned()),
                                         tool_call,
                                         action,
                                     );
@@ -1415,9 +1440,9 @@ pub async fn execute_tool_calls_with_cancellation(
                                                 apply_before_action_args_payload(args_payload);
                                             let ctx = ActionContext {
                                                 app: app.clone(),
-                                                character_id: character_id.to_string(),
-                                                conversation_id: None,
-                                                source: Some("chat".to_string()),
+                                                character_id: scope.character_id.to_owned(),
+                                                conversation_id: conversation_id(),
+                                                source: Some(scope.source.to_owned()),
                                             };
                                             let exec_res = tokio::select! {
                                                 biased;
@@ -1477,9 +1502,9 @@ pub async fn execute_tool_calls_with_cancellation(
                 Err(error) => Some(error.clone()),
             };
             let payload = build_action_hook_payload(
-                None,
-                character_id,
-                Some("chat".to_string()),
+                conversation_id(),
+                scope.character_id,
+                Some(scope.source.to_owned()),
                 tool_call,
                 action.as_ref(),
                 Some(action_result_is_success(&result)),
@@ -1506,24 +1531,4 @@ pub async fn execute_tool_calls_with_cancellation(
     }
 
     Ok(outcomes)
-}
-
-pub async fn execute_tool_calls(
-    app: &tauri::AppHandle,
-    registry_state: &Arc<RwLock<ActionRegistry>>,
-    tool_settings_state: &Arc<RwLock<ToolSettings>>,
-    character_id: &str,
-    tool_calls: &[ToolInvocation],
-) -> Vec<ToolExecutionOutcome> {
-    execute_tool_calls_with_cancellation(
-        app,
-        registry_state,
-        tool_settings_state,
-        character_id,
-        tool_calls,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_default()
 }

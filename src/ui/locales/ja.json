@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "tool_only_completion": "ツールの呼び出しは終了しましたが、テキストの返信は生成されませんでした。",
         "speech_failed": "この返信を読み上げられませんでした：{{error}}",
         "persistence_failed": "チャットをデータベースに保存できませんでした。",
         "reply_unfinished": "未完了の返信",

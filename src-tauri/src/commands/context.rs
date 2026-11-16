@@ -1057,28 +1057,7 @@ pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), Kokor
     Ok(())
 }
 
-/// 判断消息是否为前端/用户视角的可见消息。
-/// 不可见技术消息包括：
-/// 1. `role == "tool"`
-/// 2. `metadata.type` 为 `"assistant_tool_calls" | "tool_result" | "translation_instruction" | "invalid_failure_event"`
-pub fn is_visible_message_meta(role: &str, meta: Option<&serde_json::Value>) -> bool {
-    if role == "tool" {
-        return false;
-    }
-    let technical_type = meta.and_then(|v| v.get("type")).and_then(|t| t.as_str());
-    !matches!(
-        technical_type,
-        Some("assistant_tool_calls") | Some("translation_instruction") | Some("tool_result") | Some("invalid_failure_event")
-    )
-}
-
-pub fn is_visible_message_raw(role: &str, metadata: Option<&str>) -> bool {
-    if role == "tool" {
-        return false;
-    }
-    let meta_val = metadata.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-    is_visible_message_meta(role, meta_val.as_ref())
-}
+pub use crate::chat::tags::{is_visible_message_meta, is_visible_message_raw};
 
 // 依赖项以参数显式传入以保持可测试性（与既有测试注入风格一致）
 #[allow(clippy::too_many_arguments)]

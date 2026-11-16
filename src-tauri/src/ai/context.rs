@@ -1223,12 +1223,16 @@ impl AIOrchestrator {
         content: &str,
         metadata: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE conversation_messages SET content = ?, metadata = COALESCE(?, metadata) WHERE id = ?")
+        let mut tx = self.db.begin().await?;
+        let row_update = sqlx::query("UPDATE conversation_messages SET content = ?, metadata = COALESCE(?, metadata) WHERE id = ?")
             .bind(content)
             .bind(metadata)
             .bind(row_id)
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await?;
+        if row_update.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
 
         // Update owning conversation updated_at directly via message row's conversation_id
         let now = chrono::Utc::now().to_rfc3339();
@@ -1237,9 +1241,10 @@ impl AIOrchestrator {
         )
         .bind(&now)
         .bind(row_id)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1459,19 +1464,19 @@ impl AIOrchestrator {
         let max_chars = *self.max_message_chars.lock().await;
         message.content = truncate_message_content(message.content, max_chars);
 
+        self.push_history_messages(std::iter::once(message)).await;
+    }
+
+    async fn push_history_messages(&self, messages: impl IntoIterator<Item = Message>) {
         let mut history = self.history.lock().await;
-        history.push_back(message);
-        let evicted = if history.len() > MAX_IN_MEMORY_HISTORY_MESSAGES {
-            history.pop_front();
-            true
-        } else {
-            false
-        };
+        history.extend(messages);
+        let evicted = history.len().saturating_sub(MAX_IN_MEMORY_HISTORY_MESSAGES);
+        history.drain(..evicted);
         drop(history);
 
-        if evicted {
+        if evicted > 0 {
             let mut boundary = self.memory_history_boundary.lock().await;
-            *boundary = boundary.saturating_sub(1);
+            *boundary = boundary.saturating_sub(evicted);
         }
     }
 
@@ -1496,6 +1501,7 @@ impl AIOrchestrator {
             character_id,
             None,
             None,
+            true,
         )
         .await
     }
@@ -1539,6 +1545,25 @@ impl AIOrchestrator {
         history_snapshot: Option<Vec<Message>>,
         _guard: &ChatTurnGuard,
     ) -> Result<(Vec<Message>, Vec<String>)> {
+        self.compose_chat_prompt(
+            query, allow_image_gen, tool_prompt, native_tools_enabled, character_id,
+            target_conversation_id, history_snapshot, true, _guard,
+        ).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compose_chat_prompt(
+        &self,
+        query: &str,
+        allow_image_gen: bool,
+        tool_prompt: Option<String>,
+        native_tools_enabled: bool,
+        character_id: &str,
+        target_conversation_id: Option<&str>,
+        history_snapshot: Option<Vec<Message>>,
+        desktop_context: bool,
+        _guard: &ChatTurnGuard,
+    ) -> Result<(Vec<Message>, Vec<String>)> {
         self.compose_prompt_inner(
             query,
             allow_image_gen,
@@ -1547,6 +1572,7 @@ impl AIOrchestrator {
             character_id,
             target_conversation_id,
             history_snapshot,
+            desktop_context,
         )
         .await
     }
@@ -1561,6 +1587,7 @@ impl AIOrchestrator {
         character_id: &str,
         target_conversation_id: Option<&str>,
         history_snapshot: Option<Vec<Message>>,
+        desktop_context: bool,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         if let Some(reason) = self.get_runtime_degraded().await {
             anyhow::bail!(
@@ -1649,7 +1676,7 @@ impl AIOrchestrator {
             .iter()
             .enumerate()
             .filter(|(index, msg)| {
-                should_include_message_for_llm_history(
+                (desktop_context || !is_vision_context_message(msg)) && should_include_message_for_llm_history(
                     msg,
                     *index,
                     latest_vision_index,
@@ -1779,7 +1806,7 @@ impl AIOrchestrator {
         }
 
         // Section 5: Live2D cues
-        if let Some(profile) = crate::commands::live2d::load_active_live2d_profile() {
+        if let Some(profile) = desktop_context.then(crate::live2d::load_active_live2d_profile).flatten() {
             if !profile.cue_map.is_empty() {
                 let cue_lines = profile
                     .cue_map

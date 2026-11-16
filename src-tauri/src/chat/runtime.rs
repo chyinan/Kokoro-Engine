@@ -1,11 +1,10 @@
 //! Application-owned chat journal. A WebView is a subscriber, never the owner.
 use super::persistence::{PendingChatSave, PendingUserSave};
-use crate::commands::chat::{ChatRequest, StreamChatResponse};
+use crate::chat::application::{ChatPolicy, ChatRequest, StreamChatResponse};
 use crate::error::KokoroError;
 use crate::mods::manager::ModScriptQueue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -52,6 +51,7 @@ pub struct ChatTurnSnapshot {
 type Outcome = Result<StreamChatResponse, KokoroError>;
 struct Entry {
     fingerprint: String,
+    desktop: bool,
     snapshot: ChatTurnSnapshot,
     outcome: watch::Sender<Option<Outcome>>,
     pending_save: Option<PendingChatSave>,
@@ -63,7 +63,7 @@ pub(crate) enum SaveRetry {
     Pending(Box<PendingChatSave>),
     User(Box<PendingUserSave>),
     InFlight(watch::Receiver<Option<Outcome>>),
-    Saved(StreamChatResponse),
+    Saved(Box<StreamChatResponse>),
 }
 #[derive(Default)]
 struct Journal {
@@ -85,10 +85,14 @@ impl ChatRuntimeState {
     /// against a different database, and keep revisions monotonic for subscribers.
     pub(crate) fn invalidate_imported_history(&self) {
         let mut journal = self.0.lock().unwrap();
-        let replaced = Err(KokoroError::Chat("chat_history_replaced: backup imported; send a new request".into()));
+        let replaced = Err(KokoroError::Chat(
+            "chat_history_replaced: backup imported; send a new request".into(),
+        ));
         for (id, entry) in std::mem::take(&mut journal.entries) {
             entry.outcome.send_replace(Some(replaced.clone()));
-            journal.retired.insert(id, (entry.fingerprint, replaced.clone()));
+            journal
+                .retired
+                .insert(id, (entry.fingerprint, replaced.clone()));
         }
         for (_, outcome) in journal.retired.values_mut() {
             *outcome = replaced.clone();
@@ -136,18 +140,24 @@ impl ChatRuntimeState {
             })
     }
     /// Duplicate delivery shares the original outcome, including rejection. No queue.
+    #[cfg(test)]
     pub fn begin(
         &self,
         request: &ChatRequest,
+    ) -> Result<(bool, watch::Receiver<Option<Outcome>>), String> {
+        self.begin_with_policy(request, ChatPolicy::Desktop)
+    }
+
+    pub(crate) fn begin_with_policy(
+        &self,
+        request: &ChatRequest,
+        policy: ChatPolicy,
     ) -> Result<(bool, watch::Receiver<Option<Outcome>>), String> {
         let id = request
             .client_request_id
             .as_deref()
             .ok_or("missing client_request_id")?;
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(request).map_err(|e| e.to_string())?)
-        );
+        let fingerprint = request.fingerprint(policy)?;
         let mut journal = self.0.lock().unwrap();
         if request.character_id.as_ref().is_some_and(|character| {
             journal
@@ -174,7 +184,22 @@ impl ChatRuntimeState {
                         .into(),
                 );
             }
-            return Ok((false, entry.outcome.subscribe()));
+            let retryable = !entry.desktop
+                && entry.outcome.borrow().as_ref().is_some_and(|outcome| {
+                    matches!(outcome, Err(KokoroError::ChatPersistence(_)))
+                        || (outcome.is_err()
+                            && entry.snapshot.user_message_id.is_none()
+                            && !entry
+                                .snapshot
+                                .error
+                                .as_deref()
+                                .unwrap_or_default()
+                                .contains("chat_turn_busy"))
+                });
+            if !retryable {
+                return Ok((false, entry.outcome.subscribe()));
+            }
+            journal.entries.remove(id);
         }
         // Retain recent terminal requests for reconnect and idempotent retries. Active
         // entries are never evicted. Older history remains in SQLite.
@@ -188,7 +213,16 @@ impl ChatRuntimeState {
             if let Some(id) = oldest {
                 if let Some(entry) = journal.entries.remove(&id) {
                     let outcome = entry.outcome.borrow().clone().expect("terminal entry");
-                    journal.retired.insert(id, (entry.fingerprint, outcome));
+                    // A recoverable external save/preparation failure must still
+                    // reach SQLite after journal eviction. Started generations
+                    // remain protected by the persisted user identity.
+                    if entry.desktop
+                        || outcome.is_ok()
+                        || (entry.snapshot.user_message_id.is_some()
+                            && !matches!(outcome, Err(KokoroError::ChatPersistence(_))))
+                    {
+                        journal.retired.insert(id, (entry.fingerprint, outcome));
+                    }
                 }
             }
         }
@@ -199,6 +233,7 @@ impl ChatRuntimeState {
             id.into(),
             Entry {
                 fingerprint,
+                desktop: policy.is_desktop(),
                 snapshot: ChatTurnSnapshot {
                     revision,
                     completion_revision: None,
@@ -210,9 +245,14 @@ impl ChatRuntimeState {
                     user_message_id: None,
                     assistant_message_id: None,
                     message: request.message.clone(),
-                    images: request.images.clone().unwrap_or_default(),
+                    images: if policy.is_desktop() {
+                        request.images.clone().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                     hidden: request.hidden,
-                    reusing_saved_prompt: request.retry_failure.is_some() || request.regenerate_reply.is_some(),
+                    reusing_saved_prompt: request.retry_failure.is_some()
+                        || request.regenerate_reply.is_some(),
                     status: "pending".into(),
                     text: String::new(),
                     translation: None,
@@ -233,15 +273,33 @@ impl ChatRuntimeState {
         Ok((true, rx))
     }
 
+    #[cfg(test)]
     pub fn snapshots(&self) -> Vec<ChatTurnSnapshot> {
         self.journal_snapshot().1
     }
 
-    pub(crate) fn failed_turn_prompt(&self, character: &str, conversation: &str, turn: &str) -> Option<i64> {
+    pub fn desktop_snapshots(
+        &self,
+        current_conversation_id: Option<&str>,
+    ) -> (u64, Vec<ChatTurnSnapshot>) {
+        self.snapshot_filter(|entry| {
+            entry.desktop
+                || (current_conversation_id.is_some()
+                    && entry.snapshot.conversation_id.as_deref() == current_conversation_id)
+        })
+    }
+
+    pub(crate) fn failed_turn_prompt(
+        &self,
+        character: &str,
+        conversation: &str,
+        turn: &str,
+    ) -> Option<i64> {
         let journal = self.0.lock().unwrap();
         journal.entries.values().find_map(|entry| {
             let snapshot = &entry.snapshot;
-            if snapshot.status == "error" && !snapshot.hidden
+            if snapshot.status == "error"
+                && !snapshot.hidden
                 && snapshot.turn_id.as_deref() == Some(turn)
                 && snapshot.character_id.as_deref() == Some(character)
                 && snapshot.conversation_id.as_deref() == Some(conversation)
@@ -263,6 +321,7 @@ impl ChatRuntimeState {
             assistant_message_id: None,
             client_request_id: Some(id.into()),
             status: Some("cancelled".into()),
+            ..Default::default()
         })
     }
 
@@ -289,7 +348,12 @@ impl ChatRuntimeState {
     }
 
     pub fn turn_scope(&self, id: &str) -> Option<ChatTurnSnapshot> {
-        self.0.lock().unwrap().entries.get(id).map(|entry| entry.snapshot.clone())
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .get(id)
+            .map(|entry| entry.snapshot.clone())
     }
 
     pub fn turn_text(&self, id: &str) -> Option<String> {
@@ -301,11 +365,17 @@ impl ChatRuntimeState {
             .map(|entry| entry.snapshot.text.clone())
     }
 
+    #[cfg(test)]
     pub fn journal_snapshot(&self) -> (u64, Vec<ChatTurnSnapshot>) {
+        self.snapshot_filter(|_| true)
+    }
+
+    fn snapshot_filter(&self, include: impl Fn(&Entry) -> bool) -> (u64, Vec<ChatTurnSnapshot>) {
         let journal = self.0.lock().unwrap();
         let mut snapshots: Vec<_> = journal
             .entries
             .values()
+            .filter(|entry| include(entry))
             .map(|e| e.snapshot.clone())
             .collect();
         snapshots.sort_by_key(|s| s.completion_revision.unwrap_or(s.revision));
@@ -351,11 +421,19 @@ impl ChatRuntimeState {
         if let Some(id) = payload.get("conversation_id").and_then(Value::as_str) {
             snapshot.conversation_id = Some(id.into());
         }
-        if let Some(generation) = payload.get("conversation_generation").and_then(Value::as_u64) {
+        if let Some(generation) = payload
+            .get("conversation_generation")
+            .and_then(Value::as_u64)
+        {
             snapshot.conversation_generation = Some(generation);
         }
         if let Some(id) = payload.get("user_message_id").and_then(Value::as_i64) {
             snapshot.user_message_id = Some(id);
+        }
+        if name == "chat-turn-bound" {
+            if let Some(message) = payload.get("message").and_then(Value::as_str) {
+                snapshot.message = message.to_owned();
+            }
         }
         if let Some(id) = payload.get("assistant_message_id").and_then(Value::as_i64) {
             snapshot.assistant_message_id = Some(id);
@@ -390,7 +468,9 @@ impl ChatRuntimeState {
                     .map(str::to_owned)
             }
             "chat-turn-tool" => snapshot.tools.push(payload.clone()),
-            "chat-turn-finish" if payload.get("stage").and_then(Value::as_str) == Some("preparation_timeout") => {
+            "chat-turn-finish"
+                if payload.get("stage").and_then(Value::as_str) == Some("preparation_timeout") =>
+            {
                 snapshot.preparation_timed_out = true;
             }
             // Finish is only a notification: the executing task commits its terminal
@@ -431,12 +511,23 @@ impl ChatRuntimeState {
         if let Some(entry) = journal.entries.get_mut(id) {
             entry.pending_save = (pending.byte_len() <= MAX_PENDING_BYTES).then_some(pending);
         }
-        while journal.entries.values().filter_map(|entry| entry.pending_save.as_ref())
-            .map(PendingChatSave::byte_len).sum::<usize>() > MAX_PENDING_BYTES
+        while journal
+            .entries
+            .values()
+            .filter_map(|entry| entry.pending_save.as_ref())
+            .map(PendingChatSave::byte_len)
+            .sum::<usize>()
+            > MAX_PENDING_BYTES
         {
-            let oldest = journal.entries.iter().filter(|(_, entry)| entry.pending_save.is_some())
-                .min_by_key(|(_, entry)| entry.snapshot.revision).map(|(id, _)| id.clone());
-            let Some(oldest) = oldest else { break; };
+            let oldest = journal
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.pending_save.is_some())
+                .min_by_key(|(_, entry)| entry.snapshot.revision)
+                .map(|(id, _)| id.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
             journal.revision += 1;
             let revision = journal.revision;
             let entry = journal.entries.get_mut(&oldest).unwrap();
@@ -452,8 +543,12 @@ impl ChatRuntimeState {
 
     pub(crate) fn save_retry(&self, id: &str) -> Result<SaveRetry, KokoroError> {
         let journal = self.0.lock().unwrap();
-        let unavailable = || KokoroError::Validation("No failed chat save is available to retry".into());
+        let unavailable =
+            || KokoroError::Validation("No failed chat save is available to retry".into());
         let entry = journal.entries.get(id).ok_or_else(unavailable)?;
+        if !entry.desktop {
+            return Err(unavailable());
+        }
         let outcome = entry.outcome.borrow();
         match outcome.as_ref() {
             Some(Err(KokoroError::ChatPersistence(_))) => {
@@ -465,9 +560,11 @@ impl ChatRuntimeState {
                     Err(unavailable())
                 }
             }
-            None if entry.user_save_retry_in_flight => Ok(SaveRetry::InFlight(entry.outcome.subscribe())),
+            None if entry.user_save_retry_in_flight => {
+                Ok(SaveRetry::InFlight(entry.outcome.subscribe()))
+            }
             Some(Ok(response)) if response.status.as_deref() == Some("completed") => {
-                Ok(SaveRetry::Saved(response.clone()))
+                Ok(SaveRetry::Saved(Box::new(response.clone())))
             }
             _ => Err(unavailable()),
         }
@@ -489,7 +586,10 @@ impl ChatRuntimeState {
     }
 
     pub(crate) fn complete_save_retry(
-        &self, id: &str, response: StreamChatResponse,
+        &self,
+        id: &str,
+        response: StreamChatResponse,
+        created_generation: Option<u64>,
     ) -> Option<ChatTurnSnapshot> {
         let mut journal = self.0.lock().unwrap();
         let entry = journal.entries.get(id)?;
@@ -504,6 +604,9 @@ impl ChatRuntimeState {
         entry.snapshot.completion_revision = Some(revision);
         entry.snapshot.status = "completed".into();
         entry.snapshot.conversation_id = Some(response.conversation_id.clone());
+        if let Some(generation) = created_generation {
+            entry.snapshot.conversation_generation = Some(generation);
+        }
         entry.snapshot.assistant_message_id = response.assistant_message_id;
         entry.snapshot.error = None;
         entry.snapshot.error_code = None;
@@ -536,10 +639,13 @@ impl ChatRuntimeState {
             }
             Err(error) => {
                 entry.snapshot.status = match error {
-                    KokoroError::Chat(message) if message.contains("turn cancelled by user") => "cancelled",
+                    KokoroError::Chat(message) if message.contains("turn cancelled by user") => {
+                        "cancelled"
+                    }
                     KokoroError::Chat(message) if message.contains("chat_turn_busy") => "rejected",
                     _ => "error",
-                }.into();
+                }
+                .into();
                 if matches!(error, KokoroError::ChatPersistence(_)) {
                     entry.snapshot.error_code = Some(KokoroError::CHAT_PERSISTENCE_CODE);
                     entry.snapshot.persistence_retryable = entry.pending_save.is_some();
@@ -559,7 +665,11 @@ impl ChatRuntimeState {
         Self::update_speech_error(&mut journal, id, error)
     }
 
-    fn update_speech_error(journal: &mut Journal, id: &str, error: String) -> Option<ChatTurnSnapshot> {
+    fn update_speech_error(
+        journal: &mut Journal,
+        id: &str,
+        error: String,
+    ) -> Option<ChatTurnSnapshot> {
         if journal.entries.get(id)?.snapshot.speech_error.is_some() {
             return None;
         }
@@ -618,18 +728,21 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
     Ok(())
 }
 
-pub fn get_chat_runtime_snapshot(
-    runtime: tauri::State<'_, Arc<ChatRuntimeState>>,
-) -> Vec<ChatTurnSnapshot> {
-    runtime.snapshots()
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ChatViewVersion {
     pub revision: u64,
     pub history_revision: i64,
     pub generation: u64,
     pub busy: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConversationMessage {
+    pub id: i64,
+    pub role: String,
+    pub content: String,
+    pub metadata: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Serialize)]
@@ -639,7 +752,7 @@ pub struct ChatViewSnapshot {
     pub character_id: String,
     pub conversation_id: Option<String>,
     pub conversation_history_revision: Option<i64>,
-    pub messages: Vec<crate::commands::conversation::ConversationMessage>,
+    pub messages: Vec<ConversationMessage>,
     pub turns: Vec<ChatTurnSnapshot>,
 }
 
@@ -650,9 +763,12 @@ pub async fn get_chat_view(
     runtime: &ChatRuntimeState,
     known_version: Option<ChatViewVersion>,
 ) -> Result<Option<ChatViewSnapshot>, crate::error::KokoroError> {
-    let _database_operation_guard = crate::ai::context::acquire_database_operation_read_guard().await;
+    let _database_operation_guard =
+        crate::ai::context::acquire_database_operation_read_guard().await;
     if let Some(known) = known_version {
-        let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&state.db).await?;
+        let history_revision = sqlx::query_scalar(HISTORY_REVISION)
+            .fetch_one(&state.db)
+            .await?;
         let current = ChatViewVersion {
             history_revision,
             revision: runtime.revision(),
@@ -668,29 +784,32 @@ pub async fn get_chat_view(
     let conversation_id = state.current_conversation_id.lock().await.clone();
     // Capture the journal before SQLite so any completed turn included in this
     // revision has already persisted its history before the read starts.
-    let (revision, turns) = runtime.journal_snapshot();
+    let (revision, turns) = runtime.desktop_snapshots(conversation_id.as_deref());
     // Bind the history stamp to the same SQLite snapshot as the rows. A write
     // that races this read will still be visible to the next version check.
     let mut tx = state.db.begin().await?;
-    let history_revision = sqlx::query_scalar(HISTORY_REVISION).fetch_one(&mut *tx).await?;
+    let history_revision = sqlx::query_scalar(HISTORY_REVISION)
+        .fetch_one(&mut *tx)
+        .await?;
     let mut messages = vec![];
     let mut conversation_history_revision = None;
     if let Some(id) = &conversation_id {
-        conversation_history_revision = super::retry::conversation_message_revision(&mut tx, id).await?;
+        conversation_history_revision =
+            super::retry::conversation_message_revision(&mut tx, id).await?;
         let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, String)>(
             "SELECT id, role, content, metadata, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC"
         ).bind(id).fetch_all(&mut *tx).await?;
         messages = rows
             .into_iter()
-            .map(|(id, role, content, metadata, created_at)| {
-                crate::commands::conversation::ConversationMessage {
+            .map(
+                |(id, role, content, metadata, created_at)| ConversationMessage {
                     id,
                     role,
                     content,
                     metadata,
                     created_at,
-                }
-            })
+                },
+            )
             .collect();
     }
     tx.commit().await?;
@@ -728,16 +847,24 @@ pub fn speak_completed_turn(
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let config = crate::commands::tts::TtsConfig {
-            provider_id: speech.provider_id,
-            request_id: Some(format!("chat_{turn_id}")),
+        let params = crate::tts::TtsParams {
             voice: speech.voice,
-            speed: speech.speed.map(|v| v as f32),
-            pitch: speech.pitch.map(|v| v as f32),
+            speed: speech.speed.map(|value| value as f32),
+            pitch: speech.pitch.map(|value| value as f32),
             emotion: None,
+            required_capabilities: None,
+            extra_params: None,
         };
-        if let Err(error) =
-            crate::commands::tts::synthesize(app.clone(), app.state(), text, config).await
+        let tts = app.state::<crate::tts::TtsService>();
+        if let Err(error) = tts
+            .speak(
+                app.clone(),
+                text,
+                speech.provider_id,
+                Some(params),
+                format!("chat_{turn_id}"),
+            )
+            .await
         {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");
             let runtime = app.state::<Arc<ChatRuntimeState>>();
@@ -755,16 +882,42 @@ mod tests {
     use super::*;
     fn pending_with_memory_bytes(bytes: usize) -> PendingChatSave {
         PendingChatSave {
-            target: super::super::persistence::ConversationTarget { character_id:"character-a".into(), conversation_id:"conversation-a".into(), create:false },
-            messages:vec![], expected_revision:0, turn_id:"turn".into(), user_message_id:Some(1), creation_generation:None,
-            text:"answer".into(), has_assistant_text:true, speech:None,
-            post_commit:super::super::post_commit::DesktopPostCommit {
-                character_id:"character-a".into(), conversation_id:Some("conversation-a".into()), generation:0, database_generation:0,
-                provider:Arc::new(crate::llm::provider::OpenAIProvider::new("fixture".into(),Some("http://127.0.0.1:9".into()),None)),
-                memory:Some(super::super::post_commit::DesktopMemoryWork {
-                    epoch:0, count:5, history:vec![crate::ai::context::Message {role:"user".into(),content:"x".repeat(bytes),metadata:None}],
-                    language:"en".into(),event:None,structured:false,
-                }), background:None,
+            target: super::super::persistence::ConversationTarget {
+                character_id: "character-a".into(),
+                conversation_id: "conversation-a".into(),
+                create: false,
+            },
+            messages: vec![],
+            expected_revision: 0,
+            turn_id: "turn".into(),
+            user_message_id: Some(1),
+            creation_generation: None,
+            text: "answer".into(),
+            has_assistant_text: true,
+            speech: None,
+            post_commit: super::super::post_commit::DesktopPostCommit {
+                character_id: "character-a".into(),
+                conversation_id: Some("conversation-a".into()),
+                generation: 0,
+                database_generation: 0,
+                provider: Arc::new(crate::llm::provider::OpenAIProvider::new(
+                    "fixture".into(),
+                    Some("http://127.0.0.1:9".into()),
+                    None,
+                )),
+                memory: Some(super::super::post_commit::DesktopMemoryWork {
+                    epoch: 0,
+                    count: 5,
+                    history: vec![crate::ai::context::Message {
+                        role: "user".into(),
+                        content: "x".repeat(bytes),
+                        metadata: None,
+                    }],
+                    language: "en".into(),
+                    event: None,
+                    structured: false,
+                }),
+                background: None,
             },
         }
     }
@@ -772,22 +925,59 @@ mod tests {
     #[test]
     fn deferred_history_counts_toward_the_bounded_save_retry_cache() {
         let runtime = ChatRuntimeState::default();
-        for id in ["first","second"] {
+        for id in ["first", "second"] {
             runtime.begin(&request(id)).unwrap();
-            runtime.prepare_save_retry(id,pending_with_memory_bytes(9*1024*1024));
-            runtime.complete(id,Err(KokoroError::ChatPersistence("fixture".into())));
+            runtime.prepare_save_retry(id, pending_with_memory_bytes(9 * 1024 * 1024));
+            runtime.complete(id, Err(KokoroError::ChatPersistence("fixture".into())));
         }
         assert!(runtime.save_retry("first").is_err());
         assert!(!runtime.turn_scope("first").unwrap().persistence_retryable);
-        assert!(matches!(runtime.save_retry("second"),Ok(SaveRetry::Pending(_))));
+        assert!(matches!(
+            runtime.save_retry("second"),
+            Ok(SaveRetry::Pending(_))
+        ));
         runtime.begin(&request("oversized")).unwrap();
-        runtime.prepare_save_retry("oversized",pending_with_memory_bytes(17*1024*1024));
-        runtime.complete("oversized",Err(KokoroError::ChatPersistence("fixture".into())));
+        runtime.prepare_save_retry("oversized", pending_with_memory_bytes(17 * 1024 * 1024));
+        runtime.complete(
+            "oversized",
+            Err(KokoroError::ChatPersistence("fixture".into())),
+        );
         assert!(runtime.save_retry("oversized").is_err());
     }
 
     fn request(id: &str) -> ChatRequest {
         serde_json::from_value(serde_json::json!({"message":"question", "client_request_id":id,"character_id":"character-a","conversation_id":"conversation-a"})).unwrap()
+    }
+
+    #[test]
+    fn external_save_and_preparation_failures_remain_recoverable_after_eviction() {
+        for (error, user_message_id) in [
+            (KokoroError::ChatPersistence("fixture".into()), Some(7)),
+            (KokoroError::Stt("unavailable".into()), None),
+        ] {
+            let runtime = ChatRuntimeState::default();
+            let policy = ChatPolicy::External {
+                create_conversation: true,
+                image_output: true,
+                source: "webhook",
+            };
+            let original = request("recoverable");
+            assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
+            runtime.event("chat-turn-bound", &serde_json::json!({"client_request_id":"recoverable", "user_message_id":user_message_id}));
+            runtime.complete("recoverable", Err(error.clone()));
+            assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
+            runtime.event("chat-turn-bound", &serde_json::json!({"client_request_id":"recoverable", "user_message_id":user_message_id}));
+            runtime.complete("recoverable", Err(error));
+            for index in 0..256 {
+                let id = format!("other-{index}");
+                runtime.begin(&request(&id)).unwrap();
+                runtime.complete(&id, result(&id));
+            }
+            assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
+            let mut changed = original;
+            changed.message = "changed input".into();
+            assert!(runtime.begin_with_policy(&changed, policy).is_err());
+        }
     }
     fn result(id: &str) -> Outcome {
         Ok(StreamChatResponse {
@@ -797,6 +987,7 @@ mod tests {
             assistant_message_id: Some(2),
             client_request_id: Some(id.into()),
             status: Some("completed".into()),
+            ..Default::default()
         })
     }
     #[tokio::test]
@@ -808,7 +999,10 @@ mod tests {
         sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('a', 'default', 'now', 'now')")
             .execute(&state.db).await.unwrap();
         *state.current_conversation_id.lock().await = Some("a".into());
-        let initial = get_chat_view(&state, &journal, None).await.unwrap().unwrap();
+        let initial = get_chat_view(&state, &journal, None)
+            .await
+            .unwrap()
+            .unwrap();
 
         // A matched version must return without contending for the selection lock.
         let guard = state.conversation_switch_lock.lock().await;
@@ -824,18 +1018,33 @@ mod tests {
 
         sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('a', 'user', 'original', 'now')")
             .execute(&state.db).await.unwrap();
-        let added = get_chat_view(&state, &journal, Some(initial.version)).await.unwrap().unwrap();
+        let added = get_chat_view(&state, &journal, Some(initial.version))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(added.messages[0].content, "original");
 
-        sqlx::query("UPDATE conversation_messages SET content = 'edited' WHERE conversation_id = 'a'")
-            .execute(&state.db).await.unwrap();
-        let edited = get_chat_view(&state, &journal, Some(added.version)).await.unwrap().unwrap();
+        sqlx::query(
+            "UPDATE conversation_messages SET content = 'edited' WHERE conversation_id = 'a'",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let edited = get_chat_view(&state, &journal, Some(added.version))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(edited.version.revision, added.version.revision);
         assert_eq!(edited.messages[0].content, "edited");
 
         sqlx::query("DELETE FROM conversation_messages WHERE conversation_id = 'a'")
-            .execute(&state.db).await.unwrap();
-        let deleted = get_chat_view(&state, &journal, Some(edited.version)).await.unwrap().unwrap();
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let deleted = get_chat_view(&state, &journal, Some(edited.version))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(deleted.messages.is_empty());
     }
 
@@ -849,40 +1058,61 @@ mod tests {
         journal.begin(&with_camera).unwrap();
         let snapshot = journal.complete("camera", result("camera")).unwrap();
         assert_eq!(snapshot.images, attachments);
-        assert!(!serde_json::to_string(&journal.snapshots()).unwrap().contains("private-camera-frame"));
+        assert!(!serde_json::to_string(&journal.snapshots())
+            .unwrap()
+            .contains("private-camera-frame"));
     }
 
     #[tokio::test]
     async fn imported_history_drops_old_attachments_and_invalidates_cached_views() {
-        let state = crate::ai::context::AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        let state = crate::ai::context::AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap();
         let journal = ChatRuntimeState::default();
         sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('a', 'default', 'now', 'now')")
             .execute(&state.db).await.unwrap();
         *state.current_conversation_id.lock().await = Some("a".into());
         sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) VALUES (1, 'a', 'user', 'device A', '{\"client_request_id\":\"a\"}', 'now')")
             .execute(&state.db).await.unwrap();
-        let mut original = request("a"); original.images = Some(vec!["device-a-image".into()]);
+        let mut original = request("a");
+        original.images = Some(vec!["device-a-image".into()]);
         journal.begin(&original).unwrap();
         journal.complete("a", result("a"));
-        let before = get_chat_view(&state, &journal, None).await.unwrap().unwrap();
+        let before = get_chat_view(&state, &journal, None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(before.turns[0].images, vec!["device-a-image"]);
         {
             // This fixture owns its isolated state; production import holds the
             // global write gate, which must not interfere with parallel tests.
             let mut tx = state.db.begin().await.unwrap();
-            sqlx::query("DELETE FROM conversation_messages").execute(&mut *tx).await.unwrap();
+            sqlx::query("DELETE FROM conversation_messages")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) VALUES (1, 'a', 'user', 'device B', '{\"client_request_id\":\"b\"}', 'now')")
                 .execute(&mut *tx).await.unwrap();
             tx.commit().await.unwrap();
             journal.invalidate_imported_history();
         }
-        let after = get_chat_view(&state, &journal, Some(before.version)).await.unwrap().unwrap();
+        let after = get_chat_view(&state, &journal, Some(before.version))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(after.version.revision > before.version.revision);
         assert_eq!(after.messages[0].content, "device B");
         assert!(after.turns.is_empty());
         let (created, old) = journal.begin(&original).unwrap();
         assert!(!created, "import must not make old IDs executable again");
-        assert!(old.borrow().as_ref().unwrap().as_ref().unwrap_err().to_string().contains("chat_history_replaced"));
+        assert!(old
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("chat_history_replaced"));
         assert!(journal.complete("a", result("a")).is_none());
         assert!(journal.begin(&request("new-intent")).unwrap().0);
     }
@@ -897,6 +1127,46 @@ mod tests {
         journal.complete("a", result("a")).unwrap();
         assert_eq!(*a.borrow(), *b.borrow());
         assert!(!journal.begin(&request("a")).unwrap().0);
+    }
+
+    #[test]
+    fn audio_admission_uses_original_bytes_without_retaining_them_in_json() {
+        let journal = ChatRuntimeState::default();
+        let mut original = request("audio");
+        original.audio = Some(crate::chat::application::ChatAudioInput {
+            data: vec![42; 3 * 1024 * 1024],
+            format: "wav".into(),
+        });
+        let encoded = serde_json::to_string(&original).unwrap();
+        assert!(
+            encoded.len() < 1024,
+            "Audio must be hashed before JSON encoding"
+        );
+        let from_ipc: ChatRequest = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            from_ipc.audio.is_none(),
+            "Desktop IPC cannot submit adapter audio"
+        );
+        let policy = ChatPolicy::External {
+            create_conversation: true,
+            image_output: true,
+            source: "webhook",
+        };
+        assert!(journal.begin_with_policy(&original, policy).unwrap().0);
+        journal.complete("audio", result("audio")).unwrap();
+        assert!(!journal.begin_with_policy(&original, policy).unwrap().0);
+        let mut changed = original.clone();
+        changed.audio.as_mut().unwrap().data[0] = 43;
+        assert!(journal
+            .begin_with_policy(&changed, policy)
+            .unwrap_err()
+            .contains("chat_request_conflict"));
+        original.audio.as_mut().unwrap().format = "mp3".into();
+        assert!(journal
+            .begin_with_policy(&original, policy)
+            .unwrap_err()
+            .contains("chat_request_conflict"));
+        assert!(serde_json::to_string(&journal.snapshots()).unwrap().len() < 1024);
     }
     #[test]
     fn conflict_is_rejected_without_changing_original_request() {
@@ -923,7 +1193,9 @@ mod tests {
             &serde_json::json!({"turn_id":"t","delta":"full text"}),
         );
         let before = journal.complete("a", result("a")).unwrap();
-        assert!(journal.complete("a", Err(KokoroError::Chat("late failure".into()))).is_none());
+        assert!(journal
+            .complete("a", Err(KokoroError::Chat("late failure".into())))
+            .is_none());
         assert!(journal
             .event(
                 "chat-turn-delta",
@@ -977,32 +1249,60 @@ mod tests {
                 "chat-turn-text-complete",
                 &serde_json::json!({"client_request_id":"speech-client", "turn_id":"spoken-turn", "text":"answer"}),
             );
-            let complete = || runtime.complete("speech-client", result("speech-client")).unwrap();
+            let complete = || {
+                runtime
+                    .complete("speech-client", result("speech-client"))
+                    .unwrap()
+            };
             let mut completed = (!failure_first).then(complete);
 
             runtime.begin_playback("chat_spoken-turn", "pet");
             let error = || Some("Audio could not be decoded".into());
-            assert!(runtime.finish_playback("chat_spoken-turn", "main", error()).is_none());
-            assert!(runtime.finish_playback("chat_old-turn", "pet", error()).is_none());
-            let failed = runtime.finish_playback("chat_spoken-turn", "pet", error()).unwrap();
-            assert!(runtime.finish_playback("chat_spoken-turn", "pet", error()).is_none());
+            assert!(runtime
+                .finish_playback("chat_spoken-turn", "main", error())
+                .is_none());
+            assert!(runtime
+                .finish_playback("chat_old-turn", "pet", error())
+                .is_none());
+            let failed = runtime
+                .finish_playback("chat_spoken-turn", "pet", error())
+                .unwrap();
+            assert!(runtime
+                .finish_playback("chat_spoken-turn", "pet", error())
+                .is_none());
             if let Some(completed) = &completed {
                 assert!(failed.revision > completed.revision);
             } else {
                 completed = Some(complete());
             }
             let turns = runtime.snapshots();
-            let reply = turns.iter().find(|turn| turn.client_request_id == "speech-client").unwrap();
-            assert_eq!(reply.speech_error.as_deref(), Some("Audio could not be decoded"));
-            assert_eq!(reply.completion_revision, completed.unwrap().completion_revision);
+            let reply = turns
+                .iter()
+                .find(|turn| turn.client_request_id == "speech-client")
+                .unwrap();
+            assert_eq!(
+                reply.speech_error.as_deref(),
+                Some("Audio could not be decoded")
+            );
+            assert_eq!(
+                reply.completion_revision,
+                completed.unwrap().completion_revision
+            );
             assert_eq!(reply.status, "completed");
             assert_eq!(reply.text, "answer");
             assert_eq!(reply.assistant_message_id, Some(2));
             assert!(reply.error.is_none());
-            assert!(turns.iter().find(|turn| turn.client_request_id == "other-client").unwrap().speech_error.is_none());
+            assert!(turns
+                .iter()
+                .find(|turn| turn.client_request_id == "other-client")
+                .unwrap()
+                .speech_error
+                .is_none());
 
             runtime.begin_playback("preview", "main");
-            assert!(runtime.finish_playback("preview", "main", error()).is_none());
+            assert!(runtime
+                .finish_playback("preview", "main", error())
+                .is_none());
             assert!(runtime.1.lock().unwrap().is_none());
         }
     }

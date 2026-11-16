@@ -15,14 +15,7 @@ pub struct ConversationInfo {
     pub updated_at: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConversationMessage {
-    pub id: i64,
-    pub role: String,
-    pub content: String,
-    pub metadata: Option<String>,
-    pub created_at: String,
-}
+pub use crate::chat::runtime::ConversationMessage;
 
 #[derive(Serialize)]
 pub struct LoadedConversation {

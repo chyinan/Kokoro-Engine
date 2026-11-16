@@ -4846,7 +4846,7 @@ mod tests {
                 } else {
                     assert!(plan.is_err(), "foreign diagnostic gained retry authority: {conversation}, overwrite={overwrite}, chain={chain:?}");
                     assert_eq!(tail, rows[0].0, "invalid diagnostics must not become visible tail rows");
-                    assert_eq!(crate::commands::chat::resolve_trailing_visible_user_message(&state.db, conversation).await.unwrap(),
+                    assert_eq!(crate::chat::application::resolve_trailing_visible_user_message(&state.db, conversation).await.unwrap(),
                         Some((rows[0].0, "failed prompt".into())));
                 }
                 let metadata: serde_json::Value = serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();

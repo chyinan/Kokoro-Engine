@@ -93,6 +93,17 @@ async def test_forwards_text_with_private_character_session(plugin_module, monke
 
 
 @pytest.mark.asyncio
+async def test_delivers_text_when_optional_media_fails(plugin_module, monkeypatch):
+    client = FakeAsyncClient(FakeResponse(200, {"reply": "Saved reply", "output_warnings": ["Voice unavailable."]}))
+    monkeypatch.setattr(plugin_module.httpx, "AsyncClient", lambda **_: client)
+    plugin = plugin_module.Main(FakeContext(), config())
+
+    results = await collect(plugin.on_message, FakeEvent([Plain("hello")]))
+
+    assert [part.text for part in results[0].chain] == ["Saved reply", "Voice unavailable."]
+
+
+@pytest.mark.asyncio
 async def test_reports_unauthorized_without_exposing_token(plugin_module, monkeypatch):
     client = FakeAsyncClient(FakeResponse(401, {"error": "unauthorized"}))
     monkeypatch.setattr(plugin_module.httpx, "AsyncClient", lambda **_: client)

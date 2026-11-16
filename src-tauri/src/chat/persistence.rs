@@ -343,7 +343,7 @@ pub(crate) async fn save_draft(
 
 #[derive(Clone)]
 pub(crate) struct PendingUserSave {
-    pub request: crate::commands::chat::ChatRequest,
+    pub request: crate::chat::application::ChatRequest,
     pub target: ConversationTarget,
     pub messages: Vec<MessageWrite>,
     pub expected_revision: Option<i64>,
@@ -368,14 +368,21 @@ pub(crate) struct PendingChatSave {
 
 impl PendingChatSave {
     pub(crate) fn byte_len(&self) -> usize {
-        self.text.len() + self.messages.iter().map(|message| {
-            message.content.len() + message.metadata.as_deref().map_or(0, str::len)
-                + message.save_id.as_deref().map_or(0, str::len)
-        }).sum::<usize>() + self.post_commit.byte_len()
+        self.text.len()
+            + self
+                .messages
+                .iter()
+                .map(|message| {
+                    message.content.len()
+                        + message.metadata.as_deref().map_or(0, str::len)
+                        + message.save_id.as_deref().map_or(0, str::len)
+                })
+                .sum::<usize>()
+            + self.post_commit.byte_len()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExternalReplyImage {
     pub prompt: String,
     pub mime_type: String,
@@ -383,10 +390,12 @@ pub(crate) struct ExternalReplyImage {
     pub data_base64: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExternalReplyMedia {
     pub images: Vec<ExternalReplyImage>,
     pub image_prompts: Vec<String>,
+    #[serde(default)]
+    pub output_warnings: Vec<String>,
 }
 
 impl ExternalReplyMedia {
@@ -401,6 +410,7 @@ impl ExternalReplyMedia {
             })
             .sum::<usize>()
             + self.image_prompts.iter().map(String::len).sum::<usize>()
+            + self.output_warnings.iter().map(String::len).sum::<usize>()
     }
 }
 
@@ -409,6 +419,7 @@ struct PendingExternalReply {
     text: String,
     translation: Option<String>,
     media: ExternalReplyMedia,
+    messages: Vec<MessageWrite>,
     expected_revision: i64,
     database_guard_generation: u64,
     memory_ticket: Option<MemoryTicket>,
@@ -416,7 +427,16 @@ struct PendingExternalReply {
 
 impl PendingExternalReply {
     fn byte_len(&self) -> usize {
-        self.text.len() + self.translation.as_deref().map_or(0, str::len) + self.media.byte_len()
+        self.text.len()
+            + self.translation.as_deref().map_or(0, str::len)
+            + self.media.byte_len()
+            + self
+                .messages
+                .iter()
+                .map(|message| {
+                    message.content.len() + message.metadata.as_deref().map_or(0, str::len)
+                })
+                .sum::<usize>()
     }
 }
 
@@ -485,7 +505,7 @@ pub(crate) struct ExternalTurn {
     pub previous_reply_newly_committed: bool,
     pub previous_reply_media: ExternalReplyMedia,
     pub previous_memory_work: Option<MemoryWork>,
-    user_message_id: i64,
+    pub(crate) user_message_id: i64,
     memory_ticket: Option<MemoryTicket>,
     request_id: String,
 }
@@ -512,6 +532,7 @@ impl ExternalTurn {
         .map_err(KokoroError::chat_persistence)
     }
 
+    #[cfg(test)]
     pub(crate) async fn begin(
         state: &crate::ai::context::AIOrchestrator,
         character_id: &str,
@@ -520,11 +541,21 @@ impl ExternalTurn {
         text: &str,
         continue_selected: bool,
     ) -> Result<Self, KokoroError> {
-        Self::begin_with_input_text(state, character_id, external_conversation_id, request_id, text, continue_selected, None).await
+        Self::begin_with_input_text(
+            state,
+            character_id,
+            external_conversation_id,
+            request_id,
+            text,
+            continue_selected,
+            None,
+        )
+        .await
     }
 
     /// Media transports retain the caller's text separately from fallible STT.
     /// Plain-text callers still compare their complete input at the write boundary.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn begin_with_input_text(
         state: &crate::ai::context::AIOrchestrator,
@@ -534,6 +565,28 @@ impl ExternalTurn {
         text: &str,
         continue_selected: bool,
         input_text: Option<&str>,
+    ) -> Result<Self, KokoroError> {
+        Self::begin_with_input_metadata(
+            state,
+            character_id,
+            external_conversation_id,
+            request_id,
+            text,
+            continue_selected,
+            input_text.map(|text| serde_json::json!({"external_input_text": text})),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn begin_with_input_metadata(
+        state: &crate::ai::context::AIOrchestrator,
+        character_id: &str,
+        external_conversation_id: String,
+        request_id: String,
+        text: &str,
+        continue_selected: bool,
+        metadata: Option<serde_json::Value>,
     ) -> Result<Self, KokoroError> {
         validate_user_input(text)?;
         let _selection = state.conversation_switch_lock.lock().await;
@@ -563,16 +616,22 @@ impl ExternalTurn {
             }),
             create,
         };
+        let previous_metadata: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT metadata FROM conversation_messages WHERE conversation_id=? AND role='user' AND json_extract(metadata,'$.chat_save_id')=?"
+        ).bind(&target.conversation_id).bind(&save_id).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        let metadata = previous_metadata.unwrap_or_else(|| metadata.map(|value| value.to_string()));
         let saved = state
             .save_external_messages_locked(
                 &target,
-                &[MessageWrite::new("user", text, input_text.map(|text| serde_json::json!({"external_input_text":text}).to_string())).with_save_id(save_id)],
+                &[MessageWrite::new("user", text, metadata).with_save_id(save_id)],
                 select_new && create,
                 None,
             )
             .await?;
         let memory_ticket = if saved[0].changed {
-            state.external_memory.admit(&target, saved[0].id, &state.memory_enabled_flag())
+            state
+                .external_memory
+                .admit(&target, saved[0].id, &state.memory_enabled_flag())
         } else {
             None
         };
@@ -623,6 +682,7 @@ impl ExternalTurn {
                     saved[0].id,
                     pending.memory_ticket.as_ref(),
                     Some(pending.expected_revision),
+                    &pending.messages,
                 )
                 .await;
                 if result.is_ok() || matches!(result, Err(KokoroError::Validation(_))) {
@@ -661,6 +721,7 @@ impl ExternalTurn {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn request_id(&self) -> &str {
         &self.request_id
     }
@@ -675,7 +736,11 @@ impl ExternalTurn {
             return Vec::new();
         }
         match state
-            .saved_external_memory_history(&self.target, work.first_message_id, work.through_message_id)
+            .saved_external_memory_history(
+                &self.target,
+                work.first_message_id,
+                work.through_message_id,
+            )
             .await
         {
             Ok(mut history) => {
@@ -699,6 +764,7 @@ impl ExternalTurn {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn save_reply(
         &self,
         state: &crate::ai::context::AIOrchestrator,
@@ -709,12 +775,25 @@ impl ExternalTurn {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn save_reply_with_media(
         &self,
         state: &crate::ai::context::AIOrchestrator,
         text: &str,
         translation: Option<&str>,
         media: ExternalReplyMedia,
+    ) -> Result<Option<MemoryWork>, KokoroError> {
+        self.save_reply_batch(state, text, translation, media, Vec::new())
+            .await
+    }
+
+    pub(crate) async fn save_reply_batch(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+        text: &str,
+        translation: Option<&str>,
+        media: ExternalReplyMedia,
+        messages: Vec<MessageWrite>,
     ) -> Result<Option<MemoryWork>, KokoroError> {
         let _selection = state.conversation_switch_lock.lock().await;
         let revision = current_revision(&state.db, &self.target)
@@ -731,6 +810,7 @@ impl ExternalTurn {
             self.user_message_id,
             self.memory_ticket.as_ref(),
             None,
+            &messages,
         )
         .await;
         if matches!(result, Err(KokoroError::ChatPersistence(_))) {
@@ -742,6 +822,7 @@ impl ExternalTurn {
                         text: text.to_owned(),
                         translation: translation.map(str::to_owned),
                         media,
+                        messages,
                         expected_revision,
                         database_guard_generation:
                             crate::ai::context::database_operation_generation(),
@@ -764,28 +845,44 @@ impl ExternalTurn {
         user_message_id: i64,
         memory_ticket: Option<&MemoryTicket>,
         expected_revision: Option<i64>,
+        messages: &[MessageWrite],
     ) -> Result<Option<MemoryWork>, KokoroError> {
-        let mut metadata = serde_json::Map::new();
+        let final_save_id = format!("{request_id}:assistant");
+        let mut batch = messages.to_vec();
+        let final_message = if batch
+            .last()
+            .is_some_and(|message| message.save_id.as_deref() == Some(&final_save_id))
+        {
+            batch.pop()
+        } else {
+            None
+        };
+        let mut metadata = final_message
+            .and_then(|message| message.metadata)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
         metadata.insert("external_user_message_id".into(), user_message_id.into());
         if let Some(translation) = translation {
             metadata.insert("translation".into(), serde_json::json!(translation));
         }
-        if !media.images.is_empty() || !media.image_prompts.is_empty() {
+        if !media.images.is_empty()
+            || !media.image_prompts.is_empty()
+            || !media.output_warnings.is_empty()
+        {
             metadata.insert("external_reply_media".into(), serde_json::json!(media));
         }
         let metadata =
             (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
+        batch.push(MessageWrite::new("assistant", text, metadata).with_save_id(final_save_id));
         let saved = state
-            .save_external_messages_locked(
-                target,
-                &[MessageWrite::new("assistant", text, metadata)
-                    .with_save_id(format!("{request_id}:assistant"))],
-                false,
-                expected_revision,
-            )
+            .save_external_messages_locked(target, &batch, false, expected_revision)
             .await?;
-        Ok(if saved[0].changed {
-            state.external_memory.complete(target, memory_ticket, saved[0].id)
+        let assistant = saved.last().expect("assistant write");
+        Ok(if assistant.changed {
+            state
+                .external_memory
+                .complete(target, memory_ticket, assistant.id)
         } else {
             None
         })
@@ -1400,14 +1497,17 @@ mod tests {
             ExternalReplyMedia {
                 images: vec![image.clone()],
                 image_prompts: vec![],
+                output_warnings: vec![],
             },
             ExternalReplyMedia {
                 images: vec![],
                 image_prompts: vec!["a lake".into()],
+                output_warnings: vec![],
             },
             ExternalReplyMedia {
                 images: vec![image],
                 image_prompts: vec!["a lake".into()],
+                output_warnings: vec![],
             },
         ]
         .into_iter()
@@ -1488,11 +1588,13 @@ mod tests {
     fn external_reply_cache_counts_media_toward_its_byte_limit() {
         let replies = ExternalReplies::default();
         let pending = PendingExternalReply {
+            messages: Vec::new(),
             text: String::new(),
             translation: None,
             media: ExternalReplyMedia {
                 images: vec![],
                 image_prompts: vec!["x".repeat(9 * 1024 * 1024)],
+                output_warnings: vec![],
             },
             expected_revision: 1,
             database_guard_generation: crate::ai::context::database_operation_generation(),

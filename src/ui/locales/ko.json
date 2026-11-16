@@ -1127,6 +1127,7 @@
         }
     },
     "chat": {
+        "tool_only_completion": "도구 호출이 끝났지만 텍스트 응답이 생성되지 않았습니다.",
         "speech_failed": "이 답변을 읽어 주지 못했습니다: {{error}}",
         "persistence_failed": "채팅을 데이터베이스에 저장하지 못했습니다.",
         "reply_unfinished": "미완료 답변",

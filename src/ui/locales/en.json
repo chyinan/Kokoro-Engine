@@ -1136,6 +1136,7 @@
         }
     },
     "chat": {
+        "tool_only_completion": "The tool calls finished, but no text reply was generated.",
         "speech_failed": "Could not read this reply aloud: {{error}}",
         "persistence_failed": "Could not save this chat to the database.",
         "reply_unfinished": "Unfinished reply",

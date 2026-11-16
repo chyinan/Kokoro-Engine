@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatApplication, emptyChatView, type ChatTransport } from "./application";
 import type { ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
-import { projectMessages } from "./projection";
+import { isActiveTurn, projectMessages, turnMatchesView } from "./projection";
 import { canSubmitApproval } from "./turn-state";
 
 function deferred<T>() {
@@ -238,6 +238,102 @@ describe("UI-independent chat application", () => {
     expect(tools().some(canSubmitApproval)).toBe(false);
     stop();
   });
+  it("keeps a hidden turn visible and cancellable after its first native tool creates a conversation", async () => {
+    const h = harness();
+    const hidden = { ...turn("hidden", 1), hidden: true, conversation_id: null, conversation_generation: 1, user_message_id: null, assistant_message_id: null, text: "" };
+    h.set({ revision: 1, busy: true, conversation_id: null, turns: [hidden] });
+    const stop = h.app.subscribe(() => {});
+    try {
+      await h.app.refresh();
+      const bound = { ...hidden, revision: 3, conversation_id: "created-by-hidden-turn", conversation_generation: 2, text: "Waiting for approval", tools: [
+        { turn_id: "turn_hidden", tool: "approved_execution", tool_trace_id: "1:0", approval_request_id: "hidden_approval", approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval" },
+      ] };
+      h.set({ revision: 3, conversation_id: bound.conversation_id, generation: 2, turns: [bound] });
+      h.emit(bound);
+      await h.app.refresh();
+      const view = h.app.getSnapshot();
+      expect(view.turns.find(current => isActiveTurn(current) && turnMatchesView(view, current))?.client_request_id).toBe("hidden");
+      const messages = projectMessages(view);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ role: "kokoro", text: "Waiting for approval" });
+      expect(messages[0].tools?.filter(canSubmitApproval)).toMatchObject([{ approvalRequestId: "hidden_approval" }]);
+      await h.app.cancel();
+      expect(h.io.cancel).toHaveBeenCalledWith("hidden", "stopped_by_user");
+      expect(projectMessages({ ...view, character_id: "other-character" })).toEqual([]);
+      expect(projectMessages({ ...view, generation: 3 })).toEqual([]);
+    } finally { stop(); }
+  });
+  it.each([false, true])("keeps completed tool results when revisiting a conversation with text=%s", async withText => {
+    const h = harness();
+    const completed = {
+      ...turn("finished", 4, "completed"), conversation_generation: 1,
+      assistant_message_id: withText ? 2 : null, text: withText ? "answer" : "",
+      tools: [{ turn_id: "turn_finished", tool: "lookup", tool_trace_id: "0:0", result: { message: "found" } }],
+    };
+    const messages = [
+      { id: 1, role: "user", content: "question", created_at: "now" },
+      ...(withText ? [{ id: 2, role: "assistant", content: "answer", created_at: "now" }] : []),
+    ];
+    h.set({ revision: 4, generation: 1, messages, turns: [completed] });
+    await h.app.refresh();
+    const original = projectMessages(h.app.getSnapshot());
+    expect(original).toMatchObject([
+      { role: "user", text: "question" },
+      { role: "kokoro", text: withText ? "answer" : "", tools: [{ tool: "lookup", text: "found" }] },
+    ]);
+
+    // Each load_conversation advances generation, even when returning to the same ID.
+    h.set({ conversation_id: "conversation-b", generation: 2, messages: [] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+    h.set({ conversation_id: "conversation-a", generation: 3, messages });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual(original);
+  });
+  it.each(["pending", "accepted", "streaming", "error", "cancelled"] as const)("does not revive or cancel an old-generation %s turn on revisit", async status => {
+    const h = harness();
+    const previous = {
+      ...turn("mod_previous", 4, status), conversation_generation: 1,
+      assistant_message_id: null, preparation_timed_out: true, error: "old failure",
+      tools: [{ turn_id: "turn_mod_previous", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }],
+    };
+    h.set({ revision: 4, generation: 3, turns: [previous], messages: [{ id: 1, role: "user", content: "question", created_at: "now" }] });
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual([{ id: 1, role: "user", text: "question" }]);
+    await h.app.cancel();
+    expect(h.io.cancel).not.toHaveBeenCalled();
+
+    if (["pending", "accepted", "streaming"].includes(status)) {
+      h.set({ turns: [{ ...previous, revision: 5, conversation_generation: 3 }] });
+      await h.app.refresh();
+      expect(projectMessages(h.app.getSnapshot())).toHaveLength(2);
+      await h.app.cancel();
+      expect(h.io.cancel).toHaveBeenCalledWith("mod_previous", "stopped_by_user");
+    }
+  });
+  it.each(["character_id", "conversation_id"] as const)("never supplements saved rows from a completed turn with a different %s", field => {
+    const completed = {
+      ...turn("foreign", 4, "completed"), [field]: "other", conversation_generation: 1,
+      tools: [{ turn_id: "turn_foreign", tool: "lookup", tool_trace_id: "0:0", result: { message: "private result" } }],
+    };
+    const view = {
+      ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", revision: 4, generation: 3,
+      turns: [completed], messages: [
+        { id: 1, role: "user", content: "question", created_at: "now" },
+        { id: 2, role: "assistant", content: "saved answer", created_at: "now" },
+      ],
+    };
+    expect(projectMessages(view)).toEqual([
+      { id: 1, role: "user", text: "question" }, { id: 2, role: "kokoro", text: "saved answer" },
+    ]);
+  });
+  it("requires saved history anchors for old-generation completed results even ahead of the view revision", () => {
+    const completed = {
+      ...turn("old", 10, "completed"), conversation_generation: 1,
+      tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }],
+    };
+    expect(projectMessages({ ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 3, turns: [completed] })).toEqual([]);
+  });
   it("subscribes before snapshot and rejects a read overtaken by an event", async () => {
     const h = harness(); const first = deferred<ChatViewSnapshot>();
     vi.mocked(h.io.read).mockReturnValueOnce(first.promise);
@@ -296,6 +392,35 @@ describe("UI-independent chat application", () => {
     pending.resolve({ status: "cancelled", conversation_id: "" }); await result;
     expect(h.app.getSnapshot().busy).toBe(false);
   });
+  it("does not cancel or project a different external conversation", async () => {
+    const h = harness();
+    const foreign = {
+      ...emptyChatView,
+      character_id: "character-a",
+      conversation_id: "desktop",
+      generation: 3,
+      turns: [{
+        revision: 1, client_request_id: "telegram", turn_id: "external",
+        character_id: "character-a", conversation_id: "telegram-private",
+        user_message_id: null, assistant_message_id: null, message: "private question",
+        images: [], hidden: false, status: "streaming", text: "private answer",
+        translation: null, tools: [], error: null,
+      }],
+    } satisfies ChatViewSnapshot;
+    vi.mocked(h.io.read).mockResolvedValue(foreign);
+    await h.app.refresh();
+    expect(projectMessages(h.app.getSnapshot())).toEqual([]);
+    await h.app.cancel();
+    expect(h.io.cancel).not.toHaveBeenCalled();
+
+    vi.mocked(h.io.read).mockResolvedValue({
+      ...foreign,
+      turns: [{ ...foreign.turns[0], conversation_id: "desktop", revision: 2 }],
+    });
+    await h.app.refresh();
+    await h.app.cancel();
+    expect(h.io.cancel).toHaveBeenCalledWith("telegram", "stopped_by_user");
+  });
   it.each(["denied IPC", "connection lost", "serialization failed"])("releases provisional state after %s before journal registration", async error => {
     const h = harness(); vi.mocked(h.io.send).mockRejectedValueOnce(new Error(error));
     await expect(h.app.send({ message: "one" })).rejects.toThrow(error);
@@ -309,11 +434,11 @@ describe("UI-independent chat application", () => {
     const h = harness(); h.set({ revision: 30, turns: [deleted], messages: [] });
     await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toEqual([]);
   });
-  it("does not restore tool-only results once another turn has reused the saved prompt", () => {
-    const old = { ...turn("old", 1, "completed"), assistant_message_id: null, text: "", tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }] };
-    const newer = turn("new", 2, "completed");
+  it.each(["completed", "cancelled", "error", "streaming"] as const)("does not restore tool-only results when a newer %s turn reused the prompt before revisit", status => {
+    const old = { ...turn("old", 1, "completed"), conversation_generation: 1, assistant_message_id: null, text: "", tools: [{ turn_id: "turn_old", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }] };
+    const newer = { ...turn("new", 2, status), conversation_generation: 2 };
     const user = { id: 1, role: "user", content: "question", created_at: "now" };
-    const view = { ...emptyChatView, character_id: old.character_id!, conversation_id: old.conversation_id, revision: 2, messages: [user] };
+    const view = { ...emptyChatView, character_id: old.character_id!, conversation_id: old.conversation_id, revision: 2, generation: 3, messages: [user] };
     expect(projectMessages({ ...view, turns: [old] }).map(message => message.role)).toEqual(["user", "kokoro"]);
     expect(projectMessages({ ...view, turns: [newer, old] }).map(message => message.role)).toEqual(["user"]);
   });

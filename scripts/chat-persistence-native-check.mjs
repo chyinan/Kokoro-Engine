@@ -320,12 +320,21 @@ try {
     assert.equal(reply.conversation_id, databaseMessage(text)[0].conversation_id);
     return { response, recovered, reply };
   });
-  await check("switching desktop selection during webhook generation does not move either saved message", async () => {
+  await check("shared chat admission rejects selection changes during webhook generation and keeps both rows bound", async () => {
     const text = "[case:db-webhook-switch-slow]";
+    const selected = (await view()).conversation_id;
     const request = webhook(text);
     await waitFor(async () => (await modelCalls("db-webhook-switch-slow")).length === 1);
-    await invoke("clear_history");
-    assert.equal((await view()).conversation_id, null);
+    // Unified chat admission owns history mutation across all entry points.
+    // Capture the structured Tauri rejection inside the page; Playwright wraps
+    // objects thrown across evaluate in Error and loses their code/message.
+    const switchError = await page.evaluate(async () => {
+      try { await window.__TAURI_INTERNALS__.invoke("clear_history"); return null; }
+      catch (error) { return error; }
+    });
+    assert.equal(switchError?.code, "Chat", JSON.stringify(switchError));
+    assert.match(switchError?.message ?? "", /chat_turn_busy|chat turn is|聊天/i);
+    assert.equal((await view()).conversation_id, selected);
     const response = await request;
     assert.equal(response.status, 200, JSON.stringify(response));
     const [prompt] = databaseMessage(text);
@@ -334,8 +343,9 @@ try {
     assert.equal(reply.role, "assistant");
     assert.equal(reply.conversation_id, prompt.conversation_id);
     assert.equal(rows("SELECT character_id FROM conversations WHERE id = ?", reply.conversation_id)[0].character_id, character);
+    await invoke("clear_history");
     assert.equal((await view()).conversation_id, null);
-    return { prompt, reply };
+    return { switchError, prompt, reply };
   });
   await check("hidden retry cannot create a conversation after its empty selection has changed", async () => {
     const id = "persistence_hidden_stale", text = "[case:db-hidden-stale]";

@@ -74,7 +74,9 @@ try {
   assert.equal(report.pendingOriginal.status,200); assert.equal(count('chat'),generatedBefore);
   report.audioCalls={stt:count('stt'),generation:count('chat')};
   assert.deepEqual(report.audioCalls,{stt:2,generation:2});
-  assert.equal((await webhook('audit-committed','changed caption')).status,400);
+  const changedInput = await webhook('audit-committed','changed caption');
+  assert.equal(changedInput.status,409);
+  assert.match(changedInput.body.error,/chat_request_conflict/);
   sttMode='unavailable'; assert.equal((await webhook('audit-first-failure')).status,500);
   sttMode='original'; assert.equal((await webhook('audit-first-failure')).status,200);
   report.audioRows=rows("SELECT role,content,metadata FROM conversation_messages WHERE content IN ('original transcript','original transcript.','audit reply')");
