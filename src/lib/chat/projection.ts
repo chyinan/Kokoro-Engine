@@ -109,13 +109,15 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     const legacyFailure = turn.client_request_id.startsWith("mod_") && turn.user_message_id !== null;
     const persistenceFailure = turn.error_code === "CHAT_PERSISTENCE_ERROR"
       && (turn.conversation_id !== null || turn.conversation_generation === view.generation);
-    if (turn.status === "error" && turn.error && !turn.hidden && (preparationFailure || legacyFailure || persistenceFailure)
+    if (turn.status === "error" && turn.error && (!turn.hidden || persistenceFailure) && (preparationFailure || legacyFailure || persistenceFailure)
       && turn.turn_id && turn.conversation_id === view.conversation_id && !shownFailures.has(turn.turn_id)) {
       const promptIndex = turn.user_message_id !== null && latestTurnByUser.get(turn.user_message_id) === turn
         ? messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id) : -1;
-      const initialSaveFailure = persistenceFailure && turn.user_message_id === null
+      // Hidden turns never save their instruction as a user row. Their failed
+      // assistant save, like an initial user save, belongs to this exact selection.
+      const unanchoredSaveFailure = persistenceFailure && turn.user_message_id === null
         && turn.conversation_generation === view.generation;
-      if (promptIndex >= 0 || initialSaveFailure || (preparationFailure && turn.user_message_id === null)) {
+      if (promptIndex >= 0 || unanchoredSaveFailure || (preparationFailure && turn.user_message_id === null)) {
         let replyIndex = messages.findIndex(message => message.role === "kokoro" && message.turnId === turn.turn_id);
         const partial = persistenceFailure && stripStreamingControlMarkup(turn.text).trim();
         if (partial && replyIndex < 0) {

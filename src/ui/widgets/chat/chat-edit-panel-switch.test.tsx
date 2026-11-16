@@ -117,6 +117,62 @@ it("restores an unfinished reply and offers its storage retry without a saved di
     }
 });
 
+it.each([null, "conv-1"])("recovers a hidden reply through the save button in %s", async conversationId => {
+    chat.reset();
+    const failed = {
+        ...turn("hidden-save", 3, "error"), character_id: "char-1", conversation_id: conversationId,
+        conversation_generation: 1, hidden: true, message: "Private interaction instruction",
+        user_message_id: null, assistant_message_id: null, error: "Could not save chat messages",
+        error_code: "CHAT_PERSISTENCE_ERROR", persistence_retryable: true, text: "Visible hidden-turn answer",
+    };
+    chat.set({ revision: 3, conversation_id: conversationId, turns: [failed] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const retry = () => [...container.querySelectorAll("button")].find(button => button.textContent === "chat.retry_save");
+    const saving = deferred<void>();
+    chat.retryPersistence.mockReturnValueOnce(saving.promise);
+    try {
+        await act(async () => root.render(<ChatPanel />));
+        expect(container.textContent).toContain(failed.text);
+        expect(container.textContent).not.toContain(failed.message);
+        expect(container.textContent).toContain("chat.reply_unfinished");
+        expect(container.querySelector('[role="alert"]')?.textContent).toBe("chat.persistence_failed");
+        expect(container.querySelector('[title="chat.actions.retry"]')).toBeNull();
+        expect(retry()).toBeDefined();
+        await act(async () => retry()!.click());
+        expect(retry()!.disabled).toBe(true);
+        expect(chat.retryPersistence).toHaveBeenCalledExactlyOnceWith(failed.client_request_id);
+        expect(chat.send).not.toHaveBeenCalled();
+        expect(chat.continueFrom).not.toHaveBeenCalled();
+        const savedConversation = conversationId ?? "created-after-save";
+        const savedGeneration = conversationId === null ? 2 : 1;
+        await act(async () => {
+            chat.set({
+                revision: 4, conversation_id: savedConversation, generation: savedGeneration,
+                turns: [{ ...failed, revision: 4, completion_revision: 4, status: "completed", conversation_id: savedConversation,
+                    conversation_generation: savedGeneration, persistence_retryable: false, error: null, assistant_message_id: 2 }],
+                messages: [{ id: 2, role: "assistant", content: failed.text, created_at: "now", metadata: JSON.stringify({ turn_id: failed.turn_id }) }],
+            });
+            saving.resolve();
+        });
+        expect(container.querySelector('[role="alert"]')).toBeNull();
+        expect(container.textContent).not.toContain("chat.reply_unfinished");
+        expect(container.textContent).not.toContain(failed.message);
+        expect(container.textContent?.split(failed.text)).toHaveLength(2);
+        expect(retry()).toBeUndefined();
+        // A delayed old failed snapshot must not restore a discarded reply.
+        await act(async () => chat.set({ generation: savedGeneration + 1, messages: [], turns: [failed] }));
+        expect(container.textContent).not.toContain(failed.text);
+        expect(container.querySelector('[role="alert"]')).toBeNull();
+        expect(retry()).toBeUndefined();
+    } finally {
+        saving.resolve();
+        await act(async () => root.unmount());
+        container.remove();
+    }
+});
+
 it("shows the legacy Mod failure once across the journal and history, scoped to its conversation and character", async () => {
     chat.reset();
     const prompt = { id: 1, role: "user", content: "Mod prompt", created_at: "now" };

@@ -87,6 +87,29 @@ describe("persistence failures in the chat view", () => {
     expect(projectMessages(selection)).toEqual([expect.objectContaining({ persistenceFailure: true })]);
     expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
   });
+
+  it.each([null, "conversation-a"])("keeps a hidden reply's save failure visible in %s without exposing its instruction", conversationId => {
+    const failedHidden = {
+      ...failedSave, hidden: true, message: "Private touch instruction", conversation_id: conversationId,
+      conversation_generation: 2, user_message_id: null, persistence_retryable: true,
+    };
+    const selection = { ...emptyChatView, character_id: "character-a", conversation_id: conversationId, generation: 2, turns: [failedHidden] };
+    const projected = projectMessages(selection);
+    expect(projected).toEqual([
+      expect.objectContaining({ role: "kokoro", text: "answer", unfinished: true }),
+      expect.objectContaining({ role: "kokoro", isError: true, persistenceFailure: true, canRetryPersistence: true, clientRequestId: failedHidden.client_request_id }),
+    ]);
+    expect(projected.some(message => message.text === failedHidden.message || message.role === "user")).toBe(false);
+    expect(projected[1].canRetryFailure).toBeUndefined();
+    expect(projectMessages({ ...selection, character_id: "character-b" })).toEqual([]);
+    expect(projectMessages({ ...selection, conversation_id: "conversation-b" })).toEqual([]);
+    expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
+    expect(projectMessages({ ...selection, turns: [{ ...failedHidden, conversation_generation: undefined }] })).toEqual([]);
+    const unavailable = projectMessages({ ...selection, turns: [{ ...failedHidden, persistence_retryable: false }] });
+    expect(unavailable).toHaveLength(2);
+    expect(unavailable[1].canRetryPersistence).toBeUndefined();
+    expect(projectMessages({ ...selection, turns: [{ ...failedHidden, error_code: "LLM_ERROR" }] })).toEqual([]);
+  });
 });
 
 describe("UI-independent chat application", () => {
