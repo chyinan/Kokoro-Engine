@@ -244,15 +244,25 @@ impl ChatRuntimeState {
                     // A recoverable external save/preparation failure must still
                     // reach SQLite after journal eviction. Started generations
                     // remain protected by the persisted user identity.
-                    if entry.desktop
+                    let saved_external_reply = matches!(
+                        journal.retired.get(&id),
+                        Some((_, RetiredOutcome::SavedExternalReply))
+                    );
+                    let busy_rejection = matches!(&outcome, Err(KokoroError::Chat(error)) if error.starts_with("chat_turn_busy"));
+                    if saved_external_reply
+                        || busy_rejection
+                        || entry.desktop
                         || outcome.is_ok()
                         || (entry.snapshot.user_message_id.is_some()
                             && !matches!(outcome, Err(KokoroError::ChatPersistence(_))))
                     {
-                        let retired = if !entry.desktop
-                            && outcome
-                                .as_ref()
-                                .is_ok_and(|reply| reply.assistant_message_id.is_some())
+                        // A busy first attempt stays rejected. A busy reload
+                        // of an already committed reply must remain reloadable.
+                        let retired = if saved_external_reply
+                            || (!entry.desktop
+                                && outcome
+                                    .as_ref()
+                                    .is_ok_and(|reply| reply.assistant_message_id.is_some()))
                         {
                             RetiredOutcome::SavedExternalReply
                         } else {
@@ -1441,6 +1451,12 @@ mod tests {
             "0",
             Err(KokoroError::Chat("chat_turn_busy: fixture".into())),
         );
+        for index in 0..256 {
+            let id = format!("evict-busy-reload-{index}");
+            runtime.begin(&request(&id)).unwrap();
+            runtime.complete(&id, result(&id));
+        }
+        assert!(runtime.turn_scope("0").is_none());
         let (retry, _, replay_only) = runtime.begin_with_policy(&request("0"), policy).unwrap();
         assert!(
             retry && replay_only,

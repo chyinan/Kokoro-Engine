@@ -103,6 +103,7 @@ async fn append_failure_event_jsonl(
 
 async fn persist_failure_event_to_conversation(
     state: &AIOrchestrator,
+    policy: ChatPolicy,
     failure_event: &crate::error::FailureEvent,
     user_message_id: Option<i64>,
     keep_through_message_id: Option<i64>,
@@ -117,6 +118,12 @@ async fn persist_failure_event_to_conversation(
         "event": failure_event,
         "user_message_id": user_message_id.filter(|_| failure_event.retryable),
     });
+    if !policy.is_desktop() {
+        // Origin is independent of retry permission: a tool may already have
+        // run even though the diagnostic still belongs to an external turn.
+        metadata["source"] = policy.source().into();
+        metadata["external_user_message_id"] = user_message_id.into();
+    }
     if let Some(id) = keep_through_message_id.filter(|_| failure_event.retryable) {
         metadata["keep_through_message_id"] = id.into();
     }
@@ -154,6 +161,7 @@ async fn emit_and_persist_failure_event(
 
     if let Err(error) = persist_failure_event_to_conversation(
         state,
+        policy,
         &failure_event,
         user_message_id,
         keep_through_message_id,

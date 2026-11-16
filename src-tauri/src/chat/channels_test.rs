@@ -705,6 +705,63 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
             .unwrap(),
         result
     );
+    let before_rejected_replay = (
+        provider.prompts.lock().unwrap().len(),
+        tool_executions.load(Ordering::Relaxed),
+    );
+    for index in 0..256 {
+        let id = format!("evict-first-busy-{index}");
+        runtime
+            .begin(&ChatRequest {
+                message: "fixture".into(),
+                client_request_id: Some(id.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        runtime.complete(
+            &id,
+            Ok(super::application::StreamChatResponse {
+                status: Some("completed".into()),
+                ..Default::default()
+            }),
+        );
+    }
+    assert!(!runtime
+        .snapshots()
+        .iter()
+        .any(|snapshot| snapshot.message == "same conversation"));
+    let rejected_again = submit_message(
+        &handle,
+        ChatId(10),
+        4,
+        "same conversation",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(rejected_again.to_string(), other.to_string());
+    let conflicting_replay = submit_message(
+        &handle,
+        ChatId(10),
+        4,
+        "changed rejected input",
+        vec![],
+        &continued,
+        "test-character",
+    )
+    .await;
+    assert!(
+        matches!(conflicting_replay, Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+    );
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tool_executions.load(Ordering::Relaxed)
+        ),
+        before_rejected_replay
+    );
     let activation = state.acquire_activation_lock().await;
     let during_activation = submit_message(
         &handle,
@@ -1086,6 +1143,7 @@ async fn verify_persisted_external_contracts(
         "Production contract regressions: {defects:#?}"
     );
     verify_shared_native_memory_origin(app, provider, tools).await;
+    verify_external_failure_memory_origin(app, provider, tools).await;
 
     // Return this shared fixture to the initial state for the existing scenarios.
     state.set_memory_enabled(false).await;
@@ -1269,6 +1327,138 @@ async fn verify_legacy_metadata_and_retired_media(
         .await
         .unwrap();
     runtime.forget_completed_for_restart_test();
+}
+
+async fn verify_external_failure_memory_origin(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+    tools: &AtomicUsize,
+) {
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    state.set_memory_enabled(false).await;
+    state.set_memory_enabled(true).await;
+    crate::commands::chat::stream_chat(
+        app.clone(),
+        ChatRequest {
+            message: "desktop memory before external failure".into(),
+            character_id: Some("test-character".into()),
+            conversation_id: Some("desktop".into()),
+            client_request_id: Some("failure-memory-desktop".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let contents = |messages: Vec<crate::ai::context::Message>| {
+        messages
+            .into_iter()
+            .map(|message| (message.role, message.content))
+            .collect::<Vec<_>>()
+    };
+    let baseline = contents(state.get_recent_memory_history(20).await);
+    assert!(baseline
+        .iter()
+        .any(|(_, content)| content == "desktop memory before external failure"));
+    let mode = SessionMode::Desktop {
+        character_id: "test-character".into(),
+        conversation_id: "desktop".into(),
+    };
+    let failure = submit_message(
+        app,
+        ChatId(779),
+        1,
+        "[after-tool-stream-failure]",
+        vec![],
+        &mode,
+        "test-character",
+    )
+    .await;
+    assert!(
+        matches!(failure, Err(KokoroError::Llm(error)) if error == "fixture post-tool stream failed")
+    );
+    let before = (
+        provider.prompts.lock().unwrap().len(),
+        tools.load(Ordering::Relaxed),
+    );
+    let snapshot = runtime
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.message == "[after-tool-stream-failure]")
+        .unwrap();
+    let (diagnostic_id, diagnostic_content, raw): (i64, String, String) = sqlx::query_as("SELECT id,content,metadata FROM conversation_messages WHERE conversation_id='desktop' AND role='system' AND json_extract(metadata,'$.event.turn_id')=?")
+        .bind(snapshot.turn_id.as_deref()).fetch_one(&state.db).await.unwrap();
+    let metadata: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(metadata["source"], "telegram");
+    assert_eq!(
+        metadata["external_user_message_id"],
+        snapshot.user_message_id.unwrap()
+    );
+    assert_eq!(metadata["event"]["retryable"], false);
+    assert!(metadata["user_message_id"].is_null());
+    assert!(metadata.get("keep_through_message_id").is_none());
+    assert_eq!(
+        contents(state.get_recent_memory_history(20).await),
+        baseline
+    );
+
+    // The independent origin marker must not grant diagnostic regeneration.
+    let retry = super::retry::FailureRetry {
+        diagnostic_message_id: diagnostic_id,
+        expected_tail_message_id: diagnostic_id,
+        expected_history_revision: None,
+    };
+    assert!(matches!(
+        super::retry::RegenerationPlan::prepare(
+            &state,
+            &runtime,
+            super::retry::Regeneration::Failure(&retry),
+            "test-character",
+            "desktop",
+            "[after-tool-stream-failure]"
+        )
+        .await,
+        Err(KokoroError::Validation(_))
+    ));
+    assert!(submit_message(
+        app,
+        ChatId(779),
+        1,
+        "[after-tool-stream-failure]",
+        vec![],
+        &mode,
+        "test-character"
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        (
+            provider.prompts.lock().unwrap().len(),
+            tools.load(Ordering::Relaxed)
+        ),
+        before
+    );
+
+    // More diagnostics than the shared window must still be filtered in SQL
+    // before LIMIT, so the earlier desktop input remains available to memory.
+    sqlx::query("WITH RECURSIVE copies(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM copies WHERE n<300) INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) SELECT 'desktop','system',?,?,'now' FROM copies")
+        .bind(&diagnostic_content).bind(&raw).execute(&state.db).await.unwrap();
+    assert_eq!(
+        contents(state.get_recent_memory_history(20).await),
+        baseline
+    );
+    // Exercise the in-memory fallback independently of the SQL boundary.
+    state
+        .sync_history_from_rows(vec![
+            ("user".to_string(), "fallback desktop".to_string(), None),
+            ("system".to_string(), diagnostic_content, Some(raw)),
+        ])
+        .await;
+    state.set_memory_history_boundary(0).await;
+    assert_eq!(
+        contents(state.get_recent_memory_history(20).await),
+        vec![("user".into(), "fallback desktop".into())]
+    );
 }
 
 async fn verify_shared_native_memory_origin(
