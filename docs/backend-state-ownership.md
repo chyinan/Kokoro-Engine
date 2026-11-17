@@ -1,6 +1,6 @@
 # 后端状态所有权与请求身份
 
-本次工作从本地 `main`（`118c5fc75de7b038ec25d3f7f59fb1d80a5ada68`）建立 `codex/backend-state-ownership`。沿用 SQLx、已有聊天应用入口、原子保存、角色激活协调器和 `ChatRuntimeState`；没有引入状态管理框架或新的持久化系统。
+本次工作最初从本地 `main`（`118c5fc75de7b038ec25d3f7f59fb1d80a5ada68`）建立 `codex/backend-state-ownership`。沿用 SQLx、已有聊天应用入口、原子保存、角色激活协调器和 `ChatRuntimeState`；没有引入状态管理框架或新的持久化系统。
 
 ## 不变量与身份路径
 
@@ -83,19 +83,19 @@
 | 11 行为测试 | 通过（本地验证范围） | 上述 Notify 暂停点、SQL/事件/实际合成断言；native 继续覆盖完整 IPC/WebView/提交恢复 |
 | 12 隐式状态减少 | 通过（本地验证范围） | 本文状态表、身份路径、兼容条件；删除 fork、全局业务计数和执行期当前选择补全 |
 
-最终验证记录（2026-11-17，本工作树；主代理独立验收通过）：
+首次验收记录（2026-11-17，旧基线 `118c5fc`；主代理独立验收通过，后续 rebase 验证见文末）：
 
 - `npm test`：88 文件、953/953；`output/state-ownership/npm-snapshot-final.log`。
 - `npm run build`：通过；`build-snapshot-final.log`，主代理独立 `master-build-ownership-final.log`。保留已有 bundle 体积/动态导入提示。
 - `npm run check:ipc`：177 个注册命令检查通过；主代理 `master-ipc-ownership-final.log`。
 - `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`clippy-final-5.log`。
 - `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1000/1000，bin/doc 0；`rust-final-5.log`，无后台 panic。
-- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：主代理从最终源码重建后验收 **39/39**；`master-native-lifecycle-final.log`、`output/playwright/chat-lifecycle/native-report.json`。
-- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright" -Persistence -SkipBuild`：同一最终二进制 **17/17**，恢复检查 `status=passed`；`master-native-persistence-final.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json`、同目录 `recovery-report.json`。覆盖真实 WebView/IPC/SQLite 的提交故障、hidden 保存恢复、媒体恢复、第五/二十轮记忆与巩固、撤销 epoch、切换后原 owner 后台任务。
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：主代理从最终源码重建后验收 **39/39**；`master-native-lifecycle-final.log`、`output/state-ownership/pre-rebase-native/lifecycle-report.json`。
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright" -Persistence -SkipBuild`：同一最终二进制 **17/17**，恢复检查 `status=passed`；`master-native-persistence-final.log`、`output/state-ownership/pre-rebase-native/persistence-report.json`、同目录 `recovery-report.json`。覆盖真实 WebView/IPC/SQLite 的提交故障、hidden 保存恢复、媒体恢复、第五/二十轮记忆与巩固、撤销 epoch、切换后原 owner 后台任务。
 
 Rust 使用 `ORT_SKIP_DOWNLOAD=1` 与已有本地 ONNX DLL，以及 `CARGO_TARGET_DIR=E:\Kokoro-Engine\src-tauri\target` 缓存；源码始终来自本工作树。未纳入 DLL、node_modules junction 或 output 产物。MSVC 链接器可能输出已有 LNK4098 警告，与严格 lib clippy 检查分开记录。
 
-最终原生二进制 SHA-256：`3E58AC86CC3A0F23B1D423D29BC4E9352EC550D28BFD09F53A7800E3302704EB`，记录在 `output/playwright/chat-lifecycle/executable.json`；主代理另存 `output/state-ownership/source-manifest-final.json`，最终复算 47 个源文件 changed=0。两个原生套件均 exit 0，端口 1420/19333/19334/19335/19336 无监听残留。阶段/失败日志留在 `output/state-ownership/` 供诊断，不作为最终通过依据。`git diff --check` exit 0；依赖、DLL、运行数据和测试产物均未纳入交付。
+首次验收原生二进制 SHA-256：`3E58AC86CC3A0F23B1D423D29BC4E9352EC550D28BFD09F53A7800E3302704EB`，记录在 `output/state-ownership/pre-rebase-native/lifecycle-executable.json`；主代理另存 `output/state-ownership/pre-rebase-native/source-manifest.json`，最终复算 47 个源文件 changed=0。两个原生套件均 exit 0，端口 1420/19333/19334/19335/19336 无监听残留。阶段/失败日志留在 `output/state-ownership/` 供诊断，不作为最终通过依据。`git diff --check` exit 0；依赖、DLL、运行数据和测试产物均未纳入交付。
 
 
 ## 未验证边界与有意保留
@@ -109,3 +109,32 @@ Rust 使用 `ORT_SKIP_DOWNLOAD=1` 与已有本地 ONNX DLL，以及 `CARGO_TARGE
 - 已移除旧 `#[cfg(test)] ensure_conversation_created_for_hidden_turn` 及 7 个只测试该镜像构造器的测试。它们曾断言“切换取消旧任务”，与新要求冲突且并非生产路径。真实 Tauri channels 测试继续覆盖 hidden 提前预留、审批、取消、no-op、提交失败恢复和重复投递。
 
 原生脚本同步了本次选择语义，并修正了已有验收假设：工具已派发后的失败仍保持原有不可重放规则；另以没有派发工具的 partial SSE 错误验证可重试提示、部分回复清理和用户锚点。准备暂停持有 selection lock 时，使用发送前订阅的 `chat-runtime-changed` 记录 accepted 身份，直接查 SQLite 验证预留未物化，不用会等待该锁的 snapshot IPC 代替同步信号。生产工具重放策略没有改变。
+
+
+## Rebase 到最新 fork/main（2026-11-17）
+
+原验收改动已单独提交为 `f8edaaff960bda310bf778d4bb6f5196bd060fa2`，精确包含 49 个任务文件，提交前 47 个源码文件与首次验收清单相符。随后 `git fetch fork main`，将分支从旧基线 `118c5fc75de7b038ec25d3f7f59fb1d80a5ada68` rebase 到 `e3180e860bbee1cb07d417df1ed68146fceb649b`。重放后的实现提交为 `d7add8039f91676665bb1bdcfa0791ea3489b86c`，其父提交和 merge-base 均为新 fork/main。
+
+冲突与兼容处理：
+
+- `chat/application.rs`：保留首次回复的语音/记忆快照、生命周期 scope 与同一保存提交入口，同时保留新基线 assistant 查询的 `CASE WHEN json_valid(metadata)` 保护、外部错误来源元数据和 `require_saved_external_reply` 防止淘汰后的旧请求重新生成。
+- `src/lib/chat/projection.ts`：保留新基线 hidden 保存失败的按钮与可见回复，筛选继续使用稳定角色/会话身份；仅空白预留会话依赖 admission generation。对应测试保留指令不泄露、保存不重发、不同会话隔离等断言。
+- 自动合并后的 `chat/runtime.rs` 按新 `RetiredOutcome` 显式处理桌面终态，拒绝跨渠道复用；外部已完成回复淘汰后只保留指纹并受 SQL 重放保护，保留首次 busy 拒绝与导入失效规则；旧语音快照仍在淘汰时释放。
+- Telegram 保留新基线入口 allowlist 校验、精确带符号 chat ID、逐消息配置更新及全部拒绝路径测试，迁移测试中的旧 fork/history 访问；平台 thread/session 绑定和回复 thread_id 继续生效。
+- 上游新增 `verify_external_failure_memory_origin` 保留外部诊断来源、不可重放、300 条诊断在 SQL LIMIT 前过滤的断言。其最后一段改为验证“人工污染 UI 历史投影不覆盖已提交 SQL 记忆窗口”，与本次权威来源约束一致。
+
+新基线检查：
+
+- `cargo check --offline --manifest-path src-tauri/Cargo.toml --tests`：通过；`output/state-ownership/rebase-check-1.log`。
+- `npm test`：89 文件、960/960；`rebase-npm-test-1.log`。
+- `npm run build`：通过；`rebase-build-1.log`，仅已有 bundle/import 提示。
+- `npm run check:ipc`：177 个命令通过；`rebase-ipc-1.log`。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1007/1007，bin/doc 0，无后台 panic；`rebase-rust-all-2.log`。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`rebase-clippy-1.log`。
+- 主代理重新运行上述 lifecycle 命令，从提交 `d7add80` 重建后 **39/39**，进程 exit 0；`master-rebase-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
+- 主代理对同一新二进制运行上述 `-Persistence -SkipBuild` 命令：**17/17**，恢复检查 `status=passed`，进程 exit 0；`master-rebase-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json`、同目录 `recovery-report.json`。
+- 两个套件的二进制 SHA-256 均为 `DA322CBFD54B3387CCE7FE168EBB780F1DF57D36396DF7572CEEA57207FEFF8E`；`output/state-ownership/source-manifest-rebase.json` 中 47 个源文件最终复算 changed=0。端口 1420/19333/19334/19335/19336 无监听残留。
+
+本次 rebase 后的全量测试、严格检查和原生验收全部通过，表中 12 项本地行为保证在新基线继续成立。仅提交本任务源码和文档，`git diff --check` 通过；运行产物、依赖、数据库和本机配置未纳入提交。
+
+首次验收报告与二进制信息已复制到 `output/state-ownership/pre-rebase-native/`，绑定旧源码清单和原二进制；不能用它们代替本次 rebase 后的原生验收。真实平台网络、云 Provider 和非 Windows 平台的未验证范围继续适用。
