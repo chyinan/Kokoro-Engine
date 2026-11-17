@@ -945,8 +945,45 @@ pub async fn get_chat_view(
     }))
 }
 
+/// Automatic playback is a revocable view effect, separate from the saved turn.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct ChatPlaybackScope {
+    pub client_request_id: String,
+    pub turn_id: String,
+    pub character_id: String,
+    pub conversation_id: String,
+    pub selection_generation: u64,
+}
+
+impl ChatPlaybackScope {
+    pub(crate) async fn is_selected(&self, app: &tauri::AppHandle) -> bool {
+        let state = app.state::<crate::ai::context::AIOrchestrator>();
+        let Ok(_activation) = state.enter_chat_turn() else {
+            return false;
+        };
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        self.matches_selection(&state).await
+    }
+
+    /// Caller holds activation and the selection lock, including through request registration.
+    pub(crate) async fn matches_selection(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+    ) -> bool {
+        state.current_conversation_generation() == self.selection_generation
+            && state.get_character_id().await == self.character_id
+            && state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .as_deref()
+                == Some(self.conversation_id.as_str())
+    }
+}
+
 /// One execution owner schedules speech; restoring a view never synthesizes.
-pub(crate) fn speak_completed_turn(
+pub(crate) async fn speak_completed_turn(
     app: tauri::AppHandle,
     client_request_id: String,
     turn_id: String,
@@ -969,12 +1006,51 @@ pub(crate) fn speak_completed_turn(
     let Some(snapshot) = snapshot else {
         return;
     };
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    let Some(turn) = runtime.turn_scope(&client_request_id) else {
+        return;
+    };
+    let (Some(character_id), Some(conversation_id)) = (turn.character_id, turn.conversation_id)
+    else {
+        return;
+    };
+    let scope = {
+        let state = app.state::<crate::ai::context::AIOrchestrator>();
+        let Ok(_activation) = state.enter_chat_turn() else {
+            return;
+        };
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        if state.get_character_id().await != character_id
+            || state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .as_deref()
+                != Some(conversation_id.as_str())
+        {
+            return;
+        }
+        ChatPlaybackScope {
+            client_request_id: client_request_id.clone(),
+            turn_id: turn_id.clone(),
+            character_id,
+            conversation_id,
+            selection_generation: state.current_conversation_generation(),
+        }
+    };
     tauri::async_runtime::spawn(async move {
         let Some(tts) = app.try_state::<crate::tts::TtsService>() else {
             return;
         };
         let result = tts
-            .speak_snapshot(app.clone(), text, format!("chat_{turn_id}"), snapshot)
+            .speak_snapshot(
+                app.clone(),
+                text,
+                format!("chat_{turn_id}"),
+                snapshot,
+                scope,
+            )
             .await;
         if let Err(error) = result {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");

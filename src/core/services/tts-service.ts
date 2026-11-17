@@ -1,12 +1,16 @@
 import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { cancelTts, getLatestTtsRequestId, finishChatPlayback } from "../../lib/kokoro-bridge";
+import { chatApplication, type ChatApplication } from "../../lib/chat/application";
+import { chatEventMatchesView } from "../../lib/chat/projection";
+import type { ChatPlaybackScope } from "../../lib/kokoro-bridge";
 import type { TtsAudioFormat } from "../../core/types/mod";
 import { audioPlayer } from "../services";
 import { VoiceInterruptService } from "./voice-interrupt-service";
 
 interface TtsStartEvent {
     request_id?: string;
+    chat_scope?: ChatPlaybackScope;
     text: string;
 }
 
@@ -100,6 +104,12 @@ class BrowserSpeechSynthesis {
 const MAX_PENDING_TTS_AUDIO_BYTES = 1_000_000;
 
 export class TtsService {
+    constructor(private readonly chats: Pick<ChatApplication, "getSnapshot" | "subscribe" | "refresh"> = chatApplication) {}
+
+    private activeChatScope: ChatPlaybackScope | null = null;
+    private startSequence = 0;
+    private pendingStart: { requestId: string; ready: Promise<void>; audioBytes: number } | null = null;
+    private removeSelectionListener: (() => void) | null = null;
     private unlistenFunctions: (() => void)[] = [];
     private browserTTS = new BrowserSpeechSynthesis();
     private voiceInterrupt = new VoiceInterruptService();
@@ -167,25 +177,44 @@ export class TtsService {
             const requestId = event.payload.request_id ?? getLatestTtsRequestId() ?? "legacy-tts-request";
             const latestRequestId = getLatestTtsRequestId();
             if (!requestId.startsWith("chat_") && latestRequestId && requestId !== latestRequestId) return;
-            console.log("[TTS] Started request:", requestId);
-            if (this.activeRequestId && this.activeRequestId !== requestId) {
-                void finishChatPlayback(this.activeRequestId).catch(() => {});
+            if (this.pendingStart && this.pendingStart.requestId !== requestId) this.rejectStart(this.pendingStart.requestId);
+            const sequence = ++this.startSequence;
+            const scope = event.payload.chat_scope;
+            if (!scope) {
+                this.pendingStart = null;
+                this.acceptStart(requestId, null);
+                return;
             }
-            this.playbackGeneration++;
-            this.activeRequestId = requestId;
-            this.isStreamActive = true;
-            this.serverEnded = false;
-            this.browserPending = 0;
-            this.audioEventQueue = Promise.resolve();
-            this.pendingAudioBytes = 0;
-            audioPlayer.clearQueue();
-            this.browserTTS.cancel();
+            // Validate before replacing any current output. A late A start must
+            // not clear a valid B/manual stream while its scope is being checked.
+            const ready = this.chats.refresh().then(() => {
+                if (this.generation !== gen || sequence !== this.startSequence) return;
+                if (this.scopeMatchesView(scope)) this.acceptStart(requestId, scope);
+                else this.rejectStart(requestId);
+            }, () => {
+                if (sequence === this.startSequence) this.rejectStart(requestId);
+            }).finally(() => {
+                if (this.pendingStart?.ready === ready) this.pendingStart = null;
+            });
+            this.pendingStart = { requestId, ready, audioBytes: 0 };
+            return ready;
         }, playbackTarget);
         if (this.generation !== gen) { unlistenStart(); return; }
         this.unlistenFunctions.push(unlistenStart);
 
         // Listen for Audio Chunks (from Rust providers)
-        const unlistenAudio = await listen<TtsAudioEvent>("tts:audio", (event) => {
+        const unlistenAudio = await listen<TtsAudioEvent>("tts:audio", async (event) => {
+            if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) {
+                const pending = this.pendingStart;
+                pending.audioBytes += event.payload.data.length;
+                if (pending.audioBytes > MAX_PENDING_TTS_AUDIO_BYTES) {
+                    ++this.startSequence;
+                    this.pendingStart = null;
+                    this.rejectStart(pending.requestId);
+                    return;
+                }
+                await pending.ready;
+            }
             if (this.generation !== gen || !this.isCurrentRequest(event.payload.request_id)) return;
             const playbackGeneration = this.playbackGeneration;
             const { data, format } = event.payload;
@@ -216,7 +245,8 @@ export class TtsService {
         // Listen for Browser Delegate (frontend handles TTS)
         const unlistenBrowserDelegate = await listen<TtsBrowserDelegateEvent>(
             "tts:browser-delegate",
-            (event) => {
+            async (event) => {
+                if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) await this.pendingStart.ready;
                 if (this.generation !== gen || !this.isCurrentRequest(event.payload.request_id)) return;
                 const { text, voice, speed, pitch } = event.payload;
                 const requestId = this.activeRequestId;
@@ -246,7 +276,8 @@ export class TtsService {
         this.unlistenFunctions.push(unlistenBrowserDelegate);
 
         // Listen for End
-        const unlistenError = await listen<TtsErrorEvent>("tts:error", (event) => {
+        const unlistenError = await listen<TtsErrorEvent>("tts:error", async (event) => {
+            if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) await this.pendingStart.ready;
             if (this.generation !== gen || !this.isCurrentRequest(event.payload.request_id)) return;
             console.warn("[TTS] Synthesis request failed:", event.payload.error);
         }, playbackTarget);
@@ -254,6 +285,7 @@ export class TtsService {
         this.unlistenFunctions.push(unlistenError);
 
         const unlistenEnd = await listen<TtsEndEvent>("tts:end", async (event) => {
+            if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) await this.pendingStart.ready;
             if (this.generation !== gen) return;
             if (!this.isCurrentRequest(event.payload.request_id)) return;
             if (event.payload.status === "cancelled") {
@@ -272,7 +304,38 @@ export class TtsService {
         this.unlistenFunctions.push(unlistenEnd);
     }
 
+    private acceptStart(requestId: string, scope: ChatPlaybackScope | null): void {
+        if (this.activeRequestId && this.activeRequestId !== requestId) {
+            void finishChatPlayback(this.activeRequestId).catch(() => {});
+        }
+        this.playbackGeneration++;
+        this.activeRequestId = requestId;
+        this.activeChatScope = scope;
+        this.isStreamActive = true;
+        this.serverEnded = false;
+        this.browserPending = 0;
+        this.audioEventQueue = Promise.resolve();
+        this.pendingAudioBytes = 0;
+        audioPlayer.clearQueue();
+        this.browserTTS.cancel();
+        if (scope) {
+            this.removeSelectionListener ??= this.chats.subscribe(() => {
+                if (this.activeChatScope && !this.scopeMatchesView()) void this.stopPlayback(this.activeRequestId);
+            });
+        }
+    }
+
+    private rejectStart(requestId: string): void {
+        void cancelTts(requestId).catch(() => {});
+        void finishChatPlayback(requestId).catch(() => {});
+    }
+
     private cleanupListeners() {
+        ++this.startSequence;
+        if (this.pendingStart) this.rejectStart(this.pendingStart.requestId);
+        this.pendingStart = null;
+        this.removeSelectionListener?.();
+        this.removeSelectionListener = null;
         this.unlistenFunctions.forEach(fn => fn());
         this.unlistenFunctions = [];
     }
@@ -300,6 +363,11 @@ export class TtsService {
     }
 
     async stopPlayback(requestId?: string | null, error?: string): Promise<void> {
+        if (this.pendingStart && (!requestId || this.pendingStart.requestId === requestId)) {
+            ++this.startSequence;
+            this.rejectStart(this.pendingStart.requestId);
+            this.pendingStart = null;
+        }
         if (this.activeRequestId) {
             const finishing = error === undefined
                 ? finishChatPlayback(this.activeRequestId)
@@ -313,6 +381,7 @@ export class TtsService {
             : [...new Set([this.activeRequestId, getLatestTtsRequestId()].filter((id): id is string => Boolean(id)))];
         this.playbackGeneration++;
         this.activeRequestId = null;
+        this.activeChatScope = null;
         this.isStreamActive = false;
         this.serverEnded = false;
         this.browserPending = 0;
@@ -361,8 +430,15 @@ export class TtsService {
         this.interruptCleanup = null;
     }
 
+    private scopeMatchesView(scope = this.activeChatScope): boolean {
+        if (!scope) return true; // Explicit manual speech has no chat-view lifetime.
+        const view = this.chats.getSnapshot();
+        return view.generation === scope.selection_generation && chatEventMatchesView(view, scope);
+    }
+
     private isCurrentRequest(requestId?: string | null): boolean {
         return this.isStreamActive
+            && this.scopeMatchesView()
             && (requestId == null || this.activeRequestId === requestId);
     }
 
@@ -383,6 +459,7 @@ export class TtsService {
         this.isStreamActive = false;
         this.serverEnded = false;
         this.activeRequestId = null;
+        this.activeChatScope = null;
         this.playbackGeneration++;
         this.stopVoiceInterrupt();
     }

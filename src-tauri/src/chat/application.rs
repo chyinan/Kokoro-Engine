@@ -2605,25 +2605,16 @@ pub async fn retry_chat_persistence(
                     }),
                 )
                 .await;
-            if state.get_character_id().await == pending.target.character_id
-                && state
-                    .selection
-                    .current_conversation_id
-                    .lock()
-                    .await
-                    .as_deref()
-                    == Some(response.conversation_id.as_str())
-            {
-                if let Some(speech) = pending.speech {
-                    crate::chat::runtime::speak_completed_turn(
-                        app.clone(),
-                        client_request_id,
-                        pending.turn_id,
-                        response.text.clone(),
-                        speech,
-                        pending.speech_snapshot.clone(),
-                    );
-                }
+            if let Some(speech) = pending.speech {
+                crate::chat::runtime::speak_completed_turn(
+                    app.clone(),
+                    client_request_id,
+                    pending.turn_id,
+                    response.text.clone(),
+                    speech,
+                    pending.speech_snapshot.clone(),
+                )
+                .await;
             }
         }
         Ok(response)
@@ -4829,7 +4820,8 @@ async fn execute_chat_with_pending(
                         text,
                         speech,
                         speech_snapshot.clone(),
-                    );
+                    )
+                    .await;
                 }
             }
             Ok(StreamChatResponse {

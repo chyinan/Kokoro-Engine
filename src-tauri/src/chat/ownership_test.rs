@@ -427,6 +427,7 @@ pub(super) async fn verify_state_ownership(
     verify_pending_reply_snapshots(app).await;
     verify_cue_snapshot(app, directory).await;
     verify_inactive_role_user_save_retry(app, directory).await;
+    verify_automatic_speech_selection(app, directory).await;
 }
 
 #[derive(Default)]
@@ -1742,4 +1743,222 @@ async fn verify_inactive_role_user_save_retry(app: &tauri::AppHandle, directory:
         .unwrap();
     assert_eq!(replay.user_message_id, result.user_message_id);
     assert_eq!(provider.prompts.lock().unwrap().len(), 2);
+}
+
+#[derive(Default)]
+struct SelectionVoice {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    pause: bool,
+    browser: bool,
+}
+#[async_trait::async_trait]
+impl crate::tts::interface::TtsProvider for SelectionVoice {
+    fn id(&self) -> String {
+        "voice-a".into()
+    }
+    fn capabilities(&self) -> crate::tts::interface::ProviderCapabilities {
+        Default::default()
+    }
+    fn voices(&self) -> Vec<crate::tts::interface::VoiceProfile> {
+        vec![]
+    }
+    async fn is_available(&self) -> bool {
+        true
+    }
+    async fn synthesize(
+        &self,
+        _: &str,
+        _: crate::tts::interface::TtsParams,
+    ) -> Result<Vec<u8>, crate::tts::interface::TtsError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.entered.notify_one();
+        if self.pause {
+            self.release.notified().await;
+        }
+        if self.browser {
+            Err(crate::tts::interface::TtsError::BrowserDelegate)
+        } else {
+            Ok(vec![1, 2, 3])
+        }
+    }
+}
+async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &std::path::Path) {
+    use crate::chat::application::{submit_chat, ChatPolicy};
+    use crate::commands::conversation::{load_conversation, LoadConversationRequest};
+    let state = app.state::<AIOrchestrator>();
+    let tts = app.state::<crate::tts::TtsService>();
+    let coordinator = app.state::<ActivationCoordinator>();
+    let catalog = app.state::<crate::characters::catalog::CharacterCatalog>();
+    let backend = crate::commands::characters::OrchestratorActivationBackend {
+        orchestrator: &state,
+        app_data: directory.join("speech-selection"),
+    };
+    let mut config = crate::tts::config::TtsSystemConfig::default();
+    config.providers[0].id = "voice-a".into();
+    config.default_provider = Some("voice-a".into());
+    for (index, mode) in [
+        "conversation",
+        "character",
+        "selected",
+        "late-browser",
+        "late-audio",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let token = coordinator
+            .prepare_with_package_root(
+                &state.db,
+                catalog.root(),
+                "retry-role-a",
+                &config,
+                &[],
+                &backend,
+            )
+            .await
+            .unwrap();
+        coordinator
+            .commit(&state.db, token, &backend)
+            .await
+            .unwrap();
+        let original = format!("speech-selected-{index}");
+        let other = format!("speech-other-{index}");
+        for id in [&original, &other] {
+            sqlx::query("INSERT INTO conversations(id,character_id,created_at,updated_at) VALUES (?,'retry-role-a','now','now')").bind(id).execute(&state.db).await.unwrap();
+        }
+        load_conversation(
+            LoadConversationRequest {
+                id: original.clone(),
+            },
+            app.state(),
+        )
+        .await
+        .unwrap();
+        let late = mode.starts_with("late-");
+        let voice = Arc::new(SelectionVoice {
+            pause: late,
+            browser: mode != "late-audio",
+            ..Default::default()
+        });
+        tts.register_provider(voice.clone()).await;
+        tts.clear_cache().await;
+        let llm = Arc::new(ControlledProvider::default());
+        app.state::<crate::llm::service::LlmService>()
+            .replace_test_provider(llm.clone())
+            .await;
+        let events = Arc::new(std::sync::Mutex::new(
+            Vec::<(String, serde_json::Value)>::new(),
+        ));
+        let finished = Arc::new(tokio::sync::Notify::new());
+        let listeners: Vec<_> = ["tts:start", "tts:audio", "tts:browser-delegate", "tts:end"]
+            .into_iter()
+            .map(|name| {
+                let events = events.clone();
+                let finished = finished.clone();
+                app.listen_any(name, move |event| {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push((name.into(), serde_json::from_str(event.payload()).unwrap()));
+                    if name == "tts:end" {
+                        finished.notify_one();
+                    }
+                })
+            })
+            .collect();
+        let request_id = format!("speech-selection-{index}");
+        let worker = tokio::spawn(submit_chat(
+            app.clone(),
+            ChatRequest {
+                message: format!("[wait] speech ownership {index}"),
+                client_request_id: Some(request_id.clone()),
+                character_id: Some("retry-role-a".into()),
+                conversation_id: Some(original.clone()),
+                ..Default::default()
+            },
+            ChatPolicy::Desktop,
+        ));
+        until_request_started(&llm).await;
+        if mode == "conversation" {
+            load_conversation(LoadConversationRequest { id: other.clone() }, app.state())
+                .await
+                .unwrap();
+        } else if mode == "character" {
+            let token = coordinator
+                .prepare_with_package_root(
+                    &state.db,
+                    catalog.root(),
+                    "retry-role-b",
+                    &config,
+                    &[],
+                    &backend,
+                )
+                .await
+                .unwrap();
+            coordinator
+                .commit(&state.db, token, &backend)
+                .await
+                .unwrap();
+        }
+        llm.finish_pending.notify_one();
+        let result = worker.await.unwrap().unwrap();
+        assert_eq!(result.conversation_id, original);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM conversation_messages WHERE conversation_id=? AND role IN ('user','assistant')").bind(&original).fetch_one(&state.db).await.unwrap();
+        assert_eq!(rows, 2, "{mode}: text still commits to the original owner");
+        if late {
+            tokio::time::timeout(Duration::from_secs(5), voice.entered.notified())
+                .await
+                .unwrap();
+            load_conversation(LoadConversationRequest { id: other.clone() }, app.state())
+                .await
+                .unwrap();
+            // Returning to the same conversation cannot revive already-started playback.
+            load_conversation(
+                LoadConversationRequest {
+                    id: original.clone(),
+                },
+                app.state(),
+            )
+            .await
+            .unwrap();
+            voice.release.notify_one();
+        }
+        if mode == "selected" || late {
+            tokio::time::timeout(Duration::from_secs(5), finished.notified())
+                .await
+                .unwrap();
+            let events = events.lock().unwrap();
+            let start = events.iter().find(|(name, _)| name == "tts:start").unwrap();
+            assert_eq!(start.1["chat_scope"]["client_request_id"], request_id);
+            assert_eq!(start.1["chat_scope"]["character_id"], "retry-role-a");
+            assert_eq!(start.1["chat_scope"]["conversation_id"], original);
+            if late {
+                assert!(!events
+                    .iter()
+                    .any(|(name, _)| name == "tts:audio" || name == "tts:browser-delegate"));
+                assert_eq!(events.last().unwrap().1["status"], "cancelled");
+            } else {
+                assert!(events
+                    .iter()
+                    .any(|(name, _)| name == "tts:browser-delegate"));
+            }
+        } else {
+            // The application awaits the selection admission before returning; no
+            // detached synthesis is scheduled for a view that was already left.
+            assert_eq!(
+                voice.calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{mode}"
+            );
+            assert!(
+                events.lock().unwrap().is_empty(),
+                "{mode}: no automatic playback start"
+            );
+        }
+        for listener in listeners {
+            app.unlisten(listener);
+        }
+    }
 }

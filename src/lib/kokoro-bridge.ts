@@ -877,6 +877,15 @@ export async function cancelTts(requestId?: string | null): Promise<void> {
     return invoke("cancel_tts", { requestId: requestId ?? null });
 }
 
+/** Automatic speech follows this view until selection changes. Turn identity stays immutable. */
+export interface ChatPlaybackScope {
+  client_request_id: string;
+  turn_id: string;
+  character_id: string;
+  conversation_id: string;
+  selection_generation: number;
+}
+
 export interface TtsPlaybackErrorEvent {
     request_id: string;
     error: string;

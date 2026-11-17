@@ -35,6 +35,8 @@ const MAX_CANCELLED_TTS_REQUESTS: usize = 128;
 struct TtsStartEvent {
     request_id: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_scope: Option<crate::chat::runtime::ChatPlaybackScope>,
 }
 
 #[derive(Clone, Serialize)]
@@ -391,6 +393,7 @@ impl TtsService {
                 request_id,
                 &cancel,
                 None,
+                None,
             )
             .await;
 
@@ -411,9 +414,23 @@ impl TtsService {
         text: String,
         request_id: String,
         snapshot: Arc<TtsExecutionSnapshot>,
+        scope: crate::chat::runtime::ChatPlaybackScope,
     ) -> Result<(), String> {
-        let Some(cancel) = self.register_request(&request_id).await else {
-            return Ok(());
+        let cancel = {
+            let state = app.state::<crate::ai::context::AIOrchestrator>();
+            let Ok(_activation) = state.enter_chat_turn() else {
+                return Ok(());
+            };
+            let _selection = state.selection.conversation_switch_lock.lock().await;
+            if !scope.matches_selection(&state).await {
+                return Ok(());
+            }
+            // Only short in-memory registration is covered. A late A request cannot
+            // replace a B request registered after the selection changed.
+            let Some(cancel) = self.register_request(&request_id).await else {
+                return Ok(());
+            };
+            cancel
         };
         let result = self
             .speak_request(
@@ -424,6 +441,7 @@ impl TtsService {
                 request_id,
                 &cancel,
                 Some(&snapshot),
+                Some(&scope),
             )
             .await;
         let mut requests = self.requests.lock().await;
@@ -516,6 +534,7 @@ impl TtsService {
         request_id: String,
         cancellation: &watch::Sender<bool>,
         snapshot: Option<&TtsExecutionSnapshot>,
+        chat_scope: Option<&crate::chat::runtime::ChatPlaybackScope>,
     ) -> Result<(), String> {
         let mut cancel = cancellation.subscribe();
         let playback_window = if app.get_webview_window("main").is_some() {
@@ -569,6 +588,11 @@ impl TtsService {
                 .await;
         }
 
+        if let Some(scope) = chat_scope {
+            if !scope.is_selected(&app).await {
+                return Ok(());
+            }
+        }
         let runtime = app.try_state::<Arc<ChatRuntimeState>>();
         if !self
             .publish_playback_start(
@@ -582,6 +606,7 @@ impl TtsService {
                         TtsStartEvent {
                             request_id: request_id.to_owned(),
                             text: text.clone(),
+                            chat_scope: chat_scope.cloned(),
                         },
                     )
                     .map_err(|error| error.to_string())
@@ -673,7 +698,12 @@ impl TtsService {
         let mut synthesis_error: Option<String> = None;
         let mut cancelled = false;
         'sentences: while let Some(result) = sentences.next().await {
-            if *cancel.borrow() {
+            if *cancel.borrow()
+                || match chat_scope {
+                    Some(scope) => !scope.is_selected(&app).await,
+                    None => false,
+                }
+            {
                 cancelled = true;
                 provider.cancel_request(&request_id).await;
                 break;
@@ -692,6 +722,13 @@ impl TtsService {
                                 match chunk {
                                     Some(Ok(chunk)) if chunk.data.is_empty() => continue,
                                     Some(Ok(chunk)) => {
+                                        if let Some(scope) = chat_scope {
+                                            if !scope.is_selected(&app).await {
+                                                cancelled = true;
+                                                provider.cancel_request(&request_id).await;
+                                                break;
+                                            }
+                                        }
                                         full_audio.extend_from_slice(&chunk.data);
                                         sequence += 1;
                                         if let Err(error) = app.emit_to(playback_window, "tts:audio", TtsAudioEvent {

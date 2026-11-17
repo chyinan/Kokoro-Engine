@@ -222,7 +222,36 @@ App 的图片完成与背景生成监听现在使用 `image-events.ts` 的实际
 - `npm exec -- vitest run src/features/live2d/Live2DViewer.lifecycle.test.tsx src/features/characters/character-activation.test.ts src/core/services/tts-service.review.test.ts src/lib/chat/application.test.ts`：95/95；`pr4-round4-frontend.log`。本轮前端和 IPC 契约没有修改。
 - 8 个变更 Rust 文件的 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
 
-- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从第四轮源码重建，lifecycle **39/39**，exit 0；`pr4-round4-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
-- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round4-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json` 和同目录 `recovery-report.json`。
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从第四轮源码重建，lifecycle **39/39**，exit 0；`pr4-round4-native-lifecycle.log`、`output/state-ownership/pre-round5-native/native-report.json`。
+- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round4-native-persistence.log`、`output/state-ownership/pre-round5-native/persistence-persistence-report.json` 和同目录 `persistence-recovery-report.json`。
 
 两个套件使用同一新二进制，SHA-256 为 `F544BE8159A336BC596738B6BE1A4487CEC9608A725E57168634DFEB20D54154`。`output/state-ownership/source-manifest-pr4-round4.json` 的 49 个 PR 源文件最终复算 changed=0；端口 1420/19333/19334/19335/19336 无监听残留。原生构建保留 Windows 链接器 LIBCMT 提示，构建及上述运行均成功。普通测试和本地原生 fixture 不调用真实云模型/语音服务，实际 Telegram 网络、远程 Provider 与非 Windows 平台仍未验证。
+
+
+## PR #4 第五轮修复：自动语音的视图归属（2026-11-17）
+
+A 的聊天在切换到 B 后仍应完成并保存到 A，但自动语音属于当前视图的副作用。此前普通完成路径直接发起语音，没有保存恢复路径已有的选择检查；浏览器和音频消费也没有角色/会话范围。现在普通完成和保存恢复共用 `speak_completed_turn`：从原 journal 取得不可变角色、会话、请求和 turn 身份，短锁校验当前选择后另行捕获 `selection_generation` 作为本次播放许可，绝不覆盖聊天准入代次。
+
+许可随 `tts:start.chat_scope` 传递。TTS 注册在 activation → selection → TTS requests 的短锁顺序内再次校验，避免迟到 A 注册替换 B 的请求；现有 requests 持锁代码没有反向获取 selection。所有锁都在 Provider/媒体等待前释放。合成结果与实际流式 chunk 发出前再校验播放许可；A→B→A 也使已经启动的许可失效。模型尚未完成时 B→A 切回，则按完成时选择正常发起 A 的自动语音，第四轮正例继续成立。
+
+前端在接纳 scoped start、替换输出前用现有 `chatApplication.refresh()` 读取一次权威视图；早到媒体和错误等待同一个、有界的 pending start。被拒绝的 A 只取消/释放 A，不能清空正在播放的 B。待接纳音频也受原 1 MB 上限约束。接纳后使用既有 ChatApplication 选择订阅和音频播放器 playbackGeneration，选择更新即停止原许可，正在等待解码/排队的音频随之失效；没有逐 chunk 读取完整数据库。init/cleanup 回收订阅和待接纳工作。手动 TTS 不带 chat_scope，保留独立预览/播放语义。
+
+`verify_automatic_speech_selection` 覆盖真实聊天入口的五个场景：模型 Notify 暂停时切会话、真实角色激活后仍停 B；保持 A 选中；Browser/音频 Provider 暂停合成时 A→B→A。断言 SQLite 原会话用户/助手各一行、实际 TTS 启动身份、Provider 调用及取消终态，迟到结果没有媒体事件。`tts-service.scope.test.ts` 使用实际 ChatApplication、TtsService 和 AudioStreamManager，仅替换平台 API，覆盖浏览器实际 speak、受控 decodeAudioData 后的 source.start、选择撤销、手动语音、迟到 A 不干扰 B 的手动/自动播放、首个媒体等待接纳、即时错误以及等待期间音频上限。最初六例在原前端四败二过，保留 `pr4-round5-frontend-red.log`；最终 13 个 scope 回归和已有 15 个语音回归全部通过（`pr4-round5-frontend-acceptance.log`）。
+
+第五轮继续使用隔离普通测试数据根，原生 runner 每次使用独立数据根与 WebView profile。第四轮的 7 份原生报告/二进制/运行信息已归档 `output/state-ownership/pre-round5-native/`。最终命令结果与本轮二进制绑定如下。
+
+
+第五轮最终检查（日志在 `output/state-ownership/`）：
+
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml chat::channels_test::desktop_webhook_and_telegram_execute_the_same_bound_chat -- --nocapture`：通过，含新增五个自动语音场景；`pr4-round5-channels-2.log`。后续注册短锁收尾也由下述最终全量重新覆盖。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1008/1008，bin/doc 0，无后台 panic；`pr4-round5-rust-final.log`。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`pr4-round5-clippy-final.log`。
+- `npm exec -- vitest run src/core/services/tts-service.scope.test.ts src/core/services/tts-service.review.test.ts`：28/28；`pr4-round5-frontend-acceptance.log`。
+- `npm test`：91 个文件、983/983；`pr4-round5-npm-final-3.log`。
+- `npm run build` 与 `npm run check:ipc`：通过，IPC 177；`pr4-round5-build-final-4.log`、`pr4-round5-ipc-final-3.log`。构建仅保留已有 bundle/import 提示。
+- 四个变更 Rust 文件 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
+
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从第五轮源码重建，lifecycle **39/39**，exit 0；`pr4-round5-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
+- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round5-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json` 和同目录 `recovery-report.json`。
+
+两个套件的二进制 SHA-256 均为 `550465A2A840877CE939C296D49CF11CA21F10DBF9D0B2FE4DD01716FA74E600`。`output/state-ownership/source-manifest-pr4-round5.json` 的 51 个 PR 源文件最终复算 changed=0；端口 1420/19333/19334/19335/19336 无监听残留。新原生程序验证了真实 IPC/窗口/持久化和受控语音交付路径；真实云语音服务、音频硬件输出、Telegram 网络及非 Windows 平台仍未验证。测试日志、隔离数据库和本机配置未纳入提交。
