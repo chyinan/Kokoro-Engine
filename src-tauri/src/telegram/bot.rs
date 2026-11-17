@@ -4,16 +4,15 @@
 
 use super::config::TelegramConfig;
 use crate::ai::context::AIOrchestrator;
-use crate::chat::application::{channel_id, submit_chat, ChatPolicy, ChatRequest};
+use crate::bot::{BotChatServices, BotChatUnavailable};
+use crate::chat::application::{channel_id, ChatPolicy, ChatRequest, ChatService};
 use crate::chat::persistence::{self, ExternalTurn};
 use crate::error::KokoroError;
-use crate::stt::{AudioSource, SttService};
-use crate::tts::TtsService;
+use crate::stt::AudioSource;
 use base64::Engine as _;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::Manager;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
 use tokio::sync::{oneshot, RwLock};
@@ -210,7 +209,7 @@ struct TelegramDelivery<'a> {
     speech: Option<&'a crate::tts::manager::TtsExecutionSnapshot>,
     bot: &'a Bot,
     chat_id: ChatId,
-    app: &'a tauri::AppHandle,
+    tts_available: bool,
     media: &'a persistence::ExternalReplyMedia,
 }
 
@@ -227,7 +226,7 @@ impl TelegramReplyDelivery for TelegramDelivery<'_> {
             self.chat_id,
             self.thread,
             text,
-            self.app,
+            self.tts_available,
             self.speech,
         )
         .await;
@@ -307,7 +306,7 @@ const MAX_MEDIA_BYTES: u32 = 20 * 1024 * 1024;
 pub async fn run_polling(
     token: String,
     config: Arc<RwLock<TelegramConfig>>,
-    app: tauri::AppHandle,
+    services: BotChatServices,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let bot = Bot::new(&token);
@@ -321,7 +320,7 @@ pub async fn run_polling(
         .dependencies(dptree::deps![
             config.clone(),
             sessions.clone(),
-            app.clone(),
+            services.clone(),
             rate_limiter.clone()
         ])
         .default_handler(|_upd| async {})
@@ -329,7 +328,7 @@ pub async fn run_polling(
 
     // Run dispatcher in a spawned task and monitor its lifecycle.
     let shutdown_token = dispatcher.shutdown_token();
-    let mut dispatch_task = tauri::async_runtime::spawn(async move {
+    let mut dispatch_task = tokio::spawn(async move {
         dispatcher.dispatch().await;
     });
 
@@ -363,10 +362,10 @@ async fn handle_message(
     msg: Message,
     config: Arc<RwLock<TelegramConfig>>,
     sessions: Sessions,
-    app: tauri::AppHandle,
+    services: BotChatServices,
     rate_limiter: RateLimiter,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    dispatch_message(
+    let result = dispatch_message(
         &bot,
         &msg,
         &config,
@@ -374,10 +373,17 @@ async fn handle_message(
         &TelegramMessageHandler {
             bot: &bot,
             sessions: &sessions,
-            app: &app,
+            services: &services,
         },
     )
-    .await
+    .await;
+    match result {
+        Err(error) if error.is::<BotChatUnavailable>() => {
+            send_text(&bot, msg.chat.id, msg.thread_id, error.to_string()).await?;
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 /// Keep authorization and routing together, before any business or media work.
@@ -410,20 +416,20 @@ trait MessageHandler: Sync {
 struct TelegramMessageHandler<'a> {
     bot: &'a Bot,
     sessions: &'a Sessions,
-    app: &'a tauri::AppHandle,
+    services: &'a BotChatServices,
 }
 
 impl MessageHandler for TelegramMessageHandler<'_> {
     async fn command(&self, msg: &Message, text: &str, config: &TelegramConfig) -> HandlerResult {
-        handle_command(self.bot, msg, text, config, self.sessions, self.app).await
+        handle_command(self.bot, msg, text, config, self.sessions, self.services).await
     }
 
     async fn voice(&self, msg: &Message, config: &TelegramConfig) -> HandlerResult {
-        handle_voice(self.bot, msg, config, self.sessions, self.app).await
+        handle_voice(self.bot, msg, config, self.sessions, self.services).await
     }
 
     async fn photo(&self, msg: &Message, config: &TelegramConfig) -> HandlerResult {
-        handle_photo(self.bot, msg, config, self.sessions, self.app).await
+        handle_photo(self.bot, msg, config, self.sessions, self.services).await
     }
 
     async fn text(&self, msg: &Message, text: &str, config: &TelegramConfig) -> HandlerResult {
@@ -434,7 +440,7 @@ impl MessageHandler for TelegramMessageHandler<'_> {
             Vec::new(),
             config,
             self.sessions,
-            self.app,
+            self.services,
         )
         .await
     }
@@ -518,7 +524,7 @@ async fn handle_command(
     text: &str,
     config: &TelegramConfig,
     sessions: &Sessions,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
     let cmd = text.split_whitespace().next().unwrap_or("");
@@ -536,7 +542,7 @@ async fn handle_command(
             }
         }
         "/new" => {
-            let state = app.state::<AIOrchestrator>();
+            let state = services.chat()?.orchestrator.as_ref();
             let _guard = state.enter_chat_turn()?;
             let active = state.get_character_id().await;
             let character = config
@@ -556,7 +562,7 @@ async fn handle_command(
             .await?;
         }
         "/continue" => {
-            let state = app.state::<AIOrchestrator>();
+            let state = services.chat()?.orchestrator.as_ref();
             let (character_id, conversation_id) = {
                 let _activation = state.enter_chat_turn()?;
                 let _selection = state.selection.conversation_switch_lock.lock().await;
@@ -606,7 +612,7 @@ async fn handle_command(
             .await?;
         }
         "/status" => {
-            let state = app.state::<AIOrchestrator>();
+            let state = services.chat()?.orchestrator.as_ref();
             let active_character = state.get_character_id().await;
             let character = config
                 .character_id
@@ -635,7 +641,7 @@ async fn handle_command(
         }
         _ => {
             if !text.trim_start_matches('/').trim().is_empty() {
-                reply_to_message(bot, msg, text, Vec::new(), config, sessions, app).await?;
+                reply_to_message(bot, msg, text, Vec::new(), config, sessions, services).await?;
             }
         }
     }
@@ -700,9 +706,9 @@ async fn reply_to_message(
     images: Vec<String>,
     config: &TelegramConfig,
     sessions: &Sessions,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
 ) -> HandlerResult {
-    let state = app.state::<AIOrchestrator>();
+    let state = services.chat()?.orchestrator.as_ref();
     let _guard = state.enter_chat_turn()?;
     let active_character = state.get_character_id().await;
     let preferred = config
@@ -715,7 +721,7 @@ async fn reply_to_message(
         .await;
     drop(_guard);
     reply_bound(
-        bot, msg, text, images, config, sessions, app, &mode, preferred, None,
+        bot, msg, text, images, config, sessions, services, &mode, preferred, None,
     )
     .await
 }
@@ -728,7 +734,7 @@ async fn reply_bound(
     images: Vec<String>,
     config: &TelegramConfig,
     sessions: &Sessions,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
     mode: &SessionMode,
     preferred: &str,
     input_text: Option<String>,
@@ -750,13 +756,14 @@ async fn reply_bound(
         .await?;
         return Ok(());
     }
+    let chat = &services.chat()?.service;
     let result = if input_text.is_some() {
         submit_message_input(
-            app, chat_id, msg.id.0, text, images, mode, preferred, input_text,
+            chat, chat_id, msg.id.0, text, images, mode, preferred, input_text,
         )
         .await
     } else {
-        submit_message(app, chat_id, msg.id.0, text, images, mode, preferred).await
+        submit_message(chat, chat_id, msg.id.0, text, images, mode, preferred).await
     };
     let result = match result {
         Ok(result) if result.status.as_deref() == Some("cancelled") => {
@@ -797,7 +804,7 @@ async fn reply_bound(
             speech: result.speech_snapshot.as_deref(),
             bot,
             chat_id,
-            app,
+            tts_available: services.tts.is_some(),
             media: &result.external_media,
         },
     )
@@ -805,7 +812,7 @@ async fn reply_bound(
 }
 
 pub(crate) async fn submit_message(
-    app: &tauri::AppHandle,
+    chat: &ChatService,
     chat_id: ChatId,
     message_id: i32,
     text: &str,
@@ -814,7 +821,7 @@ pub(crate) async fn submit_message(
     preferred_character: &str,
 ) -> Result<crate::chat::application::StreamChatResponse, crate::error::KokoroError> {
     submit_message_input(
-        app,
+        chat,
         chat_id,
         message_id,
         text,
@@ -828,7 +835,7 @@ pub(crate) async fn submit_message(
 
 #[allow(clippy::too_many_arguments)]
 async fn submit_message_input(
-    app: &tauri::AppHandle,
+    chat: &ChatService,
     chat_id: ChatId,
     message_id: i32,
     text: &str,
@@ -839,8 +846,7 @@ async fn submit_message_input(
 ) -> Result<crate::chat::application::StreamChatResponse, KokoroError> {
     let (character_id, conversation_id, create_conversation) =
         mode.bind(chat_id, preferred_character);
-    submit_chat(
-        app.clone(),
+    chat.submit(
         ChatRequest {
             message: text.to_owned(),
             character_id: Some(character_id.to_owned()),
@@ -883,9 +889,9 @@ async fn handle_voice(
     msg: &Message,
     config: &TelegramConfig,
     sessions: &Sessions,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
 ) -> HandlerResult {
-    let state = app.state::<AIOrchestrator>();
+    let state = services.chat()?.orchestrator.as_ref();
     let _guard = state.enter_chat_turn()?;
     let active = state.get_character_id().await;
     let preferred = config
@@ -898,34 +904,31 @@ async fn handle_voice(
         .await;
     drop(_guard);
     let (character, _, _) = mode.bind(msg.chat.id, preferred);
-    let input =
-        prepare_telegram_media_input(&state, character, msg.chat.id.0, msg.id.0, || async {
-            let voice = msg.voice().ok_or("No voice data")?;
-            if voice.file.size > MAX_MEDIA_BYTES {
-                return Err("Voice message exceeds the 20 MB limit".into());
-            }
-            let file = bot.get_file(&voice.file.id).await?;
-            let mut data = Vec::new();
-            teloxide::net::Download::download_file(bot, &file.path, &mut data).await?;
-            let stt = app
-                .try_state::<SttService>()
-                .ok_or("STT service not available")?;
-            let text = stt
-                .transcribe(
-                    &AudioSource::Encoded {
-                        data,
-                        format: "ogg".into(),
-                    },
-                    None,
-                )
-                .await?
-                .text;
-            if text.trim().is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(TelegramPreparedInput { text, image: None }))
-        })
-        .await?;
+    let input = prepare_telegram_media_input(state, character, msg.chat.id.0, msg.id.0, || async {
+        let voice = msg.voice().ok_or("No voice data")?;
+        if voice.file.size > MAX_MEDIA_BYTES {
+            return Err("Voice message exceeds the 20 MB limit".into());
+        }
+        let file = bot.get_file(&voice.file.id).await?;
+        let mut data = Vec::new();
+        teloxide::net::Download::download_file(bot, &file.path, &mut data).await?;
+        let stt = services.stt.as_ref().ok_or("STT service not available")?;
+        let text = stt
+            .transcribe(
+                &AudioSource::Encoded {
+                    data,
+                    format: "ogg".into(),
+                },
+                None,
+            )
+            .await?
+            .text;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(TelegramPreparedInput { text, image: None }))
+    })
+    .await?;
     if let Some(input) = input {
         reply_bound(
             bot,
@@ -934,7 +937,7 @@ async fn handle_voice(
             vec![],
             config,
             sessions,
-            app,
+            services,
             &mode,
             preferred,
             Some(msg.caption().unwrap_or("").to_owned()),
@@ -949,9 +952,9 @@ async fn handle_photo(
     msg: &Message,
     config: &TelegramConfig,
     sessions: &Sessions,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
 ) -> HandlerResult {
-    let state = app.state::<AIOrchestrator>();
+    let state = services.chat()?.orchestrator.as_ref();
     let _guard = state.enter_chat_turn()?;
     let active = state.get_character_id().await;
     let preferred = config
@@ -964,36 +967,35 @@ async fn handle_photo(
         .await;
     drop(_guard);
     let (character, _, _) = mode.bind(msg.chat.id, preferred);
-    let input =
-        prepare_telegram_media_input(&state, character, msg.chat.id.0, msg.id.0, || async {
-            let photo = msg
-                .photo()
-                .and_then(|photos| photos.last())
-                .ok_or("No photo data")?;
-            if photo.file.size > MAX_MEDIA_BYTES {
-                return Err("Photo exceeds the 20 MB limit".into());
-            }
-            let file = bot.get_file(&photo.file.id).await?;
-            let mut data = Vec::new();
-            teloxide::net::Download::download_file(bot, &file.path, &mut data).await?;
-            let mime = if file.path.ends_with(".png") {
-                "image/png"
-            } else {
-                "image/jpeg"
-            };
-            Ok(Some(TelegramPreparedInput {
-                text: msg
-                    .caption()
-                    .filter(|caption| !caption.trim().is_empty())
-                    .unwrap_or("The user sent you a photo:")
-                    .to_owned(),
-                image: Some(format!(
-                    "data:{mime};base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(data)
-                )),
-            }))
-        })
-        .await?;
+    let input = prepare_telegram_media_input(state, character, msg.chat.id.0, msg.id.0, || async {
+        let photo = msg
+            .photo()
+            .and_then(|photos| photos.last())
+            .ok_or("No photo data")?;
+        if photo.file.size > MAX_MEDIA_BYTES {
+            return Err("Photo exceeds the 20 MB limit".into());
+        }
+        let file = bot.get_file(&photo.file.id).await?;
+        let mut data = Vec::new();
+        teloxide::net::Download::download_file(bot, &file.path, &mut data).await?;
+        let mime = if file.path.ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+        Ok(Some(TelegramPreparedInput {
+            text: msg
+                .caption()
+                .filter(|caption| !caption.trim().is_empty())
+                .unwrap_or("The user sent you a photo:")
+                .to_owned(),
+            image: Some(format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(data)
+            )),
+        }))
+    })
+    .await?;
     if let Some(input) = input {
         reply_bound(
             bot,
@@ -1002,7 +1004,7 @@ async fn handle_photo(
             input.image.into_iter().collect(),
             config,
             sessions,
-            app,
+            services,
             &mode,
             preferred,
             Some(msg.caption().unwrap_or("").to_owned()),
@@ -1018,25 +1020,20 @@ async fn send_voice_reply(
     chat_id: ChatId,
     thread: Option<teloxide::types::ThreadId>,
     text: &str,
-    app: &tauri::AppHandle,
+    tts_available: bool,
     speech: Option<&crate::tts::manager::TtsExecutionSnapshot>,
 ) -> HandlerResult {
-    let tts_service = match app.try_state::<TtsService>() {
-        Some(s) => s,
-        None => {
-            send_text(bot, chat_id, thread, "⚠️ The TTS service is unavailable.").await?;
-            return Ok(());
-        }
-    };
+    if !tts_available {
+        send_text(bot, chat_id, thread, "⚠️ The TTS service is unavailable.").await?;
+        return Ok(());
+    }
 
-    let _ = tts_service;
     let Some(speech) = speech else {
         return Ok(());
     };
     match speech.synthesize(text).await {
         Ok(audio_bytes) if !audio_bytes.is_empty() => {
-            let (mime_type, extension) =
-                crate::commands::bot::audio_metadata_for_external(&audio_bytes);
+            let (mime_type, extension) = crate::bot::audio_metadata_for_external(&audio_bytes);
             let input = InputFile::memory(audio_bytes).file_name(format!("reply.{extension}"));
             let result = if mime_type == "audio/ogg" {
                 {
@@ -1074,15 +1071,16 @@ async fn send_voice_reply(
 }
 
 #[cfg(all(test, target_os = "windows"))]
-pub(crate) async fn verify_bound_session_submission(app: &tauri::AppHandle) {
+pub(crate) async fn verify_bound_session_submission(services: &BotChatServices) {
     let sessions = Sessions::default();
-    let state = app.state::<AIOrchestrator>();
+    let chat = services.chat().unwrap();
+    let state = chat.orchestrator.as_ref();
     let selected = state.selection.current_conversation_id.lock().await.clone();
     let first = sessions
         .mode_for(ChatId(901), Some(7), "test-character")
         .await;
     let old = submit_message(
-        app,
+        &chat.service,
         ChatId(901),
         1,
         "topic original",
@@ -1099,7 +1097,7 @@ pub(crate) async fn verify_bound_session_submission(app: &tauri::AppHandle) {
         .mode_for(ChatId(901), Some(7), "test-character")
         .await;
     let new = submit_message(
-        app,
+        &chat.service,
         ChatId(901),
         2,
         "topic new",
@@ -1122,7 +1120,7 @@ pub(crate) async fn verify_bound_session_submission(app: &tauri::AppHandle) {
         .mode_for(ChatId(901), Some(7), "other-character")
         .await;
     let shared = submit_message(
-        app,
+        &chat.service,
         ChatId(901),
         3,
         "topic continued",
@@ -1342,6 +1340,61 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         let bot = Bot::new("local-test-token").set_api_url(server.uri().parse().unwrap());
         (bot, server)
+    }
+
+    #[tokio::test]
+    async fn telegram_reports_chat_unavailable_only_to_authorized_chats() {
+        use crate::bot::BotEvent;
+        use serde_json::json;
+        use wiremock::{matchers::method, Mock, ResponseTemplate};
+
+        let (bot, telegram) = local_bot().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": {
+                    "message_id": 42,
+                    "date": 1_700_000_000,
+                    "chat": {"id": 123, "type": "private", "first_name": "Local"}
+                }
+            })))
+            .expect(2)
+            .mount(&telegram)
+            .await;
+        let config = Arc::new(RwLock::new(TelegramConfig {
+            allowed_chat_ids: vec![123],
+            ..Default::default()
+        }));
+        let services = BotChatServices::new(None, None, None, None, Arc::new(|_: BotEvent| Ok(())));
+        let sessions = Sessions::default();
+        let limiter = RateLimiter::default();
+        for (chat, id, message) in [(456, 1, "hello"), (123, 2, "/start"), (123, 3, "voice")] {
+            handle_message(
+                bot.clone(),
+                incoming_message(chat, id, message),
+                config.clone(),
+                sessions.clone(),
+                services.clone(),
+                limiter.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        let requests = telegram.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request
+            .url
+            .path()
+            .to_ascii_lowercase()
+            .ends_with("/sendmessage")));
+        let body = |index: usize| {
+            serde_json::from_slice::<serde_json::Value>(&requests[index].body).unwrap()
+        };
+        assert!(body(0)["text"]
+            .as_str()
+            .unwrap()
+            .contains("Telegram Bridge"));
+        assert_eq!(body(1)["text"], "Kokoro Engine chat is unavailable.");
     }
 
     #[tokio::test]

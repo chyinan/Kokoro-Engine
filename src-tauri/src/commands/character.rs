@@ -1,6 +1,7 @@
+use super::live2d::legacy_app_data_dir;
 use crate::ai::context::AIOrchestrator;
-use crate::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
+use crate::live2d::Live2dStore;
 use serde::Serialize;
 use tauri::{Emitter, State};
 
@@ -20,7 +21,7 @@ pub struct ChatResponse {
 }
 
 fn resolve_default_cue() -> String {
-    if let Some(profile) = load_active_live2d_profile() {
+    if let Some(profile) = Live2dStore::new(legacy_app_data_dir()).active_profile() {
         if profile.cue_map.contains_key("neutral") {
             return "neutral".to_string();
         }
@@ -57,9 +58,11 @@ pub async fn play_cue(
         return Err(KokoroError::Validation("Cue cannot be empty".to_string()));
     }
 
-    let profile = load_active_live2d_profile().ok_or_else(|| {
-        KokoroError::Validation("No active Live2D model profile loaded".to_string())
-    })?;
+    let profile = Live2dStore::new(legacy_app_data_dir())
+        .active_profile()
+        .ok_or_else(|| {
+            KokoroError::Validation("No active Live2D model profile loaded".to_string())
+        })?;
 
     if !profile.cue_map.contains_key(trimmed) {
         let available_cues = profile

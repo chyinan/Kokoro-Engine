@@ -3,10 +3,68 @@ use super::config::ProviderConfig;
 use super::interface::{
     Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
 };
+use crate::error::KokoroError;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 use tokio::sync::Mutex;
+
+/// Scan a GPT-SoVITS install directory for available GPT and SoVITS model files.
+pub(crate) fn list_gpt_sovits_models(
+    root: &std::path::Path,
+) -> Result<GptSovitsModels, KokoroError> {
+    if !root.is_dir() {
+        return Err(KokoroError::NotFound(format!(
+            "Directory not found: {}",
+            root.display()
+        )));
+    }
+
+    let mut gpt_models = Vec::new();
+    let mut sovits_models = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+
+            let is_gpt = name.starts_with("GPT_weights");
+            let is_sovits = name.starts_with("SoVITS_weights");
+            if !is_gpt && !is_sovits {
+                continue;
+            }
+
+            if let Ok(files) = std::fs::read_dir(entry.path()) {
+                for file in files.flatten() {
+                    let fname = file.file_name().to_string_lossy().to_string();
+                    let rel_path = format!("{}/{}", name, fname);
+
+                    if is_gpt && fname.ends_with(".ckpt") {
+                        gpt_models.push(rel_path);
+                    } else if is_sovits && fname.ends_with(".pth") {
+                        sovits_models.push(rel_path);
+                    }
+                }
+            }
+        }
+    }
+
+    gpt_models.sort();
+    sovits_models.sort();
+
+    Ok(GptSovitsModels {
+        gpt_models,
+        sovits_models,
+    })
+}
+
+#[derive(serde::Serialize)]
+pub struct GptSovitsModels {
+    pub gpt_models: Vec<String>,
+    pub sovits_models: Vec<String>,
+}
 
 /// Local GPT-SoVITS provider — sends HTTP requests to a local GPT-SoVITS inference server.
 ///

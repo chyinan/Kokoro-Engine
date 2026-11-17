@@ -1,6 +1,7 @@
+use super::live2d::legacy_app_data_dir;
 use crate::ai::context::AIOrchestrator;
-use crate::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
+use crate::live2d::Live2dStore;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tauri::{command, Manager, State};
@@ -130,7 +131,10 @@ pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>
     {
         active_modules.push("vision".to_string());
     }
-    if load_active_live2d_profile().is_some() {
+    if Live2dStore::new(legacy_app_data_dir())
+        .active_profile()
+        .is_some()
+    {
         active_modules.push("live2d".to_string());
     }
     if state.is_memory_enabled() {

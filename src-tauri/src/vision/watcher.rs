@@ -280,15 +280,16 @@ async fn run_analysis_chain(
 
 async fn emit_proactive_vision_comment(app_handle: &AppHandle) {
     tracing::info!(target: "vision", "Vision screen-comment trigger fired");
-    let scope = app_handle
-        .state::<crate::ai::context::AIOrchestrator>()
-        .desktop_admission_scope()
-        .await;
-    let Ok(scope) = scope else {
+    let Some(chat) = app_handle.try_state::<crate::chat::application::ChatService>() else {
         return;
     };
-    let Some(request_id) = crate::chat::application::submit_proactive_bound(
-        app_handle.clone(),
+    let Some(state) = app_handle.try_state::<crate::ai::context::AIOrchestrator>() else {
+        return;
+    };
+    let Ok(scope) = state.desktop_admission_scope().await else {
+        return;
+    };
+    let Some(request_id) = chat.submit_proactive_bound(
         build_proactive_vision_instruction().into(),
         scope.clone(),
     ) else {

@@ -1,5 +1,6 @@
 //! Work admitted by a committed desktop reply. A failed save retains this exact
 //! context; replay never rereads a newly selected character's provider or history.
+use super::events::{ChatEvent, ChatEvents};
 use crate::ai::context::{database_operation_generation, AIOrchestrator, Message};
 use crate::ai::memory_event_ingress::{build_cooldown_key, MemoryIngressDecision};
 use crate::ai::memory_extractor::{self, MemoryExtractionOptions};
@@ -7,7 +8,6 @@ use crate::imagegen::ImageGenService;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
 use std::sync::Arc;
-use tauri::{Emitter, Manager};
 
 #[derive(Clone)]
 pub(crate) struct DesktopMemoryWork {
@@ -89,22 +89,21 @@ impl DesktopPostCommit {
 
     /// Called once by the original worker, or after consuming its pending save.
     /// All best-effort work stays outside the persistence/selection locks.
-    pub(crate) fn dispatch(self, app: tauri::AppHandle) {
+    pub(crate) fn dispatch(self, state: Arc<AIOrchestrator>, events: ChatEvents) {
         if self.memory.is_some() {
             let mut memory = self.clone();
             memory.background = None;
-            memory.spawn(app.clone());
+            memory.spawn(state.clone(), events.clone());
         }
         if self.background.is_some() {
             let mut background = self;
             background.memory = None;
-            background.spawn(app);
+            background.spawn(state, events);
         }
     }
 
-    fn spawn(self, app: tauri::AppHandle) {
-        tauri::async_runtime::spawn(async move {
-            let state = app.state::<AIOrchestrator>();
+    fn spawn(self, state: Arc<AIOrchestrator>, events: ChatEvents) {
+        tokio::spawn(async move {
             // Memory operations acquire their own database guards. Holding one
             // here across a nested acquisition can deadlock a queued restore.
             if !self.is_current(&state).await {
@@ -130,9 +129,8 @@ impl DesktopPostCommit {
                 }
                 for (trigger, structured) in extractions {
                     let task = self.clone();
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app.state::<AIOrchestrator>();
+                    let state = state.clone();
+                    tokio::spawn(async move {
                         let work = task.memory.as_ref().expect("memory task");
                         if !task.memory_current(&state) || !task.is_current(&state).await {
                             return;
@@ -174,9 +172,8 @@ impl DesktopPostCommit {
                     && self.is_current(&state).await
                 {
                     let task = self.clone();
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app.state::<AIOrchestrator>();
+                    let state = state.clone();
+                    tokio::spawn(async move {
                         let work = task.memory.as_ref().expect("memory task");
                         if !task.memory_current(&state) || !task.is_current(&state).await {
                             return;
@@ -259,10 +256,10 @@ impl DesktopPostCommit {
                         event["conversation_id"] = self.conversation_id.clone().into();
                         event["client_request_id"] = self.request_id.clone().into();
                         event["turn_id"] = self.turn_id.clone().into();
-                        let _ = app.emit("imagegen:done", event);
+                        events.notify(ChatEvent::ImageGenerated, event);
                     }
                     Err(error) => {
-                        let _ = app.emit("chat-imagegen-error", serde_json::json!({"character_id":self.character_id,"conversation_id":self.conversation_id,"client_request_id":self.request_id,"turn_id":self.turn_id,"message":error.to_string()}));
+                        events.notify(ChatEvent::ImageGenerationError, serde_json::json!({"character_id":self.character_id,"conversation_id":self.conversation_id,"client_request_id":self.request_id,"turn_id":self.turn_id,"message":error.to_string()}));
                     }
                     _ => {}
                 }

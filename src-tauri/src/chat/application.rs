@@ -1,9 +1,12 @@
 //! Application-owned chat turn execution.
+use super::events::{ChatEvent, ChatEvents};
+use super::runtime::ChatRuntimeState;
 use crate::actions::executor::{
     action_result_is_success, apply_before_action_args_payload, assistant_tool_call_metadata_value,
     build_action_hook_payload, build_before_action_args_payload,
     execute_tool_calls_with_cancellation, tool_metadata_value, ToolExecutionScope,
 };
+use crate::actions::registry::ActionServices;
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{
     build_tool_audit_event, builtin_tool_id, evaluate_permission_decision, ActionContext,
@@ -15,6 +18,7 @@ use crate::ai::context::Message;
 use crate::ai::memory_event_ingress::{
     select_memory_ingress_decision, should_use_structured_extraction, MemoryEventIngressOptions,
 };
+use crate::characters::activation::ActivationCoordinator;
 use crate::chat::persistence::{
     self, ConversationTarget, MessageWrite, PendingChatSave, PendingUserSave,
 };
@@ -31,6 +35,7 @@ use crate::hooks::{
 };
 use crate::imagegen::ImageGenService;
 use crate::imagegen::WindowSizeState;
+use crate::live2d::Live2dStore;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, history_message_to_llm_chat_message,
     render_vision_context_user_message, replace_user_message_with_images, system_message,
@@ -45,7 +50,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{Emitter, Manager};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -151,7 +155,7 @@ async fn persist_failure_event_to_conversation(
 }
 
 async fn emit_and_persist_failure_event(
-    app: &tauri::AppHandle,
+    chat: &ChatService,
     policy: ChatPolicy,
     state: &AIOrchestrator,
     failure_event: crate::error::FailureEvent,
@@ -160,7 +164,7 @@ async fn emit_and_persist_failure_event(
     scope: &crate::chat::ownership::MemoryWriteScope,
 ) -> Result<(), KokoroError> {
     policy
-        .emit(app, "chat-failure", failure_event.clone())
+        .emit(chat, ChatEvent::Failure, failure_event.clone())
         .await
         .map_err(|error| KokoroError::Chat(error.to_string()))?;
 
@@ -910,7 +914,7 @@ impl Drop for TurnCancellationGuard {
         let Some(turn_id) = self.turn_id.take() else {
             return;
         };
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             state.clear_turn(&turn_id).await;
         });
     }
@@ -1124,19 +1128,13 @@ impl ChatPolicy {
         }
     }
 
-    async fn emit<S: Serialize + Clone>(
+    async fn emit(
         self,
-        app: &tauri::AppHandle,
-        name: &str,
-        payload: S,
-    ) -> Result<(), tauri::Error> {
-        if self.is_desktop() {
-            return crate::chat::runtime::emit_chat_event(app, name, payload).await;
-        }
-        if let Ok(value) = serde_json::to_value(payload) {
-            app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
-                .event(name, &value);
-        }
+        chat: &ChatService,
+        event: ChatEvent,
+        payload: impl Serialize,
+    ) -> Result<(), std::convert::Infallible> {
+        chat.events.publish(self.is_desktop(), event, payload);
         Ok(())
     }
 }
@@ -1643,18 +1641,18 @@ fn rejected_tool_trace_payload_for_test(
 }
 
 async fn emit_tool_trace_event(
-    app: &tauri::AppHandle,
+    chat: &ChatService,
     policy: ChatPolicy,
     tool_trace_id: &str,
     mut payload: serde_json::Value,
-) -> Result<(), tauri::Error> {
+) -> Result<(), std::convert::Infallible> {
     payload["tool_trace_id"] = serde_json::Value::String(tool_trace_id.to_owned());
-    policy.emit(app, "chat-turn-tool", payload).await
+    policy.emit(chat, ChatEvent::Tool, payload).await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_single_tool_after_approval(
-    app: &tauri::AppHandle,
+    chat: &ChatService,
     registry_state: &std::sync::Arc<RwLock<ActionRegistry>>,
     tool_settings_state: &std::sync::Arc<RwLock<ToolSettings>>,
     character_id: &str,
@@ -1666,7 +1664,7 @@ async fn execute_single_tool_after_approval(
     cue_names: Option<&Arc<HashSet<String>>>,
     memory_scope: &Arc<crate::chat::ownership::MemoryWriteScope>,
 ) -> Result<ActionResult, String> {
-    let hook_runtime = app.try_state::<HookRuntime>();
+    let hook_runtime = chat.dependencies.hooks.as_ref();
     let (registry_generation, resolved) = {
         let registry = registry_state.read().await;
         (
@@ -1713,7 +1711,7 @@ async fn execute_single_tool_after_approval(
         cue_names: cue_names.cloned(),
         request_id: Some(request_id.into()),
         turn_id: Some(turn_id.into()),
-        app: app.clone(),
+        services: chat.dependencies.actions.clone(),
         character_id: character_id.to_string(),
         conversation_id: conversation_id.map(str::to_owned),
         source: Some("chat".to_string()),
@@ -1815,7 +1813,7 @@ struct ToolApprovalExecutionContext<'a> {
     memory_scope: &'a Arc<crate::chat::ownership::MemoryWriteScope>,
     cue_names: Option<&'a Arc<HashSet<String>>>,
     request_id: &'a str,
-    app: &'a tauri::AppHandle,
+    chat: &'a ChatService,
     approval_state: &'a PendingToolApprovalState,
     registry_state: &'a std::sync::Arc<RwLock<ActionRegistry>>,
     tool_settings_state: &'a std::sync::Arc<RwLock<ToolSettings>>,
@@ -1862,7 +1860,7 @@ async fn wait_for_tool_approval_and_execute(
     }
 
     emit_tool_trace_event(
-        ctx.app,
+        ctx.chat,
         ChatPolicy::Desktop,
         ctx.tool_trace_id,
         requested_payload,
@@ -1900,7 +1898,7 @@ async fn wait_for_tool_approval_and_execute(
                     return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
                 }
                 res = tokio::time::timeout(timeout_duration, execute_single_tool_after_approval(
-                    ctx.app,
+                    ctx.chat,
                     ctx.registry_state,
                     ctx.tool_settings_state,
                     ctx.character_id,
@@ -2339,48 +2337,180 @@ async fn resolve_request_scope(
     Ok(())
 }
 
-pub(crate) async fn submit_chat(
-    app: tauri::AppHandle,
-    mut request: ChatRequest,
-    policy: ChatPolicy,
-) -> Result<StreamChatResponse, KokoroError> {
-    // Own the gate through journal completion, including before the worker is
-    // polled. Import must not invalidate a turn which can still write or finish.
-    let database_operation_guard = crate::ai::context::try_acquire_database_operation_read_guard()
-        .map_err(|error| KokoroError::Chat(error.into()))?;
-    if policy.is_desktop() {
-        if let Some(outcome) = app
-            .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
-            .desktop_replay(&request)
-            .map_err(KokoroError::Chat)?
-        {
-            let mut response = wait_chat_outcome(outcome).await?;
-            response.newly_committed = false;
-            return Ok(response);
+#[derive(Clone)]
+pub(crate) struct ChatService {
+    dependencies: Arc<ChatDependencies>,
+    events: ChatEvents,
+}
+
+impl ChatService {
+    pub(crate) fn new(dependencies: ChatDependencies, events: ChatEvents) -> Self {
+        Self {
+            dependencies: Arc::new(dependencies),
+            events,
         }
     }
-    resolve_request_scope(app.state::<AIOrchestrator>().inner(), &mut request, policy).await?;
-    let request_id = request.client_request_id.clone().unwrap();
-    let runtime = app
-        .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
-        .inner()
-        .clone();
-    let (created, outcome, replay_only) = runtime
-        .begin_with_policy(&request, policy)
-        .map_err(KokoroError::Chat)?;
-    request.require_saved_external_reply = replay_only;
-    if created {
-        let execution_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _database_operation_guard = database_operation_guard;
-            run_chat_worker(execution_app, runtime, request_id, request, policy, None).await;
+
+    #[cfg(test)]
+    pub(crate) async fn for_test(
+        state: Arc<AIOrchestrator>,
+        llm: LlmService,
+        app_data: &Path,
+    ) -> Self {
+        let events = ChatEvents {
+            runtime: Arc::new(ChatRuntimeState::default()),
+            desktop: None,
+            mods: None,
+        };
+        let imagegen = ImageGenService::init_from_config(&Default::default()).await;
+        let vision = crate::vision::watcher::VisionWatcher::new(Default::default());
+        let live2d = Arc::new(Live2dStore::new(app_data.to_path_buf()));
+        let window_size = WindowSizeState::default();
+        let actions = Arc::new(ActionServices {
+            state: Some(state.clone()),
+            vision: vision.clone(),
+            capture_screen: |_| Err("No screen capture in the chat fixture".into()),
+            imagegen: Some(imagegen.clone()),
+            window_size: Some(window_size.clone()),
+            live2d: live2d.clone(),
+            events: events.clone(),
+            notification: None,
         });
+        Self::new(
+            ChatDependencies {
+                state,
+                imagegen,
+                llm,
+                registry: Arc::new(RwLock::new(ActionRegistry::new())),
+                tool_settings: Arc::new(RwLock::new(ToolSettings::default())),
+                approval: Arc::new(PendingToolApprovalState::new()),
+                cancellation: Arc::new(TurnCancellationState::new()),
+                vision,
+                window_size,
+                vision_server: Arc::new(Mutex::new(crate::vision::server::VisionServer::new(
+                    app_data,
+                ))),
+                hooks: None,
+                activation: ActivationCoordinator::default(),
+                package_root: app_data.join("characters"),
+                live2d,
+                tts: None,
+                stt: None,
+                actions,
+            },
+            events,
+        )
     }
-    let mut response = wait_chat_outcome(outcome).await?;
-    if !created {
-        response.newly_committed = false;
+
+    pub(crate) async fn cancel(
+        &self,
+        turn_id: String,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        cancel_and_wait(
+            turn_id,
+            reason,
+            &self.events.runtime,
+            self.dependencies.cancellation.clone(),
+            &self.dependencies.approval,
+        )
+        .await
     }
-    Ok(response)
+
+    async fn speak_completed_turn(
+        &self,
+        request_id: String,
+        turn_id: String,
+        text: String,
+        speech: crate::characters::activation::ResolvedTts,
+        snapshot: Option<Arc<crate::tts::manager::TtsExecutionSnapshot>>,
+    ) {
+        super::runtime::speak_completed_turn(
+            self.dependencies.state.clone(),
+            self.events.clone(),
+            self.dependencies.tts.clone(),
+            self.dependencies.hooks.clone(),
+            request_id,
+            turn_id,
+            text,
+            speech,
+            snapshot,
+        )
+        .await;
+    }
+
+    pub(crate) async fn submit(
+        &self,
+        mut request: ChatRequest,
+        policy: ChatPolicy,
+    ) -> Result<StreamChatResponse, KokoroError> {
+        // Own the gate through journal completion, including before the worker is
+        // polled. Import must not invalidate a turn which can still write or finish.
+        let database_operation_guard =
+            crate::ai::context::try_acquire_database_operation_read_guard()
+                .map_err(|error| KokoroError::Chat(error.into()))?;
+        if policy.is_desktop() {
+            if let Some(outcome) = self
+                .events
+                .runtime
+                .desktop_replay(&request)
+                .map_err(KokoroError::Chat)?
+            {
+                let mut response = wait_chat_outcome(outcome).await?;
+                response.newly_committed = false;
+                return Ok(response);
+            }
+        }
+        resolve_request_scope(&self.dependencies.state, &mut request, policy).await?;
+        let request_id = request.client_request_id.clone().unwrap();
+        let runtime = &self.events.runtime;
+        let (created, outcome, replay_only) = runtime
+            .begin_with_policy(&request, policy)
+            .map_err(KokoroError::Chat)?;
+        request.require_saved_external_reply = replay_only;
+        if created {
+            let service = self.clone();
+            tokio::spawn(async move {
+                let _database_operation_guard = database_operation_guard;
+                run_chat_worker(service, request_id, request, policy, None).await;
+            });
+        }
+        let mut response = wait_chat_outcome(outcome).await?;
+        if !created {
+            response.newly_committed = false;
+        }
+        Ok(response)
+    }
+}
+
+pub(crate) async fn cancel_and_wait(
+    turn_id: String,
+    reason: Option<String>,
+    runtime: &ChatRuntimeState,
+    cancellation: Arc<TurnCancellationState>,
+    approval: &PendingToolApprovalState,
+) -> Result<(), String> {
+    let outcome = runtime.outcome(&turn_id);
+    cancel_chat_turn_inner(turn_id, reason, cancellation, approval).await?;
+    if let Some(mut outcome) = outcome {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if outcome.borrow().is_some() {
+                    return Ok::<(), String>(());
+                }
+                outcome
+                    .changed()
+                    .await
+                    .map_err(|_| "chat worker stopped".to_owned())?;
+            }
+        })
+        .await
+        .map_err(|_| {
+            "chat_cancel_pending: cleanup is still running; retry after the terminal state"
+                .to_owned()
+        })??;
+    }
+    Ok(())
 }
 
 async fn wait_chat_outcome(
@@ -2398,8 +2528,7 @@ async fn wait_chat_outcome(
 }
 
 async fn run_chat_worker(
-    app: tauri::AppHandle,
-    runtime: Arc<crate::chat::runtime::ChatRuntimeState>,
+    chat: ChatService,
     request_id: String,
     request: ChatRequest,
     policy: ChatPolicy,
@@ -2407,13 +2536,8 @@ async fn run_chat_worker(
 ) {
     // Catch panics as an explicit terminal error, so reconnect never leaves
     // a request permanently pending after a worker failure.
-    let execution = execute_chat_with_pending(
-        &app,
-        request,
-        policy,
-        ChatDependencies::managed(&app),
-        pending_user_save,
-    );
+    let runtime = &chat.events.runtime;
+    let execution = execute_chat_with_pending(&chat, request, policy, pending_user_save);
     let execution = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(execution))
         .await
         .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())));
@@ -2445,11 +2569,11 @@ async fn run_chat_worker(
                 scope.character_id,
                 None,
             );
-            let _ = policy.emit(&app, "chat-failure", failure).await;
+            let _ = policy.emit(&chat, ChatEvent::Failure, failure).await;
             let _ = policy
                 .emit(
-                    &app,
-                    "chat-turn-finish",
+                    &chat,
+                    ChatEvent::Finished,
                     serde_json::json!({
                         "turn_id": scope.turn_id,
                         "client_request_id": request_id,
@@ -2463,234 +2587,239 @@ async fn run_chat_worker(
         }
     }
     if let Some(snapshot) = runtime.complete(&request_id, result) {
-        let _ = app.emit("chat-runtime-changed", snapshot);
+        chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
     }
 }
 
-pub async fn retry_chat_persistence(
-    app: tauri::AppHandle,
-    client_request_id: String,
-) -> Result<StreamChatResponse, KokoroError> {
-    let runtime = app
-        .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
-        .inner()
-        .clone();
-    let worker_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let app = worker_app;
-        let _retry = runtime.lock_save_retry().await;
-        let _database_guard = crate::ai::context::try_acquire_database_operation_read_guard()
-            .map_err(|error| KokoroError::Chat(error.into()))?;
-        let state = app.state::<AIOrchestrator>();
-        let pending = match runtime.save_retry(&client_request_id)? {
-            crate::chat::runtime::SaveRetry::Saved(response) => return Ok(*response),
-            crate::chat::runtime::SaveRetry::Pending(pending) => pending,
-            crate::chat::runtime::SaveRetry::InFlight(outcome) => {
-                drop(_retry);
-                return wait_chat_outcome(outcome).await;
-            }
-            crate::chat::runtime::SaveRetry::User(pending) => {
-                if state.is_chat_busy() {
-                    return Err(KokoroError::Chat(
-                        "chat_turn_busy: A chat turn is already in progress".into(),
-                    ));
+impl ChatService {
+    pub(crate) async fn retry_chat_persistence(
+        &self,
+        client_request_id: String,
+    ) -> Result<StreamChatResponse, KokoroError> {
+        let chat = self.clone();
+        tokio::spawn(async move {
+            let runtime = &chat.events.runtime;
+            let _retry = runtime.lock_save_retry().await;
+            let _database_guard = crate::ai::context::try_acquire_database_operation_read_guard()
+                .map_err(|error| KokoroError::Chat(error.into()))?;
+            let state = &chat.dependencies.state;
+            let pending = match runtime.save_retry(&client_request_id)? {
+                crate::chat::runtime::SaveRetry::Saved(response) => return Ok(*response),
+                crate::chat::runtime::SaveRetry::Pending(pending) => pending,
+                crate::chat::runtime::SaveRetry::InFlight(outcome) => {
+                    drop(_retry);
+                    return wait_chat_outcome(outcome).await;
                 }
-                let snapshot = runtime
-                    .start_user_save_retry(&client_request_id)
-                    .ok_or_else(|| {
-                        KokoroError::Validation("No failed chat save is available to retry".into())
-                    })?;
-                let outcome = runtime
-                    .outcome(&client_request_id)
-                    .expect("the retried turn is active");
-                let _ = app.emit("chat-runtime-changed", snapshot);
-                drop(_retry);
-                let request = pending.request.clone();
-                run_chat_worker(
-                    app.clone(),
-                    runtime,
-                    client_request_id,
-                    request,
-                    ChatPolicy::Desktop,
-                    Some(pending),
-                )
-                .await;
-                return wait_chat_outcome(outcome).await;
-            }
-        };
-        let _chat_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-        let _execution = state
-            .try_acquire_chat_turn(&client_request_id)
-            .await
-            .map_err(KokoroError::Chat)?;
-        let _selection = state.selection.conversation_switch_lock.lock().await;
-        let select_on_commit = pending.target.create
-            && pending.creation_generation == Some(state.current_conversation_generation())
-            && state.get_character_id().await == pending.target.character_id
-            && state
-                .selection
-                .current_conversation_id
-                .lock()
-                .await
-                .is_none();
-        let result = if pending
-            .post_commit
-            .scope
-            .as_ref()
-            .is_some_and(|scope| scope.owner_is_current())
-        {
-            state
-                .save_messages_expected_locked(
-                    &pending.target,
-                    &pending.messages,
-                    select_on_commit,
-                    None,
-                    Some(pending.expected_revision),
-                )
-                .await
-        } else {
-            Err(KokoroError::Validation(
-                "Chat owner was deleted or replaced".into(),
-            ))
-        };
-        let saved = match result {
-            Ok(saved) => saved,
-            Err(error @ KokoroError::Validation(_)) => {
-                if let Some(snapshot) =
-                    runtime.retire_save_retry(&client_request_id, error.to_string())
-                {
-                    let _ = app.emit("chat-runtime-changed", snapshot);
+                crate::chat::runtime::SaveRetry::User(pending) => {
+                    if state.is_chat_busy() {
+                        return Err(KokoroError::Chat(
+                            "chat_turn_busy: A chat turn is already in progress".into(),
+                        ));
+                    }
+                    let snapshot = runtime
+                        .start_user_save_retry(&client_request_id)
+                        .ok_or_else(|| {
+                            KokoroError::Validation(
+                                "No failed chat save is available to retry".into(),
+                            )
+                        })?;
+                    let outcome = runtime
+                        .outcome(&client_request_id)
+                        .expect("the retried turn is active");
+                    chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+                    drop(_retry);
+                    let request = pending.request.clone();
+                    run_chat_worker(
+                        chat.clone(),
+                        client_request_id,
+                        request,
+                        ChatPolicy::Desktop,
+                        Some(pending),
+                    )
+                    .await;
+                    return wait_chat_outcome(outcome).await;
                 }
-                return Err(error);
+            };
+            let _chat_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+            let _execution = state
+                .try_acquire_chat_turn(&client_request_id)
+                .await
+                .map_err(KokoroError::Chat)?;
+            let _selection = state.selection.conversation_switch_lock.lock().await;
+            let select_on_commit = pending.target.create
+                && pending.creation_generation == Some(state.current_conversation_generation())
+                && state.get_character_id().await == pending.target.character_id
+                && state
+                    .selection
+                    .current_conversation_id
+                    .lock()
+                    .await
+                    .is_none();
+            let result = if pending
+                .post_commit
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.owner_is_current())
+            {
+                state
+                    .save_messages_expected_locked(
+                        &pending.target,
+                        &pending.messages,
+                        select_on_commit,
+                        None,
+                        Some(pending.expected_revision),
+                    )
+                    .await
+            } else {
+                Err(KokoroError::Validation(
+                    "Chat owner was deleted or replaced".into(),
+                ))
+            };
+            let saved = match result {
+                Ok(saved) => saved,
+                Err(error @ KokoroError::Validation(_)) => {
+                    if let Some(snapshot) =
+                        runtime.retire_save_retry(&client_request_id, error.to_string())
+                    {
+                        chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+            let assistant_message_id = if pending.has_assistant_text {
+                saved.last().map(|message| message.id)
+            } else {
+                None
+            };
+            let response = StreamChatResponse {
+                text: pending.text.clone(),
+                conversation_id: pending.target.conversation_id,
+                user_message_id: pending.user_message_id,
+                assistant_message_id,
+                client_request_id: Some(client_request_id.clone()),
+                status: Some("completed".into()),
+                translation: None,
+                images: Vec::new(),
+                output_warnings: Vec::new(),
+                ..Default::default()
+            };
+            let snapshot = runtime.complete_save_retry(
+                &client_request_id,
+                response.clone(),
+                select_on_commit.then(|| state.current_conversation_generation()),
+            );
+            drop(_selection);
+            if let Some(snapshot) = snapshot {
+                pending
+                    .post_commit
+                    .dispatch(state.clone(), chat.events.clone());
+                chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+                let _ = ChatPolicy::Desktop
+                    .emit(
+                        &chat,
+                        ChatEvent::Finished,
+                        serde_json::json!({
+                            "turn_id": pending.turn_id,
+                            "client_request_id": client_request_id,
+                            "conversation_id": response.conversation_id,
+                            "assistant_message_id": response.assistant_message_id,
+                            "status": "completed",
+                            "text": response.text,
+                        }),
+                    )
+                    .await;
+                if let Some(speech) = pending.speech {
+                    chat.speak_completed_turn(
+                        client_request_id,
+                        pending.turn_id,
+                        response.text.clone(),
+                        speech,
+                        pending.speech_snapshot.clone(),
+                    )
+                    .await;
+                }
             }
-            Err(error) => return Err(error),
-        };
-        let assistant_message_id = if pending.has_assistant_text {
-            saved.last().map(|message| message.id)
-        } else {
-            None
-        };
-        let response = StreamChatResponse {
-            text: pending.text.clone(),
-            conversation_id: pending.target.conversation_id,
-            user_message_id: pending.user_message_id,
-            assistant_message_id,
-            client_request_id: Some(client_request_id.clone()),
-            status: Some("completed".into()),
-            translation: None,
-            images: Vec::new(),
-            output_warnings: Vec::new(),
+            Ok(response)
+        })
+        .await
+        .map_err(|error| KokoroError::Chat(error.to_string()))?
+    }
+
+    pub(crate) fn submit_proactive_bound(
+        &self,
+        instruction: String,
+        scope: (String, Option<String>, u64),
+    ) -> Option<String> {
+        if self.events.runtime.is_playing(|label| {
+            self.events
+                .desktop
+                .as_ref()
+                .is_some_and(|desktop| desktop.window_is_open(label))
+        }) {
+            return None;
+        }
+        let request_id = format!("proactive_{}", Uuid::new_v4());
+        let request = ChatRequest {
+            message: instruction,
+            hidden: true,
+            character_id: Some(scope.0),
+            conversation_id: scope.1,
+            conversation_generation: Some(scope.2),
+            client_request_id: Some(request_id.clone()),
             ..Default::default()
         };
-        let snapshot = runtime.complete_save_retry(
-            &client_request_id,
-            response.clone(),
-            select_on_commit.then(|| state.current_conversation_generation()),
-        );
-        drop(_selection);
-        if let Some(snapshot) = snapshot {
-            pending.post_commit.dispatch(app.clone());
-            let _ = app.emit("chat-runtime-changed", snapshot);
-            let _ = ChatPolicy::Desktop
-                .emit(
-                    &app,
-                    "chat-turn-finish",
-                    serde_json::json!({
-                        "turn_id": pending.turn_id,
-                        "client_request_id": client_request_id,
-                        "conversation_id": response.conversation_id,
-                        "assistant_message_id": response.assistant_message_id,
-                        "status": "completed",
-                        "text": response.text,
-                    }),
-                )
-                .await;
-            if let Some(speech) = pending.speech {
-                crate::chat::runtime::speak_completed_turn(
-                    app.clone(),
-                    client_request_id,
-                    pending.turn_id,
-                    response.text.clone(),
-                    speech,
-                    pending.speech_snapshot.clone(),
-                )
-                .await;
+        let chat = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = chat.submit(request, ChatPolicy::Desktop).await {
+                tracing::debug!(target:"chat","proactive request ended: {error}");
             }
-        }
-        Ok(response)
-    })
-    .await
-    .map_err(|error| KokoroError::Chat(error.to_string()))?
-}
-
-pub(crate) fn submit_proactive_bound(
-    app: tauri::AppHandle,
-    instruction: String,
-    scope: (String, Option<String>, u64),
-) -> Option<String> {
-    if app
-        .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
-        .is_playing(&app)
-    {
-        return None;
+        });
+        Some(request_id)
     }
-    let request_id = format!("proactive_{}", Uuid::new_v4());
-    let request = ChatRequest {
-        message: instruction,
-        hidden: true,
-        character_id: Some(scope.0),
-        conversation_id: scope.1,
-        conversation_generation: Some(scope.2),
-        client_request_id: Some(request_id.clone()),
-        ..Default::default()
-    };
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = submit_chat(app, request, ChatPolicy::Desktop).await {
-            tracing::debug!(target:"chat","proactive request ended: {error}");
-        }
-    });
-    Some(request_id)
 }
 
-struct ChatDependencies<'a> {
-    state: &'a AIOrchestrator,
-    imagegen: &'a ImageGenService,
-    llm: &'a LlmService,
-    registry: &'a Arc<RwLock<ActionRegistry>>,
-    tool_settings: &'a Arc<RwLock<ToolSettings>>,
-    approval: &'a Arc<PendingToolApprovalState>,
-    cancellation: &'a Arc<TurnCancellationState>,
-    vision: &'a crate::vision::watcher::VisionWatcher,
-    window_size: &'a WindowSizeState,
-    vision_server: &'a Arc<Mutex<crate::vision::server::VisionServer>>,
+pub(crate) struct ChatDependencies {
+    pub(crate) state: Arc<AIOrchestrator>,
+    pub(crate) imagegen: ImageGenService,
+    pub(crate) llm: LlmService,
+    pub(crate) registry: Arc<RwLock<ActionRegistry>>,
+    pub(crate) tool_settings: Arc<RwLock<ToolSettings>>,
+    pub(crate) approval: Arc<PendingToolApprovalState>,
+    pub(crate) cancellation: Arc<TurnCancellationState>,
+    pub(crate) vision: crate::vision::watcher::VisionWatcher,
+    pub(crate) window_size: WindowSizeState,
+    pub(crate) vision_server: Arc<Mutex<crate::vision::server::VisionServer>>,
+    pub(crate) hooks: Option<HookRuntime>,
+    pub(crate) activation: ActivationCoordinator,
+    pub(crate) package_root: PathBuf,
+    pub(crate) live2d: Arc<Live2dStore>,
+    pub(crate) tts: Option<crate::tts::TtsService>,
+    pub(crate) stt: Option<crate::stt::SttService>,
+    pub(crate) actions: Arc<ActionServices>,
 }
 
-impl<'a> ChatDependencies<'a> {
-    fn managed(app: &'a tauri::AppHandle) -> Self {
-        Self {
-            state: app.state::<AIOrchestrator>().inner(),
-            imagegen: app.state::<ImageGenService>().inner(),
-            llm: app.state::<LlmService>().inner(),
-            registry: app.state::<Arc<RwLock<ActionRegistry>>>().inner(),
-            tool_settings: app.state::<Arc<RwLock<ToolSettings>>>().inner(),
-            approval: app.state::<Arc<PendingToolApprovalState>>().inner(),
-            cancellation: app.state::<Arc<TurnCancellationState>>().inner(),
-            vision: app.state::<crate::vision::watcher::VisionWatcher>().inner(),
-            window_size: app.state::<WindowSizeState>().inner(),
-            vision_server: app
-                .state::<Arc<Mutex<crate::vision::server::VisionServer>>>()
-                .inner(),
-        }
+/// Called under the activation gate so active desktop cues cannot be read
+/// for a turn bound to a different character.
+async fn resolve_turn_cues(
+    live2d: &Live2dStore,
+    runtime: &crate::characters::activation::BackendRuntimeSnapshot,
+    state: &AIOrchestrator,
+) -> Option<crate::live2d::Live2dCueMap> {
+    let cues = live2d.runtime_cue_map(runtime);
+    if cues.is_none() && state.get_character_id().await == runtime.character_id {
+        return live2d.active_profile().map(|profile| profile.cue_map);
     }
+    cues
 }
 
 async fn execute_chat_with_pending(
-    app: &tauri::AppHandle,
+    chat: &ChatService,
     request: ChatRequest,
     policy: ChatPolicy,
-    dependencies: ChatDependencies<'_>,
     pending_user_save: Option<Box<PendingUserSave>>,
 ) -> Result<StreamChatResponse, KokoroError> {
+    let dependencies = &chat.dependencies;
     let ChatDependencies {
         state,
         imagegen: imagegen_state,
@@ -2702,7 +2831,8 @@ async fn execute_chat_with_pending(
         vision: vision_watcher,
         window_size: window_size_state,
         vision_server,
-    } = dependencies;
+        ..
+    } = dependencies.as_ref();
     let desktop = policy.is_desktop();
     // Gate chat if runtime is degraded (e.g. startup recovery failure)
     if let Some(reason) = state.get_runtime_degraded().await {
@@ -2764,8 +2894,8 @@ async fn execute_chat_with_pending(
 
     policy
         .emit(
-            app,
-            "chat-turn-acknowledged",
+            chat,
+            ChatEvent::Acknowledged,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "client_request_id": client_request_id,
@@ -2784,7 +2914,7 @@ async fn execute_chat_with_pending(
 
     let active_conversation_id_holder = std::sync::Arc::new(std::sync::Mutex::new(None));
     let active_conv_id_for_prep = std::sync::Arc::clone(&active_conversation_id_holder);
-    let hook_runtime = desktop.then(|| app.try_state::<HookRuntime>()).flatten();
+    let hook_runtime = dependencies.hooks.as_ref().filter(|_| desktop);
 
     let preparation_timeout = chat_turn_preparation_timeout();
     #[cfg(test)]
@@ -2795,33 +2925,25 @@ async fn execute_chat_with_pending(
         // model, tool, media or memory I/O.
         let (prompt_snapshot, llm_snapshot, speech, speech_snapshot) = {
             let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-            let committed = app
-                .state::<crate::characters::activation::ActivationCoordinator>()
+            let committed = dependencies
+                .activation
                 .get_committed(&state.db)
                 .await?
                 .filter(|committed| committed.runtime.character_id == char_id);
-            let package_root = app
-                .try_state::<crate::characters::catalog::CharacterCatalog>()
-                .map(|catalog| catalog.root().to_path_buf())
-                .unwrap_or_else(|| {
-                    crate::utils::paths::data_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                        .join("com.chyin.kokoro")
-                        .join("characters")
-                });
             let uses_committed = committed.is_some();
             let (runtime, profile) = if let Some(committed) = committed {
                 (committed.runtime, None)
             } else {
                 crate::characters::activation::read_execution_runtime(
                     &state.db,
-                    &package_root,
+                    &dependencies.package_root,
                     &char_id,
                 )
                 .await?
             };
+            let cues = resolve_turn_cues(&dependencies.live2d, &runtime, state).await;
             let mut prompt = state
-                .prompt_snapshot_with_runtime(&char_id, Some(&runtime))
+                .prompt_snapshot_with_runtime(&char_id, Some(&runtime), cues)
                 .await
                 .map_err(|error| KokoroError::Chat(error.to_string()))?;
             prompt.vision_context_history_mode = vision_watcher
@@ -2830,34 +2952,19 @@ async fn execute_chat_with_pending(
                 .await
                 .vision_context_history_mode
                 .clone();
-            let cues = if uses_committed {
-                crate::live2d::committed_cue_map(&runtime)
-            } else {
-                crate::live2d::runtime_cue_map(
-                    &runtime,
-                    &package_root
-                        .parent()
-                        .unwrap_or(&package_root)
-                        .join("live2d_models"),
-                )
-            };
-            if let Some(cues) = cues {
-                prompt.cue_map = Some(cues);
-            }
-            let (speech, speech_snapshot) =
-                if let Some(tts) = app.try_state::<crate::tts::TtsService>() {
-                    if uses_committed {
-                        let snapshot = tts.execution_snapshot(Some(&runtime.tts), None).await;
-                        (Some(runtime.tts), snapshot)
-                    } else {
-                        let (speech, snapshot) = tts
-                            .role_execution_snapshot(&profile.unwrap_or_default())
-                            .await;
-                        (Some(speech), snapshot)
-                    }
+            let (speech, speech_snapshot) = if let Some(tts) = dependencies.tts.as_ref() {
+                if uses_committed {
+                    let snapshot = tts.execution_snapshot(Some(&runtime.tts), None).await;
+                    (Some(runtime.tts), snapshot)
                 } else {
-                    (Some(runtime.tts), None)
-                };
+                    let (speech, snapshot) = tts
+                        .role_execution_snapshot(&profile.unwrap_or_default())
+                        .await;
+                    (Some(speech), snapshot)
+                }
+            } else {
+                (Some(runtime.tts), None)
+            };
             let providers = llm_state.execution_snapshot().await;
             (prompt, providers, speech, speech_snapshot)
         };
@@ -2902,7 +3009,7 @@ async fn execute_chat_with_pending(
             let mut typing_event = serde_json::to_value(&typing_params).unwrap_or_default();
             typing_event["client_request_id"] = client_request_id.clone().into();
             typing_event["turn_id"] = assistant_turn_id.clone().into();
-            let _ = policy.emit(app, "chat-typing", typing_event).await;
+            let _ = policy.emit(chat, ChatEvent::Typing, typing_event).await;
         }
 
         // 1. Select current-turn vision context before any user-message persistence.
@@ -2976,8 +3083,9 @@ async fn execute_chat_with_pending(
                 }
             }
             if let Some(audio) = request.audio.take() {
-                let stt = app
-                    .try_state::<crate::stt::SttService>()
+                let stt = dependencies
+                    .stt
+                    .as_ref()
                     .ok_or_else(|| KokoroError::Chat("STT service not available".into()))?;
                 let transcription = stt
                     .transcribe(
@@ -3052,7 +3160,7 @@ async fn execute_chat_with_pending(
                 if let Ok(mut guard) = active_conv_id_for_prep.lock() {
                     *guard = Some(cid.clone());
                 }
-                let _ = policy.emit(app, "chat-turn-bound", serde_json::json!({
+                let _ = policy.emit(chat, ChatEvent::Bound, serde_json::json!({
                     "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":char_id,
                     "conversation_id":cid,"user_message_id":mid,"message":request.message,
                 })).await;
@@ -3096,10 +3204,10 @@ async fn execute_chat_with_pending(
                             && !request.hidden
                     })
                     .ok_or_else(|| KokoroError::Validation("Invalid regeneration scope".into()))?;
-                let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
+                let runtime = &chat.events.runtime;
                 let plan = RegenerationPlan::prepare(
                     state,
-                    &runtime,
+                    runtime,
                     regeneration,
                     &char_id,
                     conversation,
@@ -3230,7 +3338,7 @@ async fn execute_chat_with_pending(
                     let mut request = request.clone();
                     request.conversation_id = current_conv_id;
                     request.conversation_generation = Some(current_generation);
-                    let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
+                    let runtime = &chat.events.runtime;
                     runtime.prepare_user_save_retry(
                         &client_request_id,
                         original_revision.map(|revision| PendingUserSave {
@@ -3277,8 +3385,8 @@ async fn execute_chat_with_pending(
             // not project a second optimistic user beside this SQLite row.
             let _ = policy
                 .emit(
-                    app,
-                    "chat-turn-bound",
+                    chat,
+                    ChatEvent::Bound,
                     serde_json::json!({
                         "client_request_id": client_request_id,
                         "turn_id": assistant_turn_id,
@@ -3442,7 +3550,7 @@ async fn execute_chat_with_pending(
         // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
         for warning in compose_warnings {
             tracing::warn!("[compose_prompt] {}", warning);
-            let _ = policy.emit(app, "chat-warning", serde_json::json!({"message":warning,"client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id,"conversation_generation":request.conversation_generation})).await;
+            let _ = policy.emit(chat, ChatEvent::Warning, serde_json::json!({"message":warning,"client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id,"conversation_generation":request.conversation_generation})).await;
         }
 
         Ok(PreparedChatTurn {
@@ -3482,8 +3590,8 @@ async fn execute_chat_with_pending(
                 .lock()
                 .ok()
                 .and_then(|g| g.clone());
-            let _ = policy.emit(app,
-                "chat-turn-finish",
+            let _ = policy.emit(chat,
+                ChatEvent::Finished,
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "status": "cancelled",
@@ -3506,8 +3614,8 @@ async fn execute_chat_with_pending(
                 .lock()
                 .ok()
                 .and_then(|g| g.clone());
-            let _ = policy.emit(app,
-                "chat-turn-finish",
+            let _ = policy.emit(chat,
+                ChatEvent::Finished,
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "status": "error",
@@ -3577,7 +3685,7 @@ async fn execute_chat_with_pending(
                 )
                 .await;
             }
-            let _ = policy.emit(app, "chat-turn-text-complete", serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation})).await;
+            let _ = policy.emit(chat, ChatEvent::TextComplete, serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation})).await;
             let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
                 .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
             return Ok(StreamChatResponse {
@@ -3711,8 +3819,8 @@ async fn execute_chat_with_pending(
         regeneration.commit(state, conversation, bound_generation, cancel_rx.as_ref()).await?;
     }
 
-    policy.emit(app,
-        "chat-turn-start",
+    policy.emit(chat,
+        ChatEvent::Started,
         serde_json::json!({
             "turn_id": assistant_turn_id,
             "client_request_id": request.client_request_id,
@@ -3839,7 +3947,7 @@ async fn execute_chat_with_pending(
                 let payload = build_turn_delta_payload_if_not_cancelled(
                     cancel_state.as_ref(), &assistant_turn_id, text, request.client_request_id.as_deref(),
                 ).await.map_err(KokoroError::Chat)?;
-                policy.emit(app, "chat-turn-delta", payload).await.map_err(|error| KokoroError::Chat(error.to_string()))
+                policy.emit(chat, ChatEvent::Delta, payload).await.map_err(|error| KokoroError::Chat(error.to_string()))
             },
         ).await?;
         memory_scope.ensure_owner_current()?;
@@ -3856,7 +3964,7 @@ async fn execute_chat_with_pending(
             let failure_event = build_chat_error_event(failure.stage, &failure.message, &assistant_turn_id, retryable)
                 .into_failure_event(Some(identity.conversation_id.clone()), Some(assistant_turn_id.clone()), Some(char_id.clone()), None);
             emit_and_persist_failure_event(
-                app, policy, state, failure_event,
+                chat, policy, state, failure_event,
                 user_message_id, keep_through_message_id, &memory_scope,
             ).await?;
             stream_failure_message = Some(failure.message);
@@ -3907,7 +4015,7 @@ async fn execute_chat_with_pending(
                 )
                 .await
                 .map_err(KokoroError::Chat)?;
-                policy.emit(app, "chat-turn-delta", payload).await
+                policy.emit(chat, ChatEvent::Delta, payload).await
                     .map_err(|e| KokoroError::Chat(e.to_string()))?;
             }
         }
@@ -4027,12 +4135,12 @@ async fn execute_chat_with_pending(
             character_id: &char_id,
             conversation_id: Some(&identity.conversation_id),
             source: policy.source(),
-            allow_hooks: desktop,
+            hooks: hook_runtime,
             allowed_tool_ids: allowed_tool_ids.as_ref(),
         };
         dispatched_tools = true;
         let execution_outcomes = match execute_tool_calls_with_cancellation(
-            app,
+            dependencies.actions.clone(),
             action_registry,
             tool_settings_state,
             &tool_scope,
@@ -4114,7 +4222,7 @@ async fn execute_chat_with_pending(
                         memory_scope: &memory_scope,
                         cue_names: cue_names.as_ref(),
                         request_id: &client_request_id,
-                        app,
+                        chat,
                         approval_state: approval_state.as_ref(),
                         registry_state: action_registry,
                         tool_settings_state,
@@ -4141,7 +4249,7 @@ async fn execute_chat_with_pending(
                     ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id)
                         .await
                         .map_err(KokoroError::Chat)?;
-                    emit_tool_trace_event(app, policy, &tool_trace_id, resolved_payload).await
+                    emit_tool_trace_event(chat, policy, &tool_trace_id, resolved_payload).await
                         .map_err(|e| KokoroError::Chat(e.to_string()))?;
                     ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id)
                         .await
@@ -4150,14 +4258,14 @@ async fn execute_chat_with_pending(
                 } else {
                     tracing::error!(target: "tools", "[ToolCall] {} failed: {}", outcome.tool_name(), error);
                     let payload = tool_error_payload(&outcome, &assistant_turn_id, error);
-                    let _ = emit_tool_trace_event(app, policy, &tool_trace_id, payload).await;
+                    let _ = emit_tool_trace_event(chat, policy, &tool_trace_id, payload).await;
                     outcome.result.clone()
                 }
             } else {
                 if let Ok(success) = &outcome.result {
                     tracing::info!(target: "tools", "[ToolCall] {} => {}", outcome.tool_name(), success.message);
                     let payload = tool_success_payload(&outcome, &assistant_turn_id, success);
-                    let _ = emit_tool_trace_event(app, policy, &tool_trace_id, payload).await;
+                    let _ = emit_tool_trace_event(chat, policy, &tool_trace_id, payload).await;
                 }
                 outcome.result.clone()
             };
@@ -4329,8 +4437,8 @@ async fn execute_chat_with_pending(
                 cleanup_turn_artifacts(state, cid, &assistant_turn_id, None).await;
             }
             // Flush typewriter/reveal buffer in frontend
-            let _ = policy.emit(app,
-                "chat-turn-text-complete",
+            let _ = policy.emit(chat,
+                ChatEvent::TextComplete,
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
                     "text": full_response.clone(),
@@ -4340,8 +4448,8 @@ async fn execute_chat_with_pending(
             ).await;
         }
 
-        policy.emit(app,
-            "chat-turn-finish",
+        policy.emit(chat,
+            ChatEvent::Finished,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "status": "error",
@@ -4413,8 +4521,8 @@ async fn execute_chat_with_pending(
                 cleanup_turn_artifacts(state, cid, &assistant_turn_id, draft_row_id).await;
             }
         }
-        policy.emit(app,
-            "chat-turn-text-complete",
+        policy.emit(chat,
+            ChatEvent::TextComplete,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "text": "",
@@ -4423,8 +4531,8 @@ async fn execute_chat_with_pending(
             }),
         ).await
         .map_err(|e| KokoroError::Chat(e.to_string()))?;
-        policy.emit(app,
-            "chat-turn-finish",
+        policy.emit(chat,
+            ChatEvent::Finished,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "status": "completed",
@@ -4478,8 +4586,8 @@ async fn execute_chat_with_pending(
         && !resp_lang.is_empty()
         && user_lang != resp_lang;
 
-    policy.emit(app,
-        "chat-turn-text-complete",
+    policy.emit(chat,
+        ChatEvent::TextComplete,
         serde_json::json!({
             "turn_id": assistant_turn_id,
             "text": full_response.clone(),
@@ -4610,8 +4718,8 @@ async fn execute_chat_with_pending(
                                 .unwrap_or(false);
                             if is_valid {
                                 tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
-                                let _ = policy.emit(app,
-                                    "chat-cue",
+                                let _ = policy.emit(chat,
+                                    ChatEvent::Cue,
                                     serde_json::json!({ "cue": trimmed, "source": "fallback-cue", "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id }),
                                 ).await;
                             } else {
@@ -4631,8 +4739,8 @@ async fn execute_chat_with_pending(
     if !all_translations.is_empty() {
         let combined_translation = all_translations.join(" ");
         final_translation = Some(combined_translation.clone());
-        let _ = policy.emit(app,
-            "chat-turn-translation",
+        let _ = policy.emit(chat,
+            ChatEvent::Translation,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "translation": combined_translation,
@@ -4665,7 +4773,7 @@ async fn execute_chat_with_pending(
         super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, system_provider.clone(), &memory_target_language, work, memory_scope.clone()).await;
         let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
             .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
-        let _ = policy.emit(app, "chat-turn-finish", serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"})).await;
+        let _ = policy.emit(chat, ChatEvent::Finished, serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"})).await;
         return Ok(Some(row));
     }
 
@@ -4758,7 +4866,7 @@ async fn execute_chat_with_pending(
             Ok(saved) => saved,
             Err(error) => {
                 if let Some(expected_revision) = retry_revision {
-                    let runtime = app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>();
+                    let runtime = &chat.events.runtime;
                     runtime.prepare_save_retry(&client_request_id, PendingChatSave {
                         target: target.clone(),
                         messages,
@@ -4778,7 +4886,7 @@ async fn execute_chat_with_pending(
         };
         draft_row_id = if full_response.is_empty() { None } else { saved.last().map(|row| row.id) };
         if select_on_commit {
-            app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().event("chat-turn-scope", &serde_json::json!({
+            chat.events.runtime.event("chat-turn-scope", &serde_json::json!({
                 "turn_id": assistant_turn_id, "conversation_id": target.conversation_id,
                 "conversation_generation": state.current_conversation_generation(),
             }));
@@ -4787,10 +4895,10 @@ async fn execute_chat_with_pending(
     }
 
     post_commit.conversation_id = conversation_id.clone();
-    post_commit.dispatch(app.clone());
+    post_commit.dispatch(state.clone(), chat.events.clone());
 
-        policy.emit(app,
-            "chat-turn-finish",
+        policy.emit(chat,
+            ChatEvent::Finished,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "status": "completed",
@@ -4809,12 +4917,12 @@ async fn execute_chat_with_pending(
         Ok(assistant_message_id) => {
             if desktop && assistant_message_id.is_some() {
                 if let Some(speech) = speech {
-                    let text = app
-                        .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
+                    let text = chat
+                        .events
+                        .runtime
                         .turn_text(&client_request_id)
                         .unwrap_or_default();
-                    crate::chat::runtime::speak_completed_turn(
-                        app.clone(),
+                    chat.speak_completed_turn(
                         client_request_id,
                         assistant_turn_id.clone(),
                         text,
@@ -4882,8 +4990,8 @@ async fn execute_chat_with_pending(
             }
             policy
                 .emit(
-                    app,
-                    "chat-turn-finish",
+                    chat,
+                    ChatEvent::Finished,
                     serde_json::json!({
                         "turn_id": assistant_turn_id,
                         "status": "cancelled",
@@ -4932,6 +5040,355 @@ mod tests {
         MemoryEventType,
     };
     use crate::hooks::HookPayload;
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct HeadlessProvider {
+        calls: AtomicUsize,
+        started: Notify,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::provider::LlmProvider for HeadlessProvider {
+        async fn chat(
+            &self,
+            _: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+            _: Option<crate::llm::provider::LlmParams>,
+        ) -> Result<String, String> {
+            Ok(r#"{"cue":null}"#.into())
+        }
+
+        async fn chat_stream(
+            &self,
+            messages: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+            _: Option<crate::llm::provider::LlmParams>,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, String>> + Send>>,
+            String,
+        > {
+            let body = serde_json::to_value(messages).unwrap();
+            let input = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "user")
+                .map(serde_json::Value::to_string)
+                .unwrap_or_default();
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if input.contains("[wait]") {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            let response = if input.contains("[failure]") {
+                Err("fixture provider failed".into())
+            } else {
+                Ok("Saved without a window.".into())
+            };
+            Ok(Box::pin(futures::stream::iter([response])))
+        }
+
+        fn id(&self) -> &str {
+            "headless-fixture"
+        }
+    }
+
+    #[derive(Default)]
+    struct TestDesktop {
+        disconnected: AtomicBool,
+        failed_events: AtomicUsize,
+        playback_calls: Arc<AtomicUsize>,
+    }
+
+    impl super::super::events::ChatDesktop for TestDesktop {
+        fn emit(&self, _: ChatEvent, _: serde_json::Value) -> Result<(), String> {
+            if self.disconnected.load(Ordering::SeqCst) {
+                self.failed_events.fetch_add(1, Ordering::SeqCst);
+                Err("fixture desktop disconnected".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn window_is_open(&self, _: &str) -> bool {
+            false
+        }
+
+        fn playback(&self, _: Arc<ChatRuntimeState>) -> Option<Box<dyn crate::tts::TtsPlayback>> {
+            Some(Box::new(FailedPlayback(self.playback_calls.clone())))
+        }
+    }
+
+    struct FailedPlayback(Arc<AtomicUsize>);
+
+    impl crate::tts::TtsPlayback for FailedPlayback {
+        fn emit(&self, event: crate::tts::TtsPlaybackEvent) -> Result<(), String> {
+            if matches!(event, crate::tts::TtsPlaybackEvent::BrowserDelegate(_)) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err("fixture playback unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    async fn headless_chat(
+        root: &Path,
+    ) -> (ChatService, Arc<AIOrchestrator>, Arc<HeadlessProvider>) {
+        let mut state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        Arc::get_mut(&mut state.selection)
+            .unwrap()
+            .persist_conversation_selection = false;
+        state.set_memory_enabled(false).await;
+        for id in ["headless-role", "other-headless-role"] {
+            sqlx::query("INSERT INTO characters(id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,'Headless','Fixture','','custom',1,1)")
+                .bind(id).execute(&state.db).await.unwrap();
+        }
+        state.set_character_id("headless-role".into()).await;
+        sqlx::query("INSERT INTO conversations(id,character_id,created_at,updated_at) VALUES ('headless-history','headless-role','now','now')")
+            .execute(&state.db).await.unwrap();
+        *state.selection.current_conversation_id.lock().await = Some("headless-history".into());
+        let state = Arc::new(state);
+        let provider = Arc::new(HeadlessProvider::default());
+        let chat =
+            ChatService::for_test(state.clone(), LlmService::for_test(provider.clone()), root)
+                .await;
+        (chat, state, provider)
+    }
+
+    fn headless_request(id: &str, message: &str) -> ChatRequest {
+        ChatRequest {
+            client_request_id: Some(id.into()),
+            character_id: Some("headless-role".into()),
+            conversation_id: Some("headless-history".into()),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn application_turn_survives_dropped_waiter_and_disconnected_desktop() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut chat, state, provider) = headless_chat(root.path()).await;
+        let desktop = Arc::new(TestDesktop::default());
+        chat.events.desktop = Some(desktop.clone());
+        let request = headless_request("detached", "[wait] Write once");
+        let waiter = {
+            let chat = chat.clone();
+            let request = request.clone();
+            tokio::spawn(async move { chat.submit(request, ChatPolicy::Desktop).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), provider.started.notified())
+            .await
+            .unwrap();
+        waiter.abort();
+        assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+        desktop.disconnected.store(true, Ordering::SeqCst);
+        provider.release.notify_one();
+
+        let replay = tokio::time::timeout(
+            Duration::from_secs(5),
+            chat.submit(request.clone(), ChatPolicy::Desktop),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.status.as_deref(), Some("completed"));
+        assert_eq!(replay.text, "Saved without a window.");
+        assert!(!replay.newly_committed);
+        assert!(desktop.failed_events.load(Ordering::SeqCst) > 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let view = super::super::runtime::get_chat_view(&state, &chat.events.runtime, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(view.messages.iter().any(
+            |row| row.id == replay.assistant_message_id.unwrap() && row.content == replay.text
+        ));
+        assert!(view
+            .turns
+            .iter()
+            .any(|turn| turn.client_request_id == "detached"
+                && turn.status == "completed"
+                && turn.text == replay.text));
+        let mut conflict = request;
+        conflict.message = "Different input on the same request".into();
+        assert!(chat.submit(conflict, ChatPolicy::Desktop).await.is_err());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failure_and_cancelled_turn_both_release_the_application_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let (chat, state, provider) = headless_chat(root.path()).await;
+        let failed = chat
+            .submit(
+                headless_request("provider-failed", "[failure]"),
+                ChatPolicy::Desktop,
+            )
+            .await
+            .err()
+            .expect("provider failure must reach the caller");
+        assert!(
+            failed.to_string().contains("fixture provider failed"),
+            "{failed}"
+        );
+        assert!(!state.is_chat_busy());
+
+        let turn = {
+            let chat = chat.clone();
+            tokio::spawn(async move {
+                chat.submit(
+                    headless_request("cancelled", "[wait] Cancel without a window"),
+                    ChatPolicy::Desktop,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), provider.started.notified())
+            .await
+            .unwrap();
+        chat.cancel("cancelled".into(), None).await.unwrap();
+        let response = turn.await.unwrap().unwrap();
+        assert_eq!(response.status.as_deref(), Some("cancelled"));
+        assert!(response.assistant_message_id.is_none());
+        assert!(!state.is_chat_busy());
+        let next = chat
+            .submit(
+                headless_request("after-cancel", "Next turn"),
+                ChatPolicy::Desktop,
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.status.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test]
+    async fn desktop_save_retry_commits_once_and_playback_failure_leaves_the_reply_saved() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut chat, state, provider) = headless_chat(root.path()).await;
+        let desktop = Arc::new(TestDesktop::default());
+        chat.events.desktop = Some(desktop.clone());
+        let tts = crate::tts::TtsService::init_from_config(&Default::default()).await;
+        Arc::get_mut(&mut chat.dependencies).unwrap().tts = Some(tts);
+
+        sqlx::query("CREATE TRIGGER reject_headless_reply BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END")
+            .execute(&state.db).await.unwrap();
+        let request = headless_request("save-retry", "Retry the assistant save");
+        assert!(matches!(
+            chat.submit(request.clone(), ChatPolicy::Desktop).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_headless_reply")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let saved = chat
+            .retry_chat_persistence("save-retry".into())
+            .await
+            .unwrap();
+        assert!(saved.assistant_message_id.is_some());
+        assert_eq!(saved.text, "Saved without a window.");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        // A configured browser provider is captured during the failed turn and
+        // reused by automatic playback after the reply is committed.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turn = chat.events.runtime.turn_scope("save-retry").unwrap();
+                if let Some(error) = turn.speech_error {
+                    assert!(error.contains("fixture playback unavailable"), "{error}");
+                    assert_eq!(turn.status, "completed");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let replay = chat.submit(request, ChatPolicy::Desktop).await.unwrap();
+        assert_eq!(desktop.playback_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(replay.text, saved.text);
+        assert_eq!(replay.assistant_message_id, saved.assistant_message_id);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE conversation_id='headless-history' AND role='assistant'")
+            .fetch_one(&state.db).await.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn only_the_selected_role_can_inherit_desktop_cues_and_explicit_empty_stays_empty() {
+        use crate::characters::activation::{BackendRuntimeSnapshot, PackageAssetReference};
+        let root = tempfile::tempdir().unwrap();
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        state.set_character_id("selected".into()).await;
+        let live2d = Live2dStore::new(root.path().to_owned());
+        live2d
+            .set_active_model(Some(crate::live2d::BUILTIN_LIVE2D_MODEL_PATH))
+            .unwrap();
+        let mut runtime = BackendRuntimeSnapshot {
+            character_id: "bound-externally".into(),
+            ..Default::default()
+        };
+        let _activation = state.enter_chat_turn().unwrap();
+        assert!(resolve_turn_cues(&live2d, &runtime, &state).await.is_none());
+        runtime.character_id = "selected".into();
+        assert!(resolve_turn_cues(&live2d, &runtime, &state)
+            .await
+            .is_some_and(|cues| !cues.is_empty()));
+
+        runtime.cue_profile = Some(PackageAssetReference::Package {
+            template_id: "selected-role".into(),
+            template_version: "1.0.0".into(),
+            path: root
+                .path()
+                .join("missing-cues.json")
+                .to_string_lossy()
+                .into_owned(),
+        });
+        assert_eq!(
+            resolve_turn_cues(&live2d, &runtime, &state)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_tool_uses_the_injected_screen_port() {
+        use crate::actions::registry::ActionHandler;
+        let root = tempfile::tempdir().unwrap();
+        let (chat, _, _) = headless_chat(root.path()).await;
+        let services = chat.dependencies.actions.clone();
+        let mut config = services.vision.config.write().await;
+        config.vlm_enabled = true;
+        drop(config);
+        let error = crate::actions::builtin::CaptureScreenAction
+            .execute(
+                HashMap::new(),
+                ActionContext {
+                    memory_scope: None,
+                    cue_names: None,
+                    request_id: None,
+                    turn_id: None,
+                    services,
+                    character_id: "headless-role".into(),
+                    conversation_id: None,
+                    source: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.0,
+            "Screen capture failed: No screen capture in the chat fixture"
+        );
+    }
 
     #[test]
     fn tool_completion_notice_exists_for_every_supported_language() {
@@ -7000,14 +7457,14 @@ mod tests {
             "When assistant message is at the end, trailing visible user message must be None"
         );
 
-        // Delete the trailing visible assistant turn using the real delete_last_messages command logic.
+        // Delete the trailing visible assistant turn using the shared history operation.
         // It must automatically remove id 4 (assistant) and its preceding technical messages (ids 3, 2).
         let history =
             std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
         let current_conv =
             std::sync::Arc::new(tokio::sync::Mutex::new(Some("conv-tools".to_string())));
         let switch_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-        crate::commands::context::delete_last_messages_inner(
+        crate::ai::context::history::delete_history_tail(
             1,
             &pool,
             &history,
@@ -7016,6 +7473,8 @@ mod tests {
             None,
             None,
             &switch_lock,
+            None,
+            None,
         )
         .await
         .unwrap();

@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::AppHandle;
 
 // ── Types ──────────────────────────────────────────────
 
@@ -67,6 +66,24 @@ impl std::fmt::Display for ActionError {
 
 impl std::error::Error for ActionError {}
 
+type ScreenCapture = fn(
+    &crate::vision::capture::CaptureOptions,
+) -> Result<crate::vision::capture::CapturedImage, String>;
+
+pub(crate) type DesktopNotification = dyn Fn(&str, &str) -> Result<(), String> + Send + Sync;
+
+/// Services used by built-in tool handlers. Request ownership remains in ActionContext.
+pub(crate) struct ActionServices {
+    pub(crate) state: Option<Arc<crate::ai::context::AIOrchestrator>>,
+    pub(crate) vision: crate::vision::watcher::VisionWatcher,
+    pub(crate) capture_screen: ScreenCapture,
+    pub(crate) imagegen: Option<crate::imagegen::ImageGenService>,
+    pub(crate) window_size: Option<crate::imagegen::WindowSizeState>,
+    pub(crate) live2d: Arc<crate::live2d::Live2dStore>,
+    pub(crate) events: crate::chat::events::ChatEvents,
+    pub(crate) notification: Option<Arc<DesktopNotification>>,
+}
+
 /// Context passed to action handlers at execution time.
 #[derive(Clone)]
 pub struct ActionContext {
@@ -74,7 +91,7 @@ pub struct ActionContext {
     pub cue_names: Option<Arc<HashSet<String>>>,
     pub request_id: Option<String>,
     pub turn_id: Option<String>,
-    pub app: AppHandle,
+    pub(crate) services: Arc<ActionServices>,
     pub character_id: String,
     pub conversation_id: Option<String>,
     pub source: Option<String>,

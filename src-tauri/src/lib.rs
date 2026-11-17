@@ -2,10 +2,13 @@
 // Reason: 应用入口文件需要同时声明模块、注册 Tauri 命令、初始化服务与恢复磁盘状态，天然属于编排层。
 pub mod actions;
 pub mod ai;
+pub(crate) mod bot;
 pub mod characters;
 pub mod chat;
 pub mod commands;
 pub mod config;
+mod desktop_chat;
+mod desktop_heartbeat;
 pub mod error;
 pub mod hooks;
 pub mod imagegen;
@@ -77,6 +80,8 @@ pub fn run() {
         }
     }
 
+    let desktop_owner = Arc::new(std::sync::Mutex::new(None));
+    let setup_desktop_owner = desktop_owner.clone();
     tauri::Builder::default()
         .manage(crate::characters::activation::ActivationCoordinator::default())
         .manage(Arc::new(crate::chat::runtime::ChatRuntimeState::default()))
@@ -309,7 +314,10 @@ pub fn run() {
                 _ => {}
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            let host = Arc::new(app.handle().clone());
+            let desktop = desktop_chat::TauriChatDesktop::new(&host);
+            *setup_desktop_owner.lock().unwrap() = Some(host);
             let startup_begin = std::time::Instant::now();
             tracing::info!(target: "startup", "setup begin");
             app.manage(crate::commands::pet::PetShortcutState::default());
@@ -368,21 +376,10 @@ pub fn run() {
                             }
                         }
 
-                        // Restore context_settings from disk
-                        let ctx_settings_path = app_data_dir.join("context_settings.json");
-                        if let Ok(content) = std::fs::read_to_string(&ctx_settings_path) {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                                let strategy = val.get("strategy")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("window")
-                                    .to_string();
-                                let max_chars = val.get("max_message_chars")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(2000) as usize;
-                                orchestrator.set_context_settings(strategy.clone(), max_chars).await;
-                                tracing::info!(target: "ai", "Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
-                            }
-                        }
+                        crate::chat::settings::ContextSettings::restore(
+                            &orchestrator,
+                            &app_data_dir.join("context_settings.json"),
+                        ).await;
 
                         let vision_config_path = app_data_dir.join("vision_config.json");
                         let vision_config = crate::vision::config::load_config(&vision_config_path);
@@ -817,12 +814,6 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
 
-            // Heartbeat — proactive behavior background loop
-            let heartbeat_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                crate::ai::heartbeat::heartbeat_loop(heartbeat_handle).await;
-            });
-
             // Vision Watcher
             let vision_config_path = app_data.join("vision_config.json");
             let vision_config = crate::vision::config::load_config(&vision_config_path);
@@ -856,44 +847,37 @@ pub fn run() {
             app.manage(crate::stt::NativeMicState::new());
             app.manage(crate::stt::NativeWakeWordState::new());
 
-            // Bot integrations (Telegram currently has a runtime service).
-            let bot_config = crate::commands::bot::load_bot_config();
+            let bot_services = desktop_chat::install_services(app.handle(), &app_data, desktop);
+
+            if let Some(chat) = app.try_state::<crate::chat::application::ChatService>() {
+                let heartbeat_handle = app.handle().clone();
+                let chat = chat.inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    desktop_heartbeat::heartbeat_loop(heartbeat_handle, chat).await;
+                });
+            }
+
+            let bot_config = crate::bot::load_bot_config();
             let telegram_config = bot_config.telegram.clone();
             let telegram_enabled = telegram_config.enabled;
-            let bot_runtime_service = crate::commands::bot::BotRuntimeService::new(bot_config);
+            let bot_runtime_service = crate::bot::BotRuntimeService::new(bot_config);
             app.manage(bot_runtime_service.clone());
-            tracing::info!(
-                target: "startup",
-                "stage=telegram.init.start elapsed_ms={}",
-                startup_begin.elapsed().as_millis()
-            );
             let telegram_service = crate::telegram::TelegramService::new(telegram_config);
             app.manage(telegram_service.clone());
-            tracing::info!(
-                target: "startup",
-                "stage=telegram.init.done elapsed_ms={}",
-                startup_begin.elapsed().as_millis()
-            );
 
-            // Auto-start Telegram bot if enabled
             if telegram_enabled {
-                let tg_app = app.handle().clone();
+                let telegram_services = bot_services.clone();
                 tauri::async_runtime::spawn(async move {
-                    // Delay to let all services initialize
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    if let Err(e) = telegram_service.start(tg_app).await {
-                        tracing::error!(target: "telegram", "[Telegram] Auto-start failed: {}", e);
+                    if let Err(error) = telegram_service.start(telegram_services).await {
+                        tracing::error!(target: "telegram", "[Telegram] Auto-start failed: {error}");
                     }
                 });
             }
-
-            {
-                let bot_app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    bot_runtime_service.start_enabled(bot_app).await;
-                });
-            }
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                bot_runtime_service.start_enabled(bot_services).await;
+            });
 
             // Global shortcut + Pet window auto-start
             {
@@ -927,8 +911,13 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                desktop_owner.lock().unwrap().take();
+            }
+        });
 }
 
 fn is_usable_dylib(path: &Path) -> bool {

@@ -164,9 +164,9 @@ struct ActivationState {
     prepared: Option<PreparedActivation>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ActivationCoordinator {
-    state: Mutex<ActivationState>,
+    state: std::sync::Arc<Mutex<ActivationState>>,
 }
 
 impl ActivationCoordinator {

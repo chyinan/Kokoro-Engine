@@ -1,6 +1,8 @@
 // pattern: Imperative Shell
 
-use crate::commands::bot::BotConfig;
+use crate::bot::{
+    generate_bot_text_reply, BotChatServices, BotConfig, BotEvent, BotEvents, QqAuthorizationPrompt,
+};
 use crate::qqbot::protocol::{
     build_text_reply_body, conversation_key, gateway_dispatch_transition, heartbeat_tick_action,
     invalid_session_action, is_message_allowed, parse_access_token_response, parse_dispatch,
@@ -9,13 +11,12 @@ use crate::qqbot::protocol::{
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Emitter;
 use tokio::sync::{oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -109,14 +110,6 @@ struct MessageDeduplicator {
     message_ids: VecDeque<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct QQAuthorizationRequest {
-    request_id: String,
-    user_openid: String,
-    conversation_kind: String,
-    group_openid: Option<String>,
-}
-
 struct PendingAuthorization {
     request_id: String,
     user_openid: String,
@@ -132,7 +125,7 @@ pub struct QQAuthorizationBroker {
 }
 
 impl QQAuthorizationBroker {
-    async fn request(&self, app: &tauri::AppHandle, message: &QQInboundMessage) -> bool {
+    async fn request(&self, events: &dyn BotEvents, message: &QQInboundMessage) -> bool {
         let authorization_key = authorization_key(message);
         if self
             .rejected_openids
@@ -168,7 +161,7 @@ impl QQAuthorizationBroker {
             );
         }
 
-        let payload = QQAuthorizationRequest {
+        let payload = QqAuthorizationPrompt {
             request_id: request_id.clone(),
             user_openid: message.user_openid.clone(),
             conversation_kind: match &message.kind {
@@ -178,10 +171,9 @@ impl QQAuthorizationBroker {
             .to_string(),
             group_openid: message.group_openid.clone(),
         };
-        if let Err(error) = app.emit("qq-authorization-request", payload.clone()) {
+        if let Err(error) = events.emit(BotEvent::QqAuthorizationRequested(payload.clone())) {
             tracing::error!(target: "bot::qq", "failed to show QQ authorization request: {}", error);
         }
-        let _ = app.emit("show-main-window", ());
 
         match tokio::time::timeout(AUTHORIZATION_TIMEOUT, &mut decision_rx).await {
             Ok(Ok(decision)) => decision,
@@ -200,7 +192,7 @@ impl QQAuthorizationBroker {
                     }
                 };
                 if expired {
-                    let _ = app.emit("qq-authorization-expired", payload);
+                    let _ = events.emit(BotEvent::QqAuthorizationExpired(payload));
                     false
                 } else {
                     matches!(decision_rx.await, Ok(true))
@@ -281,7 +273,7 @@ struct GatewaySessionState {
 pub async fn run_qq_gateway(
     config: Arc<RwLock<BotConfig>>,
     authorization_broker: QQAuthorizationBroker,
-    app: tauri::AppHandle,
+    services: BotChatServices,
     runtime_id: u64,
     connected_generation: Arc<AtomicU64>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -307,7 +299,7 @@ pub async fn run_qq_gateway(
             &client,
             &token_provider,
             config.clone(),
-            app.clone(),
+            services.clone(),
             deduplicator.clone(),
             reply_limit.clone(),
             task_limit.clone(),
@@ -355,7 +347,7 @@ async fn run_session(
     client: &Client,
     token_provider: &TokenProvider,
     config: Arc<RwLock<BotConfig>>,
-    app: tauri::AppHandle,
+    services: BotChatServices,
     deduplicator: Arc<Mutex<MessageDeduplicator>>,
     reply_limit: Arc<Semaphore>,
     task_limit: Arc<Semaphore>,
@@ -525,7 +517,7 @@ async fn run_session(
                         let task_client = client.clone();
                         let task_token_provider = token_provider.clone();
                         let task_config = config.clone();
-                        let task_app = app.clone();
+                        let task_services = services.clone();
                         let task_app_id = app_id.clone();
                         let task_app_secret = app_secret.clone();
                         let task_reply_limit = reply_limit.clone();
@@ -538,7 +530,7 @@ async fn run_session(
                                 &task_app_id,
                                 &task_app_secret,
                                 &task_config,
-                                &task_app,
+                                &task_services,
                                 &task_authorization_broker,
                                 &task_reply_limit,
                                 message,
@@ -592,7 +584,7 @@ async fn handle_inbound_message(
     app_id: &str,
     app_secret: &str,
     config: &Arc<RwLock<BotConfig>>,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
     authorization_broker: &QQAuthorizationBroker,
     reply_limit: &Arc<Semaphore>,
     message: QQInboundMessage,
@@ -611,7 +603,12 @@ async fn handle_inbound_message(
         QQConversationKind::C2c => qq_config.allow_c2c,
         QQConversationKind::Group => message.group_openid.is_some(),
     };
-    if !allowed && can_request_authorization && authorization_broker.request(app, &message).await {
+    if !allowed
+        && can_request_authorization
+        && authorization_broker
+            .request(services.events.as_ref(), &message)
+            .await
+    {
         qq_config = config.read().await.qq.clone();
         allowed = is_message_allowed(
             &message,
@@ -645,8 +642,8 @@ async fn handle_inbound_message(
         .map_err(|_| "QQ reply service is shutting down".to_string())?;
 
     let key = conversation_key(&message);
-    let reply = crate::commands::bot::generate_bot_text_reply(
-        app,
+    let reply = generate_bot_text_reply(
+        services,
         "qq",
         &message.content,
         qq_config.character_id.as_deref(),

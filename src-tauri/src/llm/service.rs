@@ -74,7 +74,7 @@ struct ConnectionTestTarget {
 }
 
 impl LlmService {
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(crate) fn for_test(provider: Arc<dyn LlmProvider>) -> Self {
         let id = provider.id().to_owned();
         let config = LlmConfig {

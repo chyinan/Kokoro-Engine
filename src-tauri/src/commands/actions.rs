@@ -685,7 +685,10 @@ pub async fn execute_action(
         cue_names: None,
         request_id: None,
         turn_id: None,
-        app: app.clone(),
+        services: app
+            .state::<Arc<crate::actions::registry::ActionServices>>()
+            .inner()
+            .clone(),
         character_id: character_id.clone(),
         conversation_id: None,
         source: Some("direct_execute".to_string()),

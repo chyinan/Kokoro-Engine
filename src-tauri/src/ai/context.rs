@@ -1,5 +1,7 @@
 // pattern: Mixed (needs refactoring)
 
+pub(crate) mod history;
+
 use crate::ai::database_migrations;
 use crate::ai::memory::{MemoryManager, MemoryRetrievalMode, MemorySearchResult};
 use crate::ai::router::{ModelRouter, ModelType};
@@ -8,6 +10,7 @@ use crate::chat::persistence::{
     self, ConversationTarget, ExternalReplies, MessageWrite, SavedMessage,
 };
 use crate::error::KokoroError;
+use crate::live2d::Live2dCueMap;
 use crate::llm::messages::user_text_message;
 use crate::llm::provider::LlmProvider;
 use anyhow::Result;
@@ -500,7 +503,7 @@ impl Default for DesktopSelection {
     }
 }
 
-#[cfg_attr(test, derive(Clone))]
+#[derive(Clone)]
 pub struct AIOrchestrator {
     pub selection: Arc<DesktopSelection>,
     pub(crate) owners: Arc<crate::chat::ownership::RuntimeOwners>,
@@ -835,16 +838,17 @@ impl AIOrchestrator {
         &self,
         character: &str,
     ) -> Result<crate::chat::ownership::PromptSnapshot> {
-        self.prompt_snapshot_with_runtime(character, None).await
+        self.prompt_snapshot_with_runtime(character, None, None).await
     }
 
     pub(crate) async fn prompt_snapshot_with_runtime(
         &self,
         character: &str,
         runtime: Option<&crate::characters::activation::BackendRuntimeSnapshot>,
+        cue_map: Option<Live2dCueMap>,
     ) -> Result<crate::chat::ownership::PromptSnapshot> {
         let mut snapshot = crate::chat::ownership::PromptSnapshot {
-            cue_map: None,
+            cue_map,
             system_prompt: self.system_prompt.lock().await.clone(),
             character_name: self.character_name.lock().await.clone(),
             user_name: self.user_name.lock().await.clone(),
@@ -859,10 +863,9 @@ impl AIOrchestrator {
             vision_context_history_mode: self.vision_context_history_mode.lock().await.clone(),
         };
         if self.get_character_id().await == character {
-            // Compatibility boundary for models chosen outside a character package.
-            snapshot.cue_map =
-                crate::live2d::load_active_live2d_profile().map(|profile| profile.cue_map);
-        } else if let Some(runtime) = runtime {
+            return Ok(snapshot);
+        }
+        if let Some(runtime) = runtime {
             snapshot.character_name = runtime.character_name.clone();
             snapshot.user_name = runtime.user_name.clone();
             snapshot.system_prompt = runtime.system_prompt.clone();
@@ -1200,7 +1203,7 @@ impl AIOrchestrator {
         let memory_manager = self.memory_manager.clone();
         let summary_db = self.db.clone();
         let cid = target.character_id.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let database_operation_guard = acquire_database_operation_read_guard().await;
             if !database_operation_guard.is_current() {
                 tracing::info!(
@@ -1563,7 +1566,7 @@ impl AIOrchestrator {
         }
 
         // Resync the in-memory history only when the turn's conversation is still the
-        // active one (mirrors delete_last_messages_inner). The whole method runs under
+        // active one (mirrors history::delete_history_tail). The whole method runs under
         // conversation_switch_lock, so no conversation switch can interleave with this
         // check-then-resync sequence.
         if self

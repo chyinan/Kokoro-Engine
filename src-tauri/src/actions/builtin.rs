@@ -4,13 +4,11 @@ use super::registry::{
     ActionContext, ActionError, ActionHandler, ActionParam, ActionPermissionLevel, ActionResult,
     ActionRiskTag,
 };
-use crate::vision::capture::{capture_screen_with_options, CaptureOptions};
+use crate::chat::events::ChatEvent;
+use crate::vision::capture::CaptureOptions;
 use crate::vision::context::{VisionObservation, VisionObservationSource};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use tauri::Emitter;
-use tauri::Manager;
-use tauri_plugin_notification::NotificationExt;
 
 // ── get_time ───────────────────────────────────────────
 
@@ -79,7 +77,7 @@ impl ActionHandler for CaptureScreenAction {
         _args: HashMap<String, String>,
         ctx: ActionContext,
     ) -> Result<ActionResult, ActionError> {
-        let watcher = ctx.app.state::<crate::vision::watcher::VisionWatcher>();
+        let watcher = &ctx.services.vision;
         let config = watcher.config.read().await.clone();
 
         if !config.vlm_enabled {
@@ -89,7 +87,7 @@ impl ActionHandler for CaptureScreenAction {
             ));
         }
 
-        let captured = capture_screen_with_options(&CaptureOptions {
+        let captured = (ctx.services.capture_screen)(&CaptureOptions {
             display_id: config.display_id.clone(),
             region: config.vlm_region,
         })
@@ -177,7 +175,9 @@ impl ActionHandler for PlayCueAction {
         let available = if ctx.request_id.is_some() {
             ctx.cue_names.as_deref().cloned().unwrap_or_default()
         } else {
-            crate::live2d::load_active_live2d_profile()
+            ctx.services
+                .live2d
+                .active_profile()
                 .map(|profile| profile.cue_map.into_keys().collect())
                 .unwrap_or_default()
         };
@@ -196,12 +196,11 @@ impl ActionHandler for PlayCueAction {
             )));
         }
 
-        let _ = crate::chat::runtime::emit_chat_event(
-            &ctx.app,
-            "chat-cue",
+        ctx.services.events.publish(
+            true,
+            ChatEvent::Cue,
             serde_json::json!({ "cue": cue, "source": "builtin-play-cue", "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }),
-        )
-        .await;
+        );
 
         Ok(ActionResult::ok(format!("Cue triggered: {}", cue)))
     }
@@ -247,11 +246,11 @@ impl ActionHandler for SetBackgroundAction {
             .ok_or_else(|| ActionError("Missing 'prompt' parameter".into()))?;
 
         // Emit image gen event (reuses existing infrastructure)
-        let _ = crate::chat::runtime::emit_chat_event(
-            &ctx.app,
-            "chat-imagegen",
+        ctx.services.events.publish(
+            true,
+            ChatEvent::ImageGenerationRequested,
             serde_json::json!({ "prompt": prompt, "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }),
-        ).await;
+        );
 
         Ok(ActionResult::ok(format!(
             "Background generation triggered: {}",
@@ -318,10 +317,11 @@ impl ActionHandler for GenerateImageAction {
             .filter(|value| !value.is_empty());
 
         let imagegen = ctx
-            .app
-            .try_state::<crate::imagegen::ImageGenService>()
+            .services
+            .imagegen
+            .as_ref()
             .ok_or_else(|| ActionError("Image generation service is not available".into()))?;
-        let window_size = match ctx.app.try_state::<crate::imagegen::WindowSizeState>() {
+        let window_size = match ctx.services.window_size.as_ref() {
             Some(state) => Some(state.get().await),
             None => None,
         };
@@ -336,7 +336,9 @@ impl ActionHandler for GenerateImageAction {
         event["conversation_id"] = ctx.conversation_id.into();
         event["client_request_id"] = ctx.request_id.into();
         event["turn_id"] = ctx.turn_id.into();
-        let _ = crate::chat::runtime::emit_chat_event(&ctx.app, "imagegen:done", event).await;
+        ctx.services
+            .events
+            .publish(true, ChatEvent::ImageGenerated, event);
 
         Ok(ActionResult::ok_with_data(
             "Image generated in Kokoro Engine. If the user is chatting from an external bot platform that cannot display local images, tell them to open the Kokoro Engine client to view it.",
@@ -354,7 +356,11 @@ impl ActionHandler for GenerateImageAction {
 pub struct SearchMemoryAction;
 
 fn ensure_memory_enabled(ctx: &ActionContext) -> Result<(), ActionError> {
-    let orchestrator = ctx.app.state::<crate::ai::context::AIOrchestrator>();
+    let orchestrator = ctx
+        .services
+        .state
+        .as_ref()
+        .ok_or_else(|| ActionError("AI is not available".into()))?;
     if orchestrator.is_memory_enabled() {
         Ok(())
     } else {
@@ -395,7 +401,11 @@ impl ActionHandler for SearchMemoryAction {
             .ok_or_else(|| ActionError("Missing 'query' parameter".into()))?;
 
         // Get MemoryManager from app state
-        let orchestrator = ctx.app.state::<crate::ai::context::AIOrchestrator>();
+        let orchestrator = ctx
+            .services
+            .state
+            .as_ref()
+            .ok_or_else(|| ActionError("AI is not available".into()))?;
         let char_id = ctx.character_id.clone();
         let memories = orchestrator
             .memory_manager
@@ -459,7 +469,11 @@ impl ActionHandler for StoreMemoryAction {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.6);
 
-        let orchestrator = ctx.app.state::<crate::ai::context::AIOrchestrator>();
+        let orchestrator = ctx
+            .services
+            .state
+            .as_ref()
+            .ok_or_else(|| ActionError("AI is not available".into()))?;
         let char_id = ctx.character_id.clone();
 
         if !orchestrator
@@ -503,7 +517,9 @@ impl ActionHandler for StoreMemoryAction {
         );
 
         // Notify frontend to refresh memory panel
-        let _ = ctx.app.emit("memory:updated", &char_id);
+        ctx.services
+            .events
+            .notify(ChatEvent::MemoryUpdated, &char_id);
 
         Ok(ActionResult::ok(format!(
             "Remembered: \"{}\" (importance: {:.1})",
@@ -548,7 +564,11 @@ impl ActionHandler for ForgetMemoryAction {
             .get("query")
             .ok_or_else(|| ActionError("Missing 'query' parameter".into()))?;
 
-        let orchestrator = ctx.app.state::<crate::ai::context::AIOrchestrator>();
+        let orchestrator = ctx
+            .services
+            .state
+            .as_ref()
+            .ok_or_else(|| ActionError("AI is not available".into()))?;
         let char_id = ctx.character_id.clone();
 
         // Find the most relevant memory matching the query
@@ -621,13 +641,12 @@ impl ActionHandler for SendNotificationAction {
             .get("message")
             .ok_or_else(|| ActionError("Missing 'message' parameter".into()))?;
 
-        ctx.app
-            .notification()
-            .builder()
-            .title(title)
-            .body(message)
-            .show()
-            .map_err(|e| ActionError(format!("Failed to show native notification: {}", e)))?;
+        let notify =
+            ctx.services.notification.as_ref().ok_or_else(|| {
+                ActionError("Native notification service is not available".into())
+            })?;
+        notify(title, message)
+            .map_err(|error| ActionError(format!("Failed to show native notification: {error}")))?;
 
         Ok(ActionResult::ok(format!("Notification shown: {}", title)))
     }

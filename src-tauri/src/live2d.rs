@@ -1,4 +1,9 @@
 //! Live2D model profiles and active desktop model selection.
+mod library;
+
+pub use library::Live2dModelInfo;
+
+use crate::characters::activation::{BackendRuntimeSnapshot, PackageAssetReference};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,6 +12,8 @@ use std::path::PathBuf;
 
 pub const BUILTIN_LIVE2D_MODEL_PATH: &str = "__builtin__/hiyori/hiyori_pro_t11.model3.json";
 const LEGACY_BUILTIN_HARU_MODEL_PATH: &str = "__builtin__/haru/haru_greeter_t03.model3.json";
+
+pub(crate) type Live2dCueMap = HashMap<String, Live2dCueBinding>;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Live2dCueBinding {
@@ -34,7 +41,102 @@ pub struct Live2dModelProfile {
     pub semantic_cue_map: HashMap<String, String>,
 }
 
-pub(crate) fn ensure_profile_for_model(
+pub(crate) struct Live2dStore {
+    app_data: PathBuf,
+    active_model_state_path: PathBuf,
+}
+
+impl Live2dStore {
+    pub(crate) fn new(app_data: PathBuf) -> Self {
+        let active_model_state_path = app_data.join("active_live2d_model.json");
+        Self {
+            app_data,
+            active_model_state_path,
+        }
+    }
+
+    // The desktop adapter can provide the existing selection file separately from
+    // the model library directory resolved by Tauri.
+    pub(crate) fn with_active_model_state_path(mut self, path: PathBuf) -> Self {
+        self.active_model_state_path = path;
+        self
+    }
+
+    fn models_dir(&self) -> PathBuf {
+        self.app_data.join("live2d_models")
+    }
+
+    fn load_active_model_path(&self) -> Option<String> {
+        let content = fs::read_to_string(&self.active_model_state_path).ok()?;
+        let value = serde_json::from_str::<Value>(&content).ok()?;
+        value.get("model_path")?.as_str().map(str::to_owned)
+    }
+
+    pub(crate) fn active_profile(&self) -> Option<Live2dModelProfile> {
+        let model_path = self.load_active_model_path()?;
+        self.profile(&model_path).ok()
+    }
+
+    pub(crate) fn profile(&self, model_path: &str) -> Result<Live2dModelProfile, String> {
+        ensure_profile_for_model(&self.models_dir(), model_path)
+    }
+
+    pub(crate) fn save_profile(
+        &self,
+        profile: Live2dModelProfile,
+    ) -> Result<Live2dModelProfile, String> {
+        let models_dir = self.models_dir();
+        let discovered = discover_model_profile(&models_dir, &profile.model_path)?;
+        let merged = Live2dModelProfile {
+            version: 3,
+            model_path: discovered.model_path,
+            available_expressions: discovered.available_expressions,
+            available_motion_groups: discovered.available_motion_groups,
+            available_hit_areas: discovered.available_hit_areas,
+            cue_map: profile.cue_map,
+            semantic_cue_map: normalize_semantic_map(profile.semantic_cue_map),
+        };
+        save_model_profile(&models_dir, &merged)?;
+        Ok(merged)
+    }
+
+    pub(crate) fn set_active_model(&self, model_path: Option<&str>) -> Result<(), String> {
+        fs::create_dir_all(&self.app_data)
+            .map_err(|error| format!("Failed to create app data dir: {error}"))?;
+        let normalized = model_path.map(normalize_relative_model_path).transpose()?;
+        let content = serde_json::json!({ "model_path": normalized });
+        fs::write(&self.active_model_state_path, content.to_string())
+            .map_err(|error| format!("Failed to persist active Live2D model: {error}"))
+    }
+
+    /// An explicit role asset owns its cue map, including a missing or empty map.
+    pub(crate) fn runtime_cue_map(&self, runtime: &BackendRuntimeSnapshot) -> Option<Live2dCueMap> {
+        if let Some(reference) = &runtime.cue_profile {
+            let path = match reference {
+                PackageAssetReference::Package { path, .. } => path,
+                PackageAssetReference::Library { model_id } => model_id,
+            };
+            return Some(
+                fs::read_to_string(path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .and_then(|value| serde_json::from_value(value["cues"].clone()).ok())
+                    .unwrap_or_default(),
+            );
+        }
+        match &runtime.live2d_model {
+            Some(PackageAssetReference::Library { model_id }) => Some(
+                self.profile(model_id)
+                    .map(|profile| profile.cue_map)
+                    .unwrap_or_default(),
+            ),
+            Some(PackageAssetReference::Package { .. }) => Some(HashMap::new()),
+            None => None,
+        }
+    }
+}
+
+fn ensure_profile_for_model(
     models_dir: &std::path::Path,
     model_path: &str,
 ) -> Result<Live2dModelProfile, String> {
@@ -57,7 +159,7 @@ pub(crate) fn ensure_profile_for_model(
     Ok(profile)
 }
 
-pub(crate) fn discover_model_profile(
+fn discover_model_profile(
     models_dir: &std::path::Path,
     model_path: &str,
 ) -> Result<Live2dModelProfile, String> {
@@ -125,70 +227,6 @@ pub(crate) fn discover_model_profile(
         cue_map: HashMap::new(),
         semantic_cue_map: HashMap::new(),
     })
-}
-
-pub(crate) fn active_model_state_path() -> PathBuf {
-    crate::utils::paths::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("com.chyin.kokoro")
-        .join("active_live2d_model.json")
-}
-
-pub fn load_active_live2d_model_path() -> Option<String> {
-    let path = active_model_state_path();
-    let content = fs::read_to_string(path).ok()?;
-    let value = serde_json::from_str::<Value>(&content).ok()?;
-    value.get("model_path")?.as_str().map(|s| s.to_string())
-}
-
-pub fn load_active_live2d_profile() -> Option<Live2dModelProfile> {
-    let model_path = load_active_live2d_model_path()?;
-    let models_dir = crate::utils::paths::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("com.chyin.kokoro")
-        .join("live2d_models");
-    ensure_profile_for_model(&models_dir, &model_path).ok()
-}
-
-/// Read the committed role's explicit cue asset/model once at admission.
-/// A None result with no explicit reference keeps the legacy selected-model boundary.
-pub(crate) fn committed_cue_map(
-    runtime: &crate::characters::activation::BackendRuntimeSnapshot,
-) -> Option<HashMap<String, Live2dCueBinding>> {
-    let models = crate::utils::paths::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("com.chyin.kokoro")
-        .join("live2d_models");
-    runtime_cue_map(runtime, &models)
-}
-
-pub(crate) fn runtime_cue_map(
-    runtime: &crate::characters::activation::BackendRuntimeSnapshot,
-    models: &std::path::Path,
-) -> Option<HashMap<String, Live2dCueBinding>> {
-    use crate::characters::activation::PackageAssetReference;
-    if let Some(reference) = &runtime.cue_profile {
-        let path = match reference {
-            PackageAssetReference::Package { path, .. } => path,
-            PackageAssetReference::Library { model_id } => model_id,
-        };
-        return Some(
-            fs::read_to_string(path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                .and_then(|value| serde_json::from_value(value["cues"].clone()).ok())
-                .unwrap_or_default(),
-        );
-    }
-    match &runtime.live2d_model {
-        Some(PackageAssetReference::Library { model_id }) => Some(
-            ensure_profile_for_model(models, model_id)
-                .map(|profile| profile.cue_map)
-                .unwrap_or_default(),
-        ),
-        Some(PackageAssetReference::Package { .. }) => Some(HashMap::new()),
-        None => None,
-    }
 }
 
 fn read_expression_name(value: &Value) -> Option<String> {
@@ -329,7 +367,7 @@ fn builtin_hiyori_profile() -> Live2dModelProfile {
     }
 }
 
-pub(crate) fn load_saved_model_profile(
+fn load_saved_model_profile(
     models_dir: &std::path::Path,
     model_path: &str,
 ) -> Result<Option<Live2dModelProfile>, String> {
@@ -355,7 +393,7 @@ pub(crate) fn load_saved_model_profile(
     Ok(Some(profile))
 }
 
-pub(crate) fn save_model_profile(
+fn save_model_profile(
     models_dir: &std::path::Path,
     profile: &Live2dModelProfile,
 ) -> Result<(), String> {
@@ -377,7 +415,7 @@ pub(crate) fn save_model_profile(
     Ok(())
 }
 
-pub(crate) fn normalize_relative_model_path(model_path: &str) -> Result<String, String> {
+fn normalize_relative_model_path(model_path: &str) -> Result<String, String> {
     let path = std::path::Path::new(model_path);
     if path.is_absolute() {
         return Err("Absolute model paths are not allowed".to_string());
@@ -406,7 +444,7 @@ pub(crate) fn normalize_relative_model_path(model_path: &str) -> Result<String, 
     Ok(normalized)
 }
 
-pub(crate) fn normalize_semantic_map(map: HashMap<String, String>) -> HashMap<String, String> {
+fn normalize_semantic_map(map: HashMap<String, String>) -> HashMap<String, String> {
     map.into_iter()
         .filter_map(|(raw_key, raw_cue)| {
             let cue = raw_cue.trim();
@@ -419,6 +457,76 @@ pub(crate) fn normalize_semantic_map(map: HashMap<String, String>) -> HashMap<St
         .collect()
 }
 
-pub(crate) fn normalize_semantic_key(raw_key: &str) -> String {
+fn normalize_semantic_key(raw_key: &str) -> String {
     raw_key.trim().to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_selection_reads_and_updates_profiles_in_the_injected_root() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Live2dStore::new(root.path().to_path_buf());
+        assert!(store.active_profile().is_none());
+
+        let mut profile = store.profile(LEGACY_BUILTIN_HARU_MODEL_PATH).unwrap();
+        profile.available_motion_groups.clear();
+        profile.semantic_cue_map = HashMap::from([(" Emotion:Happy ".into(), " smile ".into())]);
+        let saved = store.save_profile(profile).unwrap();
+        assert_eq!(saved.available_motion_groups.get("Idle"), Some(&3));
+        assert_eq!(saved.model_path, BUILTIN_LIVE2D_MODEL_PATH);
+
+        store
+            .set_active_model(Some(LEGACY_BUILTIN_HARU_MODEL_PATH))
+            .unwrap();
+        let active = store.active_profile().unwrap();
+        assert_eq!(active.model_path, BUILTIN_LIVE2D_MODEL_PATH);
+        assert_eq!(
+            active
+                .semantic_cue_map
+                .get("emotion:happy")
+                .map(String::as_str),
+            Some("smile")
+        );
+
+        store.set_active_model(None).unwrap();
+        assert!(store.active_profile().is_none());
+        let raw = fs::read_to_string(root.path().join("active_live2d_model.json")).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&raw).unwrap(),
+            serde_json::json!({ "model_path": null })
+        );
+    }
+
+    #[test]
+    fn an_explicit_role_cue_asset_never_falls_back_to_the_active_model() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Live2dStore::new(root.path().to_path_buf());
+        store
+            .set_active_model(Some(BUILTIN_LIVE2D_MODEL_PATH))
+            .unwrap();
+        assert!(!store.active_profile().unwrap().cue_map.is_empty());
+        let mut runtime = BackendRuntimeSnapshot::default();
+        assert!(store.runtime_cue_map(&runtime).is_none());
+
+        runtime.live2d_model = Some(PackageAssetReference::Library {
+            model_id: BUILTIN_LIVE2D_MODEL_PATH.into(),
+        });
+        assert!(!store.runtime_cue_map(&runtime).unwrap().is_empty());
+
+        let asset = root.path().join("cues.json");
+        runtime.cue_profile = Some(PackageAssetReference::Package {
+            template_id: "test-role".into(),
+            template_version: "1.0.0".into(),
+            path: asset.to_string_lossy().into_owned(),
+        });
+        assert!(store.runtime_cue_map(&runtime).unwrap().is_empty());
+
+        fs::write(&asset, r#"{"cues":{"role_only":{"expression":"smile"}}}"#).unwrap();
+        let cues = store.runtime_cue_map(&runtime).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues["role_only"].expression.as_deref(), Some("smile"));
+    }
 }
