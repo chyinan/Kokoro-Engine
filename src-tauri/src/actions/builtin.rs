@@ -174,15 +174,17 @@ impl ActionHandler for PlayCueAction {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ActionError("Missing 'cue' parameter".into()))?;
 
-        let profile = crate::live2d::load_active_live2d_profile()
-            .ok_or_else(|| ActionError("No active Live2D model profile loaded".into()))?;
-        if !profile.cue_map.contains_key(cue) {
-            let available_cues = profile
-                .cue_map
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
+        let available = if ctx.request_id.is_some() {
+            ctx.cue_names.as_deref().cloned().unwrap_or_default()
+        } else {
+            crate::live2d::load_active_live2d_profile()
+                .map(|profile| profile.cue_map.into_keys().collect())
+                .unwrap_or_default()
+        };
+        if !available.contains(cue) {
+            let mut names = available.into_iter().collect::<Vec<_>>();
+            names.sort();
+            let available_cues = names.join(", ");
             return Err(ActionError(format!(
                 "Unknown cue '{}'. Available configured cues: {}",
                 cue,
@@ -197,7 +199,7 @@ impl ActionHandler for PlayCueAction {
         let _ = crate::chat::runtime::emit_chat_event(
             &ctx.app,
             "chat-cue",
-            serde_json::json!({ "cue": cue, "source": "builtin-play-cue" }),
+            serde_json::json!({ "cue": cue, "source": "builtin-play-cue", "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }),
         )
         .await;
 
@@ -247,7 +249,7 @@ impl ActionHandler for SetBackgroundAction {
         // Emit image gen event (reuses existing infrastructure)
         let _ = ctx
             .app
-            .emit("chat-imagegen", serde_json::json!({ "prompt": prompt }));
+            .emit("chat-imagegen", serde_json::json!({ "prompt": prompt, "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }));
 
         Ok(ActionResult::ok(format!(
             "Background generation triggered: {}",
@@ -317,10 +319,7 @@ impl ActionHandler for GenerateImageAction {
             .app
             .try_state::<crate::imagegen::ImageGenService>()
             .ok_or_else(|| ActionError("Image generation service is not available".into()))?;
-        let window_size = match ctx
-            .app
-            .try_state::<crate::imagegen::WindowSizeState>()
-        {
+        let window_size = match ctx.app.try_state::<crate::imagegen::WindowSizeState>() {
             Some(state) => Some(state.get().await),
             None => None,
         };
@@ -330,7 +329,12 @@ impl ActionHandler for GenerateImageAction {
             .await
             .map_err(|error| ActionError(format!("Image generation failed: {}", error)))?;
 
-        let _ = ctx.app.emit("imagegen:done", &result);
+        let mut event = serde_json::to_value(&result).unwrap_or_default();
+        event["character_id"] = ctx.character_id.into();
+        event["conversation_id"] = ctx.conversation_id.into();
+        event["client_request_id"] = ctx.request_id.into();
+        event["turn_id"] = ctx.turn_id.into();
+        let _ = ctx.app.emit("imagegen:done", event);
 
         Ok(ActionResult::ok_with_data(
             "Image generated in Kokoro Engine. If the user is chatting from an external bot platform that cannot display local images, tell them to open the Kokoro Engine client to view it.",
@@ -467,9 +471,24 @@ impl ActionHandler for StoreMemoryAction {
             )));
         }
 
+        let scope =
+            ctx.memory_scope
+                .clone()
+                .unwrap_or_else(|| match ctx.conversation_id.as_deref() {
+                    Some(conversation) => orchestrator.memory_write_scope(
+                        &char_id,
+                        conversation,
+                        ctx.request_id.as_deref().unwrap_or("manual-action"),
+                        orchestrator.external_memory.epoch(),
+                    ),
+                    None => orchestrator.role_memory_write_scope(
+                        &char_id,
+                        ctx.request_id.as_deref().unwrap_or("manual-action"),
+                    ),
+                });
         orchestrator
             .memory_manager
-            .add_memory_with_importance(fact, &char_id, importance)
+            .add_memory_with_scope(fact, &char_id, importance, Some(&scope))
             .await
             .map_err(|e| ActionError(format!("Failed to store memory: {}", e)))?;
 

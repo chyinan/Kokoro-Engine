@@ -966,8 +966,7 @@ mod tests {
             _event: &HookEvent,
             _payload: &HookPayload,
         ) -> Result<HookOutcome, String> {
-            self.called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(HookOutcome::Continue)
         }
     }
@@ -1278,6 +1277,10 @@ pub(crate) async fn emit_after_action_invoke_with_protection(
 }
 
 pub(crate) struct ToolExecutionScope<'a> {
+    pub memory_scope: Option<&'a Arc<crate::chat::ownership::MemoryWriteScope>>,
+    pub cue_names: Option<&'a Arc<std::collections::HashSet<String>>>,
+    pub request_id: &'a str,
+    pub turn_id: &'a str,
     pub character_id: &'a str,
     pub conversation_id: Option<&'a str>,
     pub source: &'a str,
@@ -1295,7 +1298,10 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
     tool_timeout: Option<std::time::Duration>,
 ) -> Result<Vec<ToolExecutionOutcome>, ToolCancellationError> {
     let mut outcomes = Vec::with_capacity(tool_calls.len());
-    let hook_runtime = scope.allow_hooks.then(|| app.try_state::<HookRuntime>()).flatten();
+    let hook_runtime = scope
+        .allow_hooks
+        .then(|| app.try_state::<HookRuntime>())
+        .flatten();
     let conversation_id = || scope.conversation_id.map(str::to_owned);
 
     for tool_call in tool_calls {
@@ -1360,7 +1366,8 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
         };
 
         let gated = continue_unless_denied(gate, || ());
-        let (action, needs_feedback, permission_decision, result, registry_generation) = match gated {
+        let (action, needs_feedback, permission_decision, result, registry_generation) = match gated
+        {
             Err(error) => {
                 let generation = registry_state.read().await.generation();
                 (None, true, None, Err(error), generation)
@@ -1369,7 +1376,10 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                 let resolved = {
                     let registry = registry_state.read().await;
                     let generation = registry.generation();
-                    (generation, registry.resolve_action_for_execution(&tool_call.name))
+                    (
+                        generation,
+                        registry.resolve_action_for_execution(&tool_call.name),
+                    )
                 };
                 let (registry_generation, resolved) = resolved;
                 let needs_feedback = resolved
@@ -1385,8 +1395,14 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                             tool_settings.is_enabled(&action.id)
                         };
 
-                        if scope.allowed_tool_ids.is_some_and(|ids| !ids.contains(&action.id)) {
-                            (None, Err(format!("Tool '{}' is unavailable in this chat", action.id)))
+                        if scope
+                            .allowed_tool_ids
+                            .is_some_and(|ids| !ids.contains(&action.id))
+                        {
+                            (
+                                None,
+                                Err(format!("Tool '{}' is unavailable in this chat", action.id)),
+                            )
                         } else if !enabled {
                             (None, Err(format!("Tool '{}' is disabled", action.id)))
                         } else {
@@ -1403,7 +1419,8 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                                         tool_call,
                                         action,
                                     );
-                                    let modify_outcome = if let Some(hooks) = hook_runtime.as_ref() {
+                                    let modify_outcome = if let Some(hooks) = hook_runtime.as_ref()
+                                    {
                                         tokio::select! {
                                             biased;
                                             _ = wait_for_cancel_event(&mut cancel_rx) => {
@@ -1439,6 +1456,10 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                                             let effective_args =
                                                 apply_before_action_args_payload(args_payload);
                                             let ctx = ActionContext {
+                                                memory_scope: scope.memory_scope.cloned(),
+                                                cue_names: scope.cue_names.cloned(),
+                                                request_id: Some(scope.request_id.to_owned()),
+                                                turn_id: Some(scope.turn_id.to_owned()),
                                                 app: app.clone(),
                                                 character_id: scope.character_id.to_owned(),
                                                 conversation_id: conversation_id(),
@@ -1451,7 +1472,7 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                                                 }
                                                 res = async {
                                                     if let Some(timeout) = tool_timeout {
-                                                        tokio::time::timeout(timeout, handler.execute(effective_args, ctx))
+                                                        tokio::time::timeout(timeout, crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx))
                                                             .await
                                                             .map_err(|_| {
                                                                 format!(
@@ -1461,18 +1482,24 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                                                                 )
                                                             })
                                                     } else {
-                                                        Ok(handler.execute(effective_args, ctx).await)
+                                                        Ok(crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx).await)
                                                     }
                                                 } => res,
                                             };
                                             match exec_res {
                                                 Ok(Ok(res)) => (Some(permission_decision), Ok(res)),
-                                                Ok(Err(err)) => (Some(permission_decision), Err(err.0)),
-                                                Err(timeout_err) => (Some(permission_decision), Err(timeout_err)),
+                                                Ok(Err(err)) => {
+                                                    (Some(permission_decision), Err(err.0))
+                                                }
+                                                Err(timeout_err) => {
+                                                    (Some(permission_decision), Err(timeout_err))
+                                                }
                                             }
                                         }
                                         Ok(Err(error)) => (Some(permission_decision), Err(error)),
-                                        Err(timeout_err) => (Some(permission_decision), Err(timeout_err)),
+                                        Err(timeout_err) => {
+                                            (Some(permission_decision), Err(timeout_err))
+                                        }
                                     }
                                 }
                                 PermissionDecision::DenyPolicy { reason }
@@ -1486,7 +1513,13 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                     Err(error) => (None, Err(error.0.clone())),
                 };
 
-                (action, needs_feedback, permission_decision, result, registry_generation)
+                (
+                    action,
+                    needs_feedback,
+                    permission_decision,
+                    result,
+                    registry_generation,
+                )
             }
         };
 

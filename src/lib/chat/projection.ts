@@ -9,14 +9,36 @@ function turnHasSelectedConversation(view: ChatViewSnapshot, turn: ChatTurnSnaps
 }
 
 export function turnMatchesView(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
-  return turnHasSelectedConversation(view, turn)
-    && (turn.conversation_generation === undefined || turn.conversation_generation === view.generation);
+  // A new/hidden turn already owns a reserved conversation ID before the first
+  // SQLite write. Its admission generation keeps it visible on that empty view.
+  const reserved = view.conversation_id === null && turn.character_id === view.character_id
+    && turn.conversation_generation === view.generation && turn.user_message_id === null;
+  return (view.conversation_id !== null && turnHasSelectedConversation(view, turn)) || reserved;
+}
+
+export interface ChatEventScope {
+  character_id?: string | null;
+  conversation_id?: string | null;
+  conversation_generation?: number | null;
+  client_request_id?: string | null;
+  turn_id?: string | null;
+}
+
+/** Manual UI cues are unscoped; chat events bind to a saved or reserved owner. */
+export function chatEventMatchesView(view: ChatViewSnapshot, event: ChatEventScope): boolean {
+  if (!event.client_request_id && !event.turn_id) return !event.character_id || event.character_id === view.character_id;
+  if (!event.character_id) return false;
+  const turn = view.turns.find(turn => event.client_request_id
+    ? turn.client_request_id === event.client_request_id : !!event.turn_id && turn.turn_id === event.turn_id);
+  if (turn) return turnMatchesView(view, turn);
+  return event.character_id === view.character_id && (view.conversation_id !== null
+    ? event.conversation_id === view.conversation_id : event.conversation_generation === view.generation);
 }
 
 const replyRevision = (turn: ChatTurnSnapshot) => turn.completion_revision ?? turn.revision;
 
 function isTurnAwaitingHistory(view: ChatViewSnapshot, turn: ChatTurnSnapshot): boolean {
-  return turn.status === "completed" && replyRevision(turn) > view.revision && turn.character_id === view.character_id
+  return turn.status === "completed" && (turn.conversation_generation === undefined || turn.conversation_generation === view.generation) && replyRevision(turn) > view.revision && turn.character_id === view.character_id
     && turn.conversation_id !== null && turn.conversation_id === view.conversation_id;
 }
 
@@ -82,9 +104,8 @@ export function findFailurePromptIndex(view: ChatViewSnapshot, messages: readonl
 }
 
 export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
-  const conversationTurns = view.turns.filter(turn => turnHasSelectedConversation(view, turn));
-  // Loading a conversation advances its generation. Finished tool results still
-  // belong to its saved history, while live and failed turns remain selection-scoped.
+  const conversationTurns = view.turns.filter(turn => turnMatchesView(view, turn));
+  // Stable identity survives selection changes; reserved IDs stay scoped to admission.
   const turns = conversationTurns.filter(turn => turn.status === "completed" || turnMatchesView(view, turn));
   const shownFailures = new Set<string>();
   let messages = projectSavedMessages(view).flatMap((message, index, saved) => {
@@ -110,13 +131,12 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     const persistenceFailure = turn.error_code === "CHAT_PERSISTENCE_ERROR"
       && (turn.conversation_id !== null || turn.conversation_generation === view.generation);
     if (turn.status === "error" && turn.error && (!turn.hidden || persistenceFailure) && (preparationFailure || legacyFailure || persistenceFailure)
-      && turn.turn_id && turn.conversation_id === view.conversation_id && !shownFailures.has(turn.turn_id)) {
+      && turn.turn_id && turnMatchesView(view, turn) && !shownFailures.has(turn.turn_id)) {
       const promptIndex = turn.user_message_id !== null && latestTurnByUser.get(turn.user_message_id) === turn
         ? messages.findIndex(message => message.role === "user" && message.id === turn.user_message_id) : -1;
-      // Hidden turns never save their instruction as a user row. Their failed
-      // assistant save, like an initial user save, belongs to this exact selection.
-      const unanchoredSaveFailure = persistenceFailure && turn.user_message_id === null
-        && turn.conversation_generation === view.generation;
+      // Hidden instructions have no user row. Saved conversations retain their
+      // identity across selection changes; reserved conversations use admission generation.
+      const unanchoredSaveFailure = persistenceFailure && turn.user_message_id === null && turnMatchesView(view, turn);
       if (promptIndex >= 0 || unanchoredSaveFailure || (preparationFailure && turn.user_message_id === null)) {
         let replyIndex = messages.findIndex(message => message.role === "kokoro" && message.turnId === turn.turn_id);
         const partial = persistenceFailure && stripStreamingControlMarkup(turn.text).trim();

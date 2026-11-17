@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-struct OrchestratorActivationBackend<'a> {
-    orchestrator: &'a AIOrchestrator,
-    app_data: PathBuf,
+pub(crate) struct OrchestratorActivationBackend<'a> {
+    pub(crate) orchestrator: &'a AIOrchestrator,
+    pub(crate) app_data: PathBuf,
 }
 
 #[async_trait]
@@ -54,6 +54,7 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
             proactive_enabled: self.orchestrator.is_proactive_enabled(),
             current_conversation_id: self
                 .orchestrator
+                .selection
                 .current_conversation_id
                 .lock()
                 .await
@@ -64,14 +65,24 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
 
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
         // 会话切换锁：会话指针写入必须与删除/加载等历史重写路径互斥
-        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
+        let _switch_guard = self
+            .orchestrator
+            .selection
+            .conversation_switch_lock
+            .lock()
+            .await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
         // 会话切换锁：覆盖整个「会话指针写入 + 历史重同步」序列，防止在途删除操作
         // 把旧会话历史写回刚恢复的新会话
-        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
+        let _switch_guard = self
+            .orchestrator
+            .selection
+            .conversation_switch_lock
+            .lock()
+            .await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await?;
         sync_orchestrator_history(
             self.orchestrator,
@@ -86,7 +97,12 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
         // 会话切换锁：历史重同步与删除/加载互斥
-        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
+        let _switch_guard = self
+            .orchestrator
+            .selection
+            .conversation_switch_lock
+            .lock()
+            .await;
         sync_orchestrator_history(self.orchestrator, conversation_id).await
     }
 
@@ -136,7 +152,8 @@ async fn apply_orchestrator_runtime(
         .set_response_language(snapshot.response_language.clone())
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
-    *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
+    *orchestrator.selection.current_conversation_id.lock().await =
+        snapshot.current_conversation_id.clone();
     orchestrator.bump_conversation_generation();
     Ok(())
 }
@@ -413,8 +430,12 @@ pub async fn delete_character(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _memory_commit = orchestrator.owners.memory_commit.write().await;
+    let _selection = orchestrator.selection.conversation_switch_lock.lock().await;
     let app_data = resolve_app_data(&app)?;
-    delete_character_with_resources_in_pool(&orchestrator.db, &app_data, &id).await
+    delete_character_with_resources_in_pool(&orchestrator.db, &app_data, &id).await?;
+    orchestrator.forget_character(&id).await;
+    Ok(())
 }
 
 #[tauri::command]

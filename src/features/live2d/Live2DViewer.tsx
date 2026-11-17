@@ -17,6 +17,8 @@ import type { AppliedCharacterCueProfile } from "../characters/character-cue-pro
 import { drawableHitTest, estimateRegionByY, REGION_DESCRIPTIONS } from "./DrawableHitTest";
 import { onChatCue, type Live2dModelProfile } from "../../lib/kokoro-bridge";
 import { listen } from "@tauri-apps/api/event";
+import { chatApplication } from "../../lib/chat/application";
+import { chatEventMatchesView } from "../../lib/chat/projection";
 import { interactionService, type GestureEvent } from "../../core/services/interaction-service";
 import * as PIXI from "pixi.js";
 
@@ -232,6 +234,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             let disposed = false;
 
             onChatCue((data) => {
+                if (disposed || !chatEventMatchesView(chatApplication.getSnapshot(), data)) return;
                 const ctrl = getActiveController();
                 if (ctrl) {
                     void ctrl.playCue(data.cue);
@@ -260,6 +263,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             let disposed = false;
 
             listen<any>("idle-behavior", (event) => {
+                if (event.payload?.character_id && event.payload.character_id !== chatApplication.getSnapshot().character_id) return;
                 const ctrl = getActiveController();
                 if (ctrl && event.payload && event.payload.behavior) {
                     ctrl.playIdleBehavior(event.payload.behavior as IdleBehavior);

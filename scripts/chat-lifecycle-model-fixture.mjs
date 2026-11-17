@@ -63,15 +63,16 @@ const server = http.createServer(async (request, response) => {
   if (name === "legacy-mod-connect-failure" && body.stream === true) { request.socket.destroy(); return; }
   const composerRetry = name === "composer-retry-once" && call.streaming;
   const composerRound = composerRetry ? calls.filter(previous => previous.name === name && previous.streaming).length : 0;
+  const postToolRound = name === "post-tool-failure" && call.streaming ? calls.filter(previous => previous.name === name && previous.streaming).length : 0;
   const regenerationRound = name === "retry-regeneration-boundary" && call.streaming
     ? calls.filter(previous => previous.name === name && previous.streaming).length : 0;
   if (name === "detached-composer-failure" && call.streaming) {
     await new Promise(resolve => { releaseDetachedFailure = resolve; });
   }
-  if (composerRound === 2 || regenerationRound === 2 || regenerationRound === 3
+  if (postToolRound === 2 || regenerationRound === 2 || regenerationRound === 3
     || name === "detached-composer-failure" || name === "hidden-chat-failure") {
     response.writeHead(400, { "content-type": "application/json" });
-    const reason = composerRound === 2 ? "controlled composer failure"
+    const reason = postToolRound === 2 ? "controlled post-tool failure"
       : regenerationRound ? `controlled regeneration failure ${regenerationRound}` : `controlled ${name}`;
     response.end(JSON.stringify({ error: { message: reason, type: "invalid_request_error" } }));
     return;
@@ -90,12 +91,20 @@ const server = http.createServer(async (request, response) => {
       response.once("close", resolve);
     });
   }
+  if (composerRound === 1) {
+    // A malformed SSE event after a visible delta is an explicit stream failure.
+    // No tool was dispatched, so the existing retry policy can replay this turn.
+    chunk({ content: "Partial reply before failure. " });
+    response.write('data: {"choices":"controlled composer failure"}\n\n');
+    response.end();
+    return;
+  }
   const hasTextToolFeedback = body.messages?.some(message => message.role === "system" && message.content?.startsWith?.("[Tool results]"));
   if ((name === "text-tool" || name === "text-tool-only") && !hasTextToolFeedback) {
     chunk({ content: "[TOOL_CALL:get_time]" });
-  } else if ((["tool", "native-tool-only", "db-tool-save"].includes(name) && !call.toolResult) || composerRound === 1) {
+  } else if ((["tool", "native-tool-only", "db-tool-save"].includes(name) && !call.toolResult) || postToolRound === 1) {
     if (name !== "native-tool-only") {
-      chunk({ content: composerRound === 1 ? "Partial reply before failure. " : "Draft before get_time. " });
+      chunk({ content: postToolRound === 1 ? "Partial reply before failure. " : "Draft before get_time. " });
     }
     const tool = call.tools.find(name => name.endsWith("get_time"));
     if (tool) chunk({ tool_calls: [{ index: 0, id: "fixture-tool-call", type: "function", function: { name: tool, arguments: "{}" } }] });

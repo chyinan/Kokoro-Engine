@@ -4,7 +4,6 @@ use crate::ai::context::AIOrchestrator;
 use crate::ai::initiative::InitiativeDecision;
 use chrono::Timelike;
 use serde::Serialize;
-use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Configuration for the heartbeat system.
@@ -28,6 +27,8 @@ impl Default for HeartbeatConfig {
 #[derive(Debug, Clone, Serialize)]
 struct IdleBehaviorEvent {
     pub behavior: crate::ai::idle_behaviors::IdleBehavior,
+    pub character_id: String,
+    pub conversation_id: Option<String>,
 }
 
 /// Get a time-of-day greeting context string.
@@ -47,10 +48,7 @@ fn time_of_day_context() -> &'static str {
 /// Main heartbeat loop. Spawned once at app startup.
 pub async fn heartbeat_loop(app_handle: AppHandle) {
     let config = HeartbeatConfig::default();
-    let mut last_proactive_ts = std::time::Instant::now();
     let _last_time_period = current_time_period();
-    let mut last_prune_ts = std::time::Instant::now();
-    let mut last_dream_dates: HashMap<String, chrono::NaiveDate> = HashMap::new();
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -61,23 +59,41 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             None => continue,
         };
 
+        let Ok(scope) = orchestrator.desktop_admission_scope().await else {
+            continue;
+        };
+        let character = scope.0.clone();
+        let behavior = orchestrator.owners.character(&character);
+
         // Gather metrics
-        let idle_secs = orchestrator.idle_seconds().await;
-        let conversation_count = orchestrator.get_conversation_count().await;
+        let (idle_secs, conversation_count) = {
+            let state = behavior.lock().await;
+            (
+                state.last_activity.elapsed().as_secs(),
+                state.conversation_count,
+            )
+        };
 
         // ── Autonomous Systems Updates ──
 
         // 1. Curiosity Decay
         {
-            let mut curiosity = orchestrator.curiosity.lock().await;
-            curiosity.decay();
+            behavior.lock().await.curiosity.decay();
         }
 
         // 2. Idle Behaviors (Animations)
         {
-            let mut idle_sys = orchestrator.idle_behaviors.lock().await;
+            let mut state = behavior.lock().await;
+            let idle_sys = &mut state.idle_behaviors;
             if let Some(behavior) = idle_sys.decide(idle_secs) {
-                let _ = app_handle.emit("idle-behavior", IdleBehaviorEvent { behavior });
+                let _ = app_handle.emit(
+                    "idle-behavior",
+                    IdleBehaviorEvent {
+                        behavior,
+                        character_id: character.clone(),
+                        conversation_id: scope.1.clone(),
+                    },
+                );
             }
         }
 
@@ -85,10 +101,12 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
         crate::commands::auto_backup::check_and_run(&app_handle).await;
 
         // 4. Memory Decay Pruning (once per hour)
-        if orchestrator.is_memory_enabled() && last_prune_ts.elapsed().as_secs() >= 3600 {
-            last_prune_ts = std::time::Instant::now();
+        if orchestrator.is_memory_enabled()
+            && behavior.lock().await.last_prune.elapsed().as_secs() >= 3600
+        {
+            behavior.lock().await.last_prune = std::time::Instant::now();
             let memory_mgr = orchestrator.memory_manager.clone();
-            let char_id = orchestrator.get_character_id().await;
+            let char_id = character.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = memory_mgr.prune_decayed_memories(&char_id, 0.05).await;
             });
@@ -101,10 +119,10 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
             );
             let now = chrono::Local::now();
             let today = now.date_naive();
-            let char_id = orchestrator.get_character_id().await;
+            let char_id = character.clone();
             if memory_config.dreaming_enabled
                 && now.hour() >= u32::from(memory_config.dream_daily_hour)
-                && last_dream_dates.get(&char_id) != Some(&today)
+                && behavior.lock().await.last_dream_day != Some(today)
                 && idle_secs >= 60
             {
                 let memory_mgr = orchestrator.memory_manager.clone();
@@ -114,7 +132,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                     .await
                 {
                     Ok(true) => {
-                        last_dream_dates.insert(char_id.clone(), today);
+                        behavior.lock().await.last_dream_day = Some(today);
                         continue;
                     }
                     Ok(false) => {}
@@ -126,23 +144,36 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                         );
                     }
                 }
-                last_dream_dates.insert(char_id.clone(), today);
-                let target_language = orchestrator.response_language.lock().await.clone();
+                behavior.lock().await.last_dream_day = Some(today);
+                let target_language = {
+                    let Ok(_activation) = orchestrator.enter_chat_turn() else {
+                        continue;
+                    };
+                    let Ok(prompt) = orchestrator.prompt_snapshot(&char_id).await else {
+                        continue;
+                    };
+                    prompt.response_language
+                };
+                let memory_scope =
+                    orchestrator.role_memory_write_scope(&char_id, &format!("daily-dream:{today}"));
                 let provider = app_handle
                     .try_state::<crate::llm::service::LlmService>()
                     .map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let database_guard = crate::ai::context::acquire_database_operation_read_guard().await;
+                    if !database_guard.is_current() { return; }
                     let provider = if let Some(llm_state) = provider {
                         Some(llm_state.system_provider().await)
                     } else {
                         None
                     };
                     if let Err(error) = memory_mgr
-                        .run_dream_now_with_provider(
+                        .run_dream_scoped(
                             &char_id,
                             "daily_idle",
                             provider,
                             Some(target_language),
+                            Some(&memory_scope),
                         )
                         .await
                     {
@@ -159,11 +190,15 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
         if !orchestrator.is_proactive_enabled() {
             continue;
         }
-        if last_proactive_ts.elapsed().as_secs() >= config.cooldown_secs {
+        if behavior.lock().await.last_proactive.elapsed().as_secs() >= config.cooldown_secs {
             let decision = {
-                let mut initiative = orchestrator.initiative.lock().await;
-                let mut curiosity = orchestrator.curiosity.lock().await;
-                initiative.decide(&mut curiosity, conversation_count, idle_secs)
+                let mut state = behavior.lock().await;
+                let crate::chat::ownership::CharacterBehavior {
+                    initiative,
+                    curiosity,
+                    ..
+                } = &mut *state;
+                initiative.decide(curiosity, conversation_count, idle_secs)
             };
 
             match decision {
@@ -174,11 +209,13 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                     trigger_proactive_message(
                         &app_handle,
                         &orchestrator,
+                        &scope,
+                        idle_secs,
                         "curiosity",
                         &format!("Ask the user about: {}", topic),
                     )
                     .await;
-                    last_proactive_ts = std::time::Instant::now();
+                    behavior.lock().await.last_proactive = std::time::Instant::now();
                 }
                 InitiativeDecision::ShareThought { topic } => {
                     let instruction = if topic == "random" {
@@ -189,11 +226,13 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                     trigger_proactive_message(
                         &app_handle,
                         &orchestrator,
+                        &scope,
+                        idle_secs,
                         "initiative",
                         instruction,
                     )
                     .await;
-                    last_proactive_ts = std::time::Instant::now();
+                    behavior.lock().await.last_proactive = std::time::Instant::now();
                 }
                 InitiativeDecision::VideoShare { .. } => {
                     // Not implemented
@@ -206,11 +245,12 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
 async fn trigger_proactive_message(
     app_handle: &AppHandle,
     orchestrator: &AIOrchestrator,
+    scope: &(String, Option<String>, u64),
+    idle_secs: u64,
     trigger_type: &str,
     instruction: &str,
 ) {
     let time_ctx = time_of_day_context();
-    let idle_secs = orchestrator.idle_seconds().await;
 
     let full_instruction = format!(
         "User has been idle for {:.0} minutes. {} {}",
@@ -225,19 +265,26 @@ async fn trigger_proactive_message(
         trigger_type, instruction
     );
 
-    crate::chat::application::submit_proactive(app_handle.clone(), full_instruction.clone());
+    let Some(request_id) = crate::chat::application::submit_proactive_bound(
+        app_handle.clone(),
+        full_instruction.clone(),
+        scope.clone(),
+    ) else {
+        return;
+    };
 
     let _ = app_handle.emit(
         "proactive-trigger",
         serde_json::json!({
             "trigger": trigger_type,
+            "character_id":scope.0,"conversation_id":scope.1,"client_request_id":request_id,
             "idle_seconds": idle_secs,
             "instruction": full_instruction,
         }),
     );
 
     // Reset idle timer so we don't re-trigger immediately
-    orchestrator.touch_activity().await;
+    orchestrator.touch_character_activity(&scope.0).await;
 }
 
 /// Time period enum for detecting transitions.

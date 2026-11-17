@@ -77,7 +77,10 @@ impl LlmService {
     #[cfg(all(test, target_os = "windows"))]
     pub(crate) fn for_test(provider: Arc<dyn LlmProvider>) -> Self {
         let id = provider.id().to_owned();
-        let config = LlmConfig { active_provider: id.clone(), ..LlmConfig::default() };
+        let config = LlmConfig {
+            active_provider: id.clone(),
+            ..LlmConfig::default()
+        };
         Self {
             providers: Arc::new(RwLock::new(HashMap::from([(id.clone(), provider)]))),
             active_provider_id: Arc::new(RwLock::new(id)),
@@ -85,6 +88,15 @@ impl LlmService {
             state_snapshot: Arc::new(RwLock::new(())),
             config_path: PathBuf::new(),
         }
+    }
+
+    #[cfg(all(test, target_os = "windows"))]
+    pub(crate) async fn replace_test_provider(&self, provider: Arc<dyn LlmProvider>) {
+        let _snapshot = self.state_snapshot.write().await;
+        let id = provider.id().to_owned();
+        self.providers.write().await.insert(id.clone(), provider);
+        *self.active_provider_id.write().await = id.clone();
+        self.config.write().await.active_provider = id;
     }
 
     /// Create a new LlmService from a persisted config.
@@ -154,6 +166,36 @@ impl LlmService {
     pub async fn config(&self) -> LlmConfig {
         let _snapshot_guard = self.state_snapshot.read().await;
         self.config.read().await.clone()
+    }
+
+    /// Read one committed provider generation for the entire chat turn.
+    pub(crate) async fn execution_snapshot(
+        &self,
+    ) -> (LlmConfig, Arc<dyn LlmProvider>, Arc<dyn LlmProvider>) {
+        let _snapshot_guard = self.state_snapshot.read().await;
+        let config = self.config.read().await.clone();
+        let active_id = self.active_provider_id.read().await.clone();
+        let providers = self.providers.read().await;
+        let chat =
+            try_provider_by_id(&providers, &active_id).unwrap_or_else(|_| default_provider());
+        let system_id = config
+            .system_provider
+            .as_ref()
+            .filter(|id| providers.contains_key(*id))
+            .unwrap_or(&active_id);
+        let mut system = try_provider_by_id(&providers, system_id).unwrap_or_else(|_| chat.clone());
+        if let Some(model) = &config.system_model {
+            if let Some(provider) = config
+                .providers
+                .iter()
+                .find(|provider| &provider.id == system_id && provider.enabled)
+            {
+                let mut provider = provider.clone();
+                provider.model = Some(model.clone());
+                system = Arc::from(build_from_provider_config(&provider));
+            }
+        }
+        (config, chat, system)
     }
 
     /// Update config, persist to disk, and hot-swap the active provider.

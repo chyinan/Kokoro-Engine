@@ -1575,6 +1575,18 @@ async fn record_memory_retrieval_if_enabled(
     Ok(())
 }
 
+async fn memory_scope_guard(
+    scope: Option<&crate::chat::ownership::MemoryWriteScope>,
+) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>> {
+    match scope {
+        Some(scope) => {
+            Ok(Some(scope.admit().await.ok_or_else(|| {
+                anyhow::anyhow!("Chat memory task was revoked")
+            })?))
+        }
+        None => Ok(None),
+    }
+}
 impl MemoryManager {
     /// Creates a new MemoryManager without downloading any models.
     /// The embedding model is lazy-loaded on first use.
@@ -2740,6 +2752,17 @@ impl MemoryManager {
         character_id: &str,
         importance: f64,
     ) -> Result<()> {
+        self.add_memory_with_scope(content, character_id, importance, None)
+            .await
+    }
+
+    pub(crate) async fn add_memory_with_scope(
+        &self,
+        content: &str,
+        character_id: &str,
+        importance: f64,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
+    ) -> Result<()> {
         // Ownership is checked before embedding so an unknown character costs
         // nothing and cannot leave an invisible row behind.
         if !self.memory_owner_exists(character_id).await? {
@@ -2755,6 +2778,17 @@ impl MemoryManager {
         let hash = canonical_hash(storage_probe);
         let embedding = self.embed(storage_probe).await?;
         let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
+        // Recheck after all external work. Deletion and memory revocation use
+        // the matching write guard, so the following SQL mutations are atomic
+        // with respect to those ownership changes.
+        let _scope_guard = if let Some(scope) = scope {
+            let Some(guard) = scope.admit().await else {
+                return Err(anyhow::anyhow!("Chat memory task was revoked before commit"));
+            };
+            Some(guard)
+        } else {
+            None
+        };
         let now = now_ts();
         let candidate_id = self
             .insert_memory_candidate(NewMemoryCandidate {
@@ -2874,7 +2908,7 @@ impl MemoryManager {
                         proposed_memory_type: None,
                         proposed_entity_key: None,
                         impact: "Manual review required before invalidating or replacing the older memory.",
-                    })
+                    }, None)
                     .await?;
                     invalidated += 1;
                     tracing::info!(
@@ -3043,7 +3077,12 @@ impl MemoryManager {
         Ok(())
     }
 
-    async fn create_dream_proposal(&self, proposal: DreamProposalInsert<'_>) -> Result<i64> {
+    async fn create_dream_proposal(
+        &self,
+        proposal: DreamProposalInsert<'_>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
+    ) -> Result<i64> {
+        let _scope = memory_scope_guard(scope).await?;
         let source_memory_versions = self
             .capture_dream_memory_versions(proposal.source_memory_ids, proposal.target_memory_id)
             .await?;
@@ -3205,7 +3244,11 @@ impl MemoryManager {
         self.choose_dream_keeper(entries)
     }
 
-    async fn auto_merge_dream_group(&self, request: DreamAutoMergeRequest<'_>) -> Result<i64> {
+    async fn auto_merge_dream_group(
+        &self,
+        request: DreamAutoMergeRequest<'_>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
+    ) -> Result<i64> {
         let DreamAutoMergeRequest {
             character_id,
             entries,
@@ -3277,6 +3320,7 @@ impl MemoryManager {
         let merged_embedding = self.embed(&merged_content).await?;
         let merged_embedding_bytes = bincode::serialize(&merged_embedding)?;
         let merged_hash = canonical_hash(&merged_content);
+        let _scope = memory_scope_guard(scope).await?;
         let mut transaction = self.db.begin().await?;
         let now = now_ts();
 
@@ -3379,6 +3423,7 @@ impl MemoryManager {
         a: &DreamCandidateEntry,
         b: &DreamCandidateEntry,
         similarity: f32,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
     ) -> Result<i64> {
         let pair_entries = [a, b];
         let keeper = self.choose_dream_keeper(&pair_entries);
@@ -3396,7 +3441,7 @@ impl MemoryManager {
             proposed_memory_type: Some(&keeper.memory_type),
             proposed_entity_key: keeper.entity_key.as_deref(),
             impact: "Manual review required before superseding either memory.",
-        })
+        }, scope)
         .await
     }
 
@@ -3448,6 +3493,7 @@ impl MemoryManager {
         entries: &[&DreamCandidateEntry],
         provider: &std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
         target_language: Option<&str>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
     ) -> Result<i64> {
         use crate::llm::messages::user_text_message;
 
@@ -3546,7 +3592,7 @@ impl MemoryManager {
                 proposed_memory_type: proposal.memory_type.as_deref().or(Some(&target.memory_type)),
                 proposed_entity_key: proposal.entity_key.as_deref().or(target.entity_key.as_deref()),
                 impact: "Manual review required because this relation was discovered by LLM rather than deterministic similarity.",
-            })
+            }, scope)
             .await?;
             proposals += 1;
         }
@@ -3560,6 +3606,7 @@ impl MemoryManager {
         entries: &[DreamCandidateEntry],
         provider: Option<&std::sync::Arc<dyn crate::llm::provider::LlmProvider>>,
         target_language: Option<&str>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
     ) -> Result<i64> {
         let Some(provider) = provider else {
             return Ok(0);
@@ -3577,7 +3624,7 @@ impl MemoryManager {
             let end = (start + DREAM_LLM_DISCOVERY_BATCH_SIZE).min(entries.len());
             let batch: Vec<&DreamCandidateEntry> = entries[start..end].iter().collect();
             match self
-                .run_llm_discovery_batch(character_id, &batch, provider, target_language)
+                .run_llm_discovery_batch(character_id, &batch, provider, target_language, scope)
                 .await
             {
                 Ok(count) => total += count,
@@ -3663,6 +3710,7 @@ impl MemoryManager {
         character_id: &str,
         provider: Option<&std::sync::Arc<dyn crate::llm::provider::LlmProvider>>,
         target_language: Option<&str>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
     ) -> Result<(i64, i64)> {
         let entries = self.load_dream_entries(character_id).await?;
         let mut processed: HashSet<i64> = HashSet::new();
@@ -3682,16 +3730,19 @@ impl MemoryManager {
                 continue;
             }
             auto_applied += self
-                .auto_merge_dream_group(DreamAutoMergeRequest {
-                    character_id,
-                    entries: group,
-                    proposal_type: "canonical_duplicate",
-                    title: "Merged exact duplicate memories",
-                    rationale: "Dream Light found duplicate canonical hashes.",
-                    confidence: 1.0,
-                    proposed_content_override: None,
-                    preferred_keeper_id: None,
-                })
+                .auto_merge_dream_group(
+                    DreamAutoMergeRequest {
+                        character_id,
+                        entries: group,
+                        proposal_type: "canonical_duplicate",
+                        title: "Merged exact duplicate memories",
+                        rationale: "Dream Light found duplicate canonical hashes.",
+                        confidence: 1.0,
+                        proposed_content_override: None,
+                        preferred_keeper_id: None,
+                    },
+                    scope,
+                )
                 .await?;
             for entry in group {
                 processed.insert(entry.id);
@@ -3725,7 +3776,7 @@ impl MemoryManager {
                     confidence: DREAM_CONFIDENCE_AUTO_APPLY,
                     proposed_content_override: None,
                     preferred_keeper_id: None,
-                })
+                }, scope)
                 .await?;
             for entry in group {
                 processed.insert(entry.id);
@@ -3776,7 +3827,7 @@ impl MemoryManager {
                                             confidence,
                                             proposed_content_override: assessment.merged_memory.as_deref(),
                                             preferred_keeper_id: assessment.canonical_memory_id,
-                                        })
+                                        }, scope)
                                         .await?;
                                     processed.insert(a.id);
                                     processed.insert(b.id);
@@ -3802,7 +3853,7 @@ impl MemoryManager {
                                         proposed_memory_type: assessment.memory_type.as_deref(),
                                         proposed_entity_key: assessment.entity_key.as_deref(),
                                         impact: "Manual review required before changing either active memory.",
-                                    })
+                                    }, scope)
                                     .await?;
                                     proposals += 1;
                                     continue;
@@ -3830,7 +3881,7 @@ impl MemoryManager {
                                     proposed_memory_type: assessment.memory_type.as_deref(),
                                     proposed_entity_key: assessment.entity_key.as_deref(),
                                     impact: "Manual review required because confidence was below the auto-apply threshold.",
-                                })
+                                }, scope)
                                 .await?;
                                 proposals += 1;
                                 continue;
@@ -3846,16 +3897,19 @@ impl MemoryManager {
                     }
                     let pair_entries = [a, b];
                     auto_applied += self
-                        .auto_merge_dream_group(DreamAutoMergeRequest {
-                            character_id,
-                            entries: &pair_entries,
-                            proposal_type: "semantic_auto_merge",
-                            title: "Merged highly similar memories",
-                            rationale: "Dream Deep found a high-confidence semantic duplicate.",
-                            confidence: f64::from(sim),
-                            proposed_content_override: None,
-                            preferred_keeper_id: None,
-                        })
+                        .auto_merge_dream_group(
+                            DreamAutoMergeRequest {
+                                character_id,
+                                entries: &pair_entries,
+                                proposal_type: "semantic_auto_merge",
+                                title: "Merged highly similar memories",
+                                rationale: "Dream Deep found a high-confidence semantic duplicate.",
+                                confidence: f64::from(sim),
+                                proposed_content_override: None,
+                                preferred_keeper_id: None,
+                            },
+                            scope,
+                        )
                         .await?;
                     processed.insert(a.id);
                     processed.insert(b.id);
@@ -3871,7 +3925,7 @@ impl MemoryManager {
                     .fetch_optional(&self.db)
                     .await?;
                     if existing.is_none() {
-                        self.create_semantic_review_proposal(character_id, a, b, sim)
+                        self.create_semantic_review_proposal(character_id, a, b, sim, scope)
                             .await?;
                         proposals += 1;
                     }
@@ -3880,7 +3934,7 @@ impl MemoryManager {
         }
 
         proposals += self
-            .run_llm_discovery_pass(character_id, &entries, provider, target_language)
+            .run_llm_discovery_pass(character_id, &entries, provider, target_language, scope)
             .await?;
 
         Ok((auto_applied, proposals))
@@ -3915,6 +3969,19 @@ impl MemoryManager {
         provider: Option<std::sync::Arc<dyn crate::llm::provider::LlmProvider>>,
         target_language: Option<String>,
     ) -> Result<MemoryDreamRunResult> {
+        self.run_dream_scoped(character_id, trigger, provider, target_language, None)
+            .await
+    }
+
+    pub(crate) async fn run_dream_scoped(
+        &self,
+        character_id: &str,
+        trigger: &str,
+        provider: Option<std::sync::Arc<dyn crate::llm::provider::LlmProvider>>,
+        target_language: Option<String>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
+    ) -> Result<MemoryDreamRunResult> {
+        let scope_guard = memory_scope_guard(scope).await?;
         let started_at = now_ts();
         let job_id = sqlx::query(
             "INSERT INTO memory_dream_jobs (character_id, phase, status, trigger, started_at) \
@@ -3927,11 +3994,24 @@ impl MemoryManager {
         .await?
         .last_insert_rowid();
 
+        drop(scope_guard);
         match self
-            .run_dream_pass(character_id, provider.as_ref(), target_language.as_deref())
+            .run_dream_pass(
+                character_id,
+                provider.as_ref(),
+                target_language.as_deref(),
+                scope,
+            )
             .await
         {
             Ok((auto_applied_count, proposal_count)) => {
+                let _commit_guard = match memory_scope_guard(scope).await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        sqlx::query("UPDATE memory_dream_jobs SET status='failed',finished_at=?,error=? WHERE id=?").bind(now_ts()).bind(error.to_string()).bind(job_id).execute(&self.db).await?;
+                        return Err(error);
+                    }
+                };
                 sqlx::query(
                     "UPDATE memory_dream_jobs \
                      SET status = 'ready', finished_at = ?, auto_applied_count = ?, proposal_count = ? \
@@ -4355,6 +4435,27 @@ impl MemoryManager {
 
     /// Find clusters of similar memories and merge them via LLM, preserving the
     /// configured assistant response language for newly written entries.
+    pub(crate) async fn consolidate_chat_memories(
+        &self,
+        character_id: &str,
+        provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+        language: Option<String>,
+        scope: &crate::chat::ownership::MemoryWriteScope,
+    ) -> Result<usize> {
+        let guard = acquire_database_operation_read_guard().await;
+        Self::ensure_database_operation_current(&guard)?;
+        let result = self
+            .run_dream_scoped(
+                character_id,
+                "periodic_consolidation",
+                Some(provider),
+                language,
+                Some(scope),
+            )
+            .await?;
+        Ok((result.auto_applied_count + result.proposal_count) as usize)
+    }
+
     pub async fn consolidate_memories_with_language(
         &self,
         character_id: &str,
@@ -4939,20 +5040,23 @@ mod tests {
 
     async fn review_seed_proposal(manager: &MemoryManager, character: &str, memory_id: i64) -> i64 {
         manager
-            .create_dream_proposal(DreamProposalInsert {
-                character_id: character,
-                proposal_type: "semantic_review",
-                status: "pending",
-                confidence: 0.85,
-                title: "Review replacement",
-                rationale: "Review regression fixture",
-                source_memory_ids: &[memory_id],
-                target_memory_id: Some(memory_id),
-                proposed_content: Some("proposal replacement"),
-                proposed_memory_type: Some("fact"),
-                proposed_entity_key: None,
-                impact: "Replace target",
-            })
+            .create_dream_proposal(
+                DreamProposalInsert {
+                    character_id: character,
+                    proposal_type: "semantic_review",
+                    status: "pending",
+                    confidence: 0.85,
+                    title: "Review replacement",
+                    rationale: "Review regression fixture",
+                    source_memory_ids: &[memory_id],
+                    target_memory_id: Some(memory_id),
+                    proposed_content: Some("proposal replacement"),
+                    proposed_memory_type: Some("fact"),
+                    proposed_entity_key: None,
+                    impact: "Replace target",
+                },
+                None,
+            )
             .await
             .unwrap()
     }
@@ -5067,7 +5171,11 @@ mod tests {
             sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('invalid-summary', 'system', 'foreign diagnostic', '{\"type\":\"invalid_failure_event\"}', '1')")
                 .execute(&pool).await.unwrap();
         }
-        let task = manager.get_conversation_summary_task("invalid-summary", "character-a").await.unwrap().unwrap();
+        let task = manager
+            .get_conversation_summary_task("invalid-summary", "character-a")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.end_message_id, last_visible);
         assert!(task.transcript.contains("message-7"));
         assert!(!task.transcript.contains("foreign diagnostic"));

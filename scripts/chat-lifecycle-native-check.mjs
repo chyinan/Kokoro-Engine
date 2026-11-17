@@ -13,6 +13,7 @@ const context = browser.contexts()[0];
 let pet = await waitFor(() => context.pages().find(page => page.url().includes("pet.html")));
 const report = { startedAt: new Date().toISOString(), model: "controlled localhost SSE fixture", checks: [] };
 const save = () => fs.writeFileSync(path.join(output, "native-report.json"), JSON.stringify(report, null, 2));
+const databaseRows = (sql, ...params) => JSON.parse(execFileSync("python", ["-c", "import json,sqlite3,sys\nwith sqlite3.connect(sys.argv[1],timeout=10) as db:\n db.row_factory=sqlite3.Row\n print(json.dumps([dict(row) for row in db.execute(sys.argv[2],json.loads(sys.argv[3]))]))", path.join(process.env.KOKORO_TEST_DATA_ROOT, "com.chyin.kokoro", "kokoro.db"), sql, JSON.stringify(params)], {encoding:"utf8"}));
 const view = page => page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_view"));
 const windows = page => page.evaluate(async () => (await (await import("/node_modules/@tauri-apps/api/webviewWindow.js")).getAllWebviewWindows()).map(window => window.label));
 const setPanelMounted = (page, mounted) => page.evaluate(async mounted => {
@@ -268,6 +269,29 @@ try {
     await waitFor(async () => await prompt.count() === 1 && await prompt.isVisible());
     return { turn, failure, displayedReason: await alert.textContent() };
   });
+  await check("a failure after a dispatched tool preserves its partial reply and rejects replay", async () => {
+    const message = "[case:post-tool-failure]";
+    await submit(pet, { message, client_request_id:"native_post_tool_failure" }, "__postToolFailure");
+    assert((await outcome(pet, "__postToolFailure")).error);
+    const state = await view(main);
+    const failed = state.turns.find(turn => turn.client_request_id === "native_post_tool_failure");
+    const partial = state.messages.find(row => row.id === failed.assistant_message_id);
+    assert(partial?.content.includes("Partial reply before failure."));
+    const diagnostic = state.messages.find(row => JSON.parse(row.metadata ?? "null")?.event?.turn_id === failed.turn_id);
+    const metadata = JSON.parse(diagnostic.metadata);
+    assert.equal(metadata.event.retryable, false);
+    assert.equal(metadata.user_message_id, null);
+    const reason = main.getByText(diagnostic.content, {exact:true});
+    await reason.waitFor({state:"visible"});
+    assert.equal(await reason.locator("..").getByRole("button").count(), 0);
+    await submit(pet, { message, regenerate:true, character_id:state.character_id, conversation_id:state.conversation_id, conversation_generation:state.generation,
+      retry_failure:{diagnostic_message_id:diagnostic.id,expected_tail_message_id:state.messages.at(-1).id}}, "__postToolReplay");
+    assert.match((await outcome(pet, "__postToolReplay")).error, /Conversation history changed before retry/);
+    assert.deepEqual((await view(main)).messages, state.messages);
+    const calls = await (await fetch("http://127.0.0.1:19334/counts")).json();
+    assert.equal(calls.filter(call => call.name === "post-tool-failure" && call.streaming).length, 2);
+    return { failed, diagnostic, partial };
+  });
   await check("composer failures announce once and retry removes a saved partial reply without duplicating the prompt", async () => {
     const message = "[case:composer-retry-once]";
     const input = main.locator("textarea[data-onboarding-id='chat-input']");
@@ -277,7 +301,7 @@ try {
     const failedView = await view(main);
     const failedHistory = failedView.messages;
     const partial = failedHistory.find(row => row.id === failed.assistant_message_id && row.content.includes("Partial reply before failure."));
-    assert(partial, "the first tool round must leave a saved partial reply");
+    assert(partial, "the interrupted model stream must leave a saved partial reply");
     const diagnostic = failedHistory.find(row => {
       const metadata = JSON.parse(row.metadata ?? "null");
       return metadata?.type === "failure_event" && metadata.event.turn_id === failed.turn_id;
@@ -287,9 +311,9 @@ try {
     const retry = {
       message, regenerate: true, character_id: failedView.character_id,
       conversation_id: failedView.conversation_id, conversation_generation: failedView.generation,
-      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: diagnostic.id },
+      retry_failure: { diagnostic_message_id: diagnostic.id, expected_tail_message_id: failedHistory.at(-1).id },
     };
-    await submit(pet, { ...retry, retry_failure: { ...retry.retry_failure, expected_tail_message_id: partial.id } }, "__staleRetry");
+    await submit(pet, { ...retry, retry_failure: { ...retry.retry_failure, expected_tail_message_id: failed.user_message_id } }, "__staleRetry");
     assert.match((await outcome(pet, "__staleRetry")).error, /Conversation history changed before retry/);
     assert.deepEqual((await view(main)).messages, failedHistory);
     const alert = main.getByRole("alert").filter({ hasText: "controlled composer failure" });
@@ -399,30 +423,35 @@ try {
       if (!await input.count()) await setPanelMounted(main, true);
     }
   });
-  await check("stopping or switching during preparation cancels without a panel error", async () => {
+  await check("Stop cancels preparation while switching leaves the original turn owned and hides its later error", async () => {
     const input = main.locator("textarea[data-onboarding-id='chat-input']");
     const source = await view(main);
+    const beforeRows = databaseRows("SELECT id, content FROM conversation_messages WHERE conversation_id=? ORDER BY id", source.conversation_id);
     const cancellation = main.getByRole("alert").filter({ hasText: "turn cancelled by user" });
-    for (const action of ["stop", "switch"]) {
-      const message = `[case:lifecycle-hold-preparation-${action}]`;
-      await input.fill(message);
-      await input.press("Enter");
-      await waitFor(async () => (await view(pet)).turns.some(turn => turn.message === message && turn.status === "accepted"));
-      if (action === "stop") {
-        await main.getByRole("button", { name: /^(停止生成|Stop generation)$/ }).click();
-      } else {
-        await main.getByRole("button", { name: /^(对话记录|Chat History)$/i }).click();
-        await main.getByRole("button", { name: /^(新对话|New Chat)$/ }).click();
-      }
-      const cancelled = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === message && turn.status === "cancelled"));
-      assert.equal(cancelled.error, null);
-      assert.equal(await cancellation.count(), 0);
-    }
+    await input.fill("[case:lifecycle-hold-preparation-stop]");
+    await input.press("Enter");
+    await waitFor(async () => (await view(pet)).turns.some(turn => turn.message === "[case:lifecycle-hold-preparation-stop]" && turn.status === "accepted"));
+    await main.getByRole("button", { name: /^(停止生成|Stop generation)$/ }).click();
+    const cancelled = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === "[case:lifecycle-hold-preparation-stop]" && turn.status === "cancelled"));
+    assert.equal(cancelled.error, null);
+    const message = "[case:lifecycle-hold-preparation-switch]";
+    await input.fill(message);
+    await input.press("Enter");
+    const accepted = await waitFor(async () => (await view(pet)).turns.find(turn => turn.message === message && turn.status === "accepted"));
+    await main.getByRole("button", { name: /^(对话记录|Chat History)$/i }).click();
+    await main.getByRole("button", { name: /^(新对话|New Chat)$/ }).click();
     await waitFor(async () => (await view(main)).conversation_id === null);
-    await main.getByText(/Turn preparation timed out/).waitFor({ state: "detached" });
-    await main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), source.conversation_id);
+    const failed = await waitFor(async () => (await view(main)).turns.find(turn => turn.client_request_id === accepted.client_request_id && turn.status === "error"));
+    assert(failed.preparation_timed_out);
+    assert.equal(failed.character_id, source.character_id);
+    assert.equal(failed.conversation_id, source.conversation_id);
+    assert.equal((await view(main)).conversation_id, null);
+    assert.deepEqual(databaseRows("SELECT id, content FROM conversation_messages WHERE conversation_id=? ORDER BY id", source.conversation_id), beforeRows);
+    assert.equal(databaseRows("SELECT id FROM conversation_messages WHERE content=?", message).length, 0);
     assert.equal(await cancellation.count(), 0);
-    return { conversation: source.conversation_id };
+    assert.equal(await main.getByText(failed.error, {exact:true}).count(), 0);
+    await main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), source.conversation_id);
+    return { cancelled, accepted, failed, conversation: source.conversation_id };
   });
   await check("first-send preparation timeout keeps the empty selection before the user row commits", async () => {
     const message = "[case:lifecycle-hold-preparation-after-selection]";
@@ -433,16 +462,22 @@ try {
     const empty = await view(main);
     assert.equal(empty.conversation_id, null);
     let detached = false;
+    await main.evaluate(async () => {
+      const { listen } = await import("/node_modules/@tauri-apps/api/event.js");
+      window.__preparationSnapshots = [];
+      window.__stopPreparationSnapshots = await listen("chat-runtime-changed", event => window.__preparationSnapshots.push(event.payload));
+    });
     try {
       await input.fill(message);
       await input.press("Enter");
-      // The fixture holds the selection lock. Only the journal can be read
-      // until preparation times out and the lock is released.
-      const scoped = await waitFor(async () => {
-        const turns = await pet.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_runtime_snapshot"));
-        return turns.find(turn => turn.message === message && turn.status === "accepted" && turn.conversation_generation === empty.generation);
-      });
-      assert.equal(scoped.conversation_id, null);
+      // Snapshot IPC also reads the selection lock held by this debug pause.
+      // Observe the emitted journal snapshot without waiting for that lock.
+      const scoped = await waitFor(() => main.evaluate(({message,generation}) =>
+        window.__preparationSnapshots.find(turn => turn.message === message && turn.status === "accepted" && turn.conversation_generation === generation),
+        {message,generation:empty.generation}));
+      assert.equal(typeof scoped.conversation_id, "string");
+      assert(scoped.conversation_id.length > 0);
+      assert.equal(databaseRows("SELECT id FROM conversations WHERE id=?", scoped.conversation_id).length, 0);
       assert.equal(scoped.user_message_id, null);
       await setPanelMounted(main, false);
       detached = true;
@@ -453,7 +488,8 @@ try {
         if (!turn) return null;
         assert.equal(state.conversation_id, null);
         assert.equal(state.generation, empty.generation);
-        assert.equal(turn.conversation_id, state.conversation_id);
+        assert.equal(turn.conversation_id, scoped.conversation_id);
+        assert.equal(databaseRows("SELECT id FROM conversations WHERE id=?", scoped.conversation_id).length, 0);
         assert.equal(turn.conversation_generation, state.generation);
         assert.equal(turn.user_message_id, null);
         assert.equal(state.messages.length, 0);
@@ -472,8 +508,9 @@ try {
       detached = false;
       await reason.waitFor({ state: "visible" });
       assert.equal(await alert.count(), 0);
-      return { conversation: scoped.conversation_id, generation: scoped.conversation_generation };
+      return { accepted: scoped, failed, conversation: scoped.conversation_id, generation: scoped.conversation_generation };
     } finally {
+      await main.evaluate(() => window.__stopPreparationSnapshots?.());
       if (detached) await setPanelMounted(main, true);
       await select(source);
     }
@@ -552,7 +589,7 @@ try {
     assert.match(evidence.replies[0].tools[0].text, /Current time:/);
     return evidence;
   });
-  await check("history edits reject during generation and switching cancels without cross-writing", async () => {
+  await check("history edits reject during generation and switching preserves original ownership", async () => {
     const source = (await view(pet)).conversation_id;
     await pet.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.clear());
     const targetTurn = await petSend("history-target"); assert.equal(targetTurn.status, "completed");
@@ -565,14 +602,14 @@ try {
       const operations = [
         () => bridge.editConversationMessage({ conversation_id: current.conversation_id, conversation_generation: current.generation, message_id: current.messages.find(message => message.role === "user").id, new_content: "must not persist" }),
         () => bridge.deleteLastMessages(1, current.conversation_id),
-        () => bridge.createConversation(),
       ];
       const results = [];
       for (const operation of operations) { try { await operation(); results.push("unexpected success"); } catch (error) { results.push(bridge.getKokoroErrorMessage(error)); } }
       return results;
     }); assert(rejections.every(error => error.includes("chat_turn_busy")));
     await pet.evaluate(async target => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(target), target);
-    const cancelled = await outcome(pet, "__historySwitch"); assert(cancelled.error?.includes("cancelled") || cancelled.result?.status === "cancelled");
+    const originalResult = await outcome(pet, "__historySwitch"); assert.equal(originalResult.result?.status,"completed");
+    assert.equal(originalResult.result.conversation_id,source);
     const switched = await view(pet); assert.equal(switched.conversation_id, target);
     assert(!switched.messages.some(message => message.content.includes("history-switch")));
     const staleEdit = await pet.evaluate(async ({ source, target, generation, messageId }) => {
@@ -589,7 +626,7 @@ try {
     assert.deepEqual((await view(pet)).messages, switched.messages);
     await pet.evaluate(async source => (await import("/src/lib/chat/application.ts")).chatApplication.deleteConversation(source), source);
     assert.equal((await view(pet)).conversation_id, target);
-    return { source, target, rejections, cancelled, staleEdit };
+    return { source, target, rejections, originalResult, staleEdit };
   });
   await check("ordinary regeneration and pet chat cannot steal admission from each other", async () => {
     const target = (await view(main)).conversation_id;
@@ -864,7 +901,7 @@ try {
     await main.evaluate(async () => (await import("/node_modules/@tauri-apps/api/window.js")).getCurrentWindow().hide());
     const turn = await petSend("main-hidden"); assert.equal(turn.status, "completed"); return { turn };
   });
-  await check("serialized character selection cancels its old turn without any ChatPanel owner", async () => {
+  await check("serialized character selection commits while the original turn retains its owner", async () => {
     await pet.evaluate(async () => {
       const bridge = await import("/src/lib/kokoro-bridge.ts");
       await bridge.createCharacter({ id: "chat-validation-other", name: "Other", persona: "Other controlled test character", user_nickname: "Tester", source_format: "manual", created_at: 1, updated_at: 1, runtime_profile_json: JSON.stringify({ proactive_enabled: false }) });
@@ -886,14 +923,18 @@ try {
       const committed = await service.activateCharacter("chat-validation-other");
       await chatApplication.refresh();
       const switched = chatApplication.getSnapshot();
+      let busy;
+      try { await chatApplication.send({ message:"[case:other-character]",client_request_id:"native_other_busy",character_id:"chat-validation-other",conversation_id:switched.conversation_id,conversation_generation:switched.generation }); } catch(error) { busy=bridge.getKokoroErrorMessage(error); }
+      while (window.__characterSwitch?.pending) await new Promise(resolve=>setTimeout(resolve,20));
       const result = await chatApplication.send({ message: "[case:other-character]", client_request_id: "native_other_character", character_id: "chat-validation-other", conversation_id: switched.conversation_id, conversation_generation: switched.generation });
       await service.activateCharacter("chat-validation-character");
-      return { committed, switched, result };
+      return { committed, switched, result, busy };
     });
-    const cancelled = await outcome(pet, "__characterSwitch"); assert(cancelled.error?.includes("cancelled") || cancelled.result?.status === "cancelled");
+    const originalResult = await outcome(pet, "__characterSwitch"); assert.equal(originalResult.result?.status,"completed");
+    assert.match(selection.busy,/chat_turn_busy/);
     assert.equal(selection.switched.character_id, "chat-validation-other");
     assert(!selection.switched.messages.some(message => message.content.includes("character-switch")));
-    assert.equal(selection.result.status, "completed"); return { cancelled, ...selection };
+    assert.equal(selection.result.status, "completed"); return { originalResult, ...selection };
   });
   for (const kind of ["character", "conversation"]) await check(`pet UI binds its clicked ${kind} scope before delayed admission`, async () => {
     await pet.evaluate(async () => {
@@ -921,7 +962,11 @@ try {
     }, kind);
     await pet.evaluate(() => window.__releasePetScope());
     const outcome = await waitFor(() => pet.evaluate(() => window.__petScopeOutcome));
-    assert.match(JSON.stringify(outcome.error), kind === "character" ? /Character changed/ : /Conversation changed/);
+    assert.equal(outcome.error?.code, "Validation");
+    assert.equal(outcome.error?.message, "Desktop selection changed before admission");
+    assert.equal(databaseRows("SELECT id FROM conversation_messages WHERE content=?", request.message).length, 0);
+    const calls = await (await fetch("http://127.0.0.1:19334/counts")).json();
+    assert.equal(calls.filter(call => call.name === `stale-pet-${kind}` && call.streaming).length, 0);
     assert(!(await view(pet)).messages.some(row => row.content === request.message));
     if (kind === "conversation") {
       const bubble = await waitFor(() => context.pages().find(page => page.url().includes("bubble.html")));

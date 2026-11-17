@@ -320,21 +320,16 @@ try {
     assert.equal(reply.conversation_id, databaseMessage(text)[0].conversation_id);
     return { response, recovered, reply };
   });
-  await check("shared chat admission rejects selection changes during webhook generation and keeps both rows bound", async () => {
+  await check("desktop selection can change during webhook generation while saved rows keep their owner", async () => {
     const text = "[case:db-webhook-switch-slow]";
     const selected = (await view()).conversation_id;
+    const selectedRows = rows("SELECT id, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id", selected);
     const request = webhook(text);
     await waitFor(async () => (await modelCalls("db-webhook-switch-slow")).length === 1);
-    // Unified chat admission owns history mutation across all entry points.
-    // Capture the structured Tauri rejection inside the page; Playwright wraps
-    // objects thrown across evaluate in Error and loses their code/message.
-    const switchError = await page.evaluate(async () => {
-      try { await window.__TAURI_INTERNALS__.invoke("clear_history"); return null; }
-      catch (error) { return error; }
-    });
-    assert.equal(switchError?.code, "Chat", JSON.stringify(switchError));
-    assert.match(switchError?.message ?? "", /chat_turn_busy|chat turn is|聊天/i);
-    assert.equal((await view()).conversation_id, selected);
+    // clear_history opens an empty desktop selection; it does not delete SQL history.
+    await invoke("clear_history");
+    assert.equal((await view()).conversation_id, null);
+    assert.deepEqual(rows("SELECT id, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id", selected), selectedRows);
     const response = await request;
     assert.equal(response.status, 200, JSON.stringify(response));
     const [prompt] = databaseMessage(text);
@@ -342,12 +337,15 @@ try {
     assert.equal(prompt.role, "user");
     assert.equal(reply.role, "assistant");
     assert.equal(reply.conversation_id, prompt.conversation_id);
+    assert.notEqual(reply.conversation_id, selected);
+    assert.equal(response.body.conversation_id, reply.conversation_id);
+    assert.equal(response.body.character_id, character);
     assert.equal(rows("SELECT character_id FROM conversations WHERE id = ?", reply.conversation_id)[0].character_id, character);
-    await invoke("clear_history");
+    assert.deepEqual(rows("SELECT id, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id", selected), selectedRows);
     assert.equal((await view()).conversation_id, null);
-    return { switchError, prompt, reply };
+    return { selected, selectedRows, response, prompt, reply };
   });
-  await check("hidden retry cannot create a conversation after its empty selection has changed", async () => {
+  await check("hidden save retry preserves its reserved identity after the empty desktop selection changes", async () => {
     const id = "persistence_hidden_stale", text = "[case:db-hidden-stale]";
     assert.equal((await view()).conversation_id, null);
     const count = conversationCount();
@@ -356,13 +354,28 @@ try {
     try { failure = await expectDesktopFailure(id, await submit(id, text, { hidden:true })); }
     finally { dbScript("DROP TRIGGER reject_hidden_new;"); }
     assert.equal(conversationCount(), count);
+    const boundConversation = failure.turn.conversation_id;
+    assert.equal(typeof boundConversation, "string");
+    assert(boundConversation.length > 0);
     await invoke("clear_history");
-    const stale = await retry(id);
-    assert.equal(stale.error?.code, "Validation", JSON.stringify(stale));
-    assert.equal(conversationCount(), count);
-    assert.equal((await view()).conversation_id, null);
+    const recovered = await retry(id);
+    assert.equal(recovered.result?.status, "completed", JSON.stringify(recovered));
+    assert.equal(recovered.result.conversation_id, boundConversation);
+    assert.equal(recovered.result.client_request_id, id);
+    assert.equal(conversationCount(), count + 1);
+    assert.equal((await view()).conversation_id, null, "saving an old turn must not replace the newer empty selection");
     assert.equal((await modelCalls("db-hidden-stale")).length, 1);
-    return { failure, stale };
+    const saved = rows("SELECT id, conversation_id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id", boundConversation);
+    assert(saved.some(row => row.id === recovered.result.assistant_message_id && row.content === recovered.result.text));
+    assert.equal(rows("SELECT character_id FROM conversations WHERE id = ?", boundConversation)[0].character_id, character);
+    const finishes = await page.evaluate(id => window.persistenceFinishes.filter(event => event.client_request_id === id && event.status === "completed"), id);
+    assert.equal(finishes.length, 1);
+    assert.equal(finishes[0].conversation_id, boundConversation);
+    assert.equal(finishes[0].character_id, character);
+    assert.equal(finishes[0].turn_id, failure.turn.turn_id);
+    assert.deepEqual(await retry(id), recovered);
+    assert.equal(conversationCount(), count + 1);
+    return { failure, recovered, saved, finishes };
   });
   await check("desktop synthesis failure does not change committed assistant result", async () => {
     const id = "persistence_failed_speech", message = "[case:db-tts-failure]";

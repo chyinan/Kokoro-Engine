@@ -28,9 +28,11 @@ pub(crate) struct DesktopBackgroundWork {
 
 #[derive(Clone)]
 pub(crate) struct DesktopPostCommit {
+    pub scope: Option<Arc<super::ownership::MemoryWriteScope>>,
+    pub request_id: String,
+    pub turn_id: String,
     pub character_id: String,
     pub conversation_id: Option<String>,
-    pub generation: u64,
     pub database_generation: u64,
     pub provider: Arc<dyn LlmProvider>,
     pub memory: Option<DesktopMemoryWork>,
@@ -62,10 +64,19 @@ impl DesktopPostCommit {
     }
 
     async fn is_current(&self, state: &AIOrchestrator) -> bool {
-        self.database_generation == database_operation_generation()
-            && state.current_conversation_generation() == self.generation
-            && state.get_character_id().await == self.character_id
-            && *state.current_conversation_id.lock().await == self.conversation_id
+        if self.database_generation != database_operation_generation()
+            || !self
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.owner_is_current())
+        {
+            return false;
+        }
+        let Some(conversation) = &self.conversation_id else {
+            return false;
+        };
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM conversations c JOIN characters ch ON ch.id=c.character_id WHERE c.id=? AND c.character_id=?)")
+            .bind(conversation).bind(&self.character_id).fetch_one(&state.db).await.unwrap_or(false)
     }
 
     fn memory_current(&self, state: &AIOrchestrator) -> bool {
@@ -149,6 +160,7 @@ impl DesktopPostCommit {
                             task.provider.clone(),
                             task.character_id.clone(),
                             MemoryExtractionOptions {
+                                scope: task.scope.clone(),
                                 structured_memory_enabled: structured,
                                 target_language: Some(work.language.clone()),
                             },
@@ -179,10 +191,11 @@ impl DesktopPostCommit {
                             .await;
                         if let Err(error) = state
                             .memory_manager
-                            .consolidate_memories_with_language(
+                            .consolidate_chat_memories(
                                 &task.character_id,
                                 task.provider.clone(),
                                 Some(work.language.clone()),
+                                task.scope.as_ref().expect("admitted memory scope"),
                             )
                             .await
                         {
@@ -241,10 +254,15 @@ impl DesktopPostCommit {
                     .await
                 {
                     Ok(result) if self.is_current(&state).await => {
-                        let _ = app.emit("imagegen:done", result);
+                        let mut event = serde_json::to_value(result).unwrap_or_default();
+                        event["character_id"] = self.character_id.clone().into();
+                        event["conversation_id"] = self.conversation_id.clone().into();
+                        event["client_request_id"] = self.request_id.clone().into();
+                        event["turn_id"] = self.turn_id.clone().into();
+                        let _ = app.emit("imagegen:done", event);
                     }
                     Err(error) => {
-                        let _ = app.emit("imagegen:error", error.to_string());
+                        let _ = app.emit("chat-imagegen-error", serde_json::json!({"character_id":self.character_id,"conversation_id":self.conversation_id,"client_request_id":self.request_id,"turn_id":self.turn_id,"message":error.to_string()}));
                     }
                     _ => {}
                 }
@@ -258,16 +276,25 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn deferred_scope_fences_memory_toggle_selection_character_and_database() {
+    async fn deferred_scope_fences_deletion_and_revocation_but_not_selection() {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
+        let character = state.get_character_id().await;
+        sqlx::query("INSERT OR IGNORE INTO characters(id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,'owner','','','test',1,1)").bind(&character).execute(&state.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,character_id,created_at,updated_at) VALUES ('owned',?,'now','now')").bind(&character).execute(&state.db).await.unwrap();
         let mut work = DesktopPostCommit {
+            scope: Some(state.memory_write_scope(
+                &character,
+                "owned",
+                "request",
+                state.external_memory.epoch(),
+            )),
+            request_id: "request".into(),
+            turn_id: "turn".into(),
             character_id: state.get_character_id().await,
-            conversation_id: None,
-            generation: state.current_conversation_generation(),
+            conversation_id: Some("owned".into()),
             database_generation: database_operation_generation(),
             provider: Arc::new(crate::llm::provider::OpenAIProvider::new(
                 "fixture".into(),
@@ -299,6 +326,14 @@ mod tests {
         assert!(!work.is_current(&state).await);
         work.character_id = state.get_character_id().await;
         state.clear_history().await;
+        assert!(
+            work.is_current(&state).await,
+            "selection is not task authority"
+        );
+        sqlx::query("DELETE FROM conversations WHERE id='owned'")
+            .execute(&state.db)
+            .await
+            .unwrap();
         assert!(!work.is_current(&state).await);
     }
 }

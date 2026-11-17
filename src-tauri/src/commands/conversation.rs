@@ -153,7 +153,11 @@ pub async fn load_conversation_inner(
             })
             .collect();
         let mut history_guard = history.lock().await;
-        crate::ai::context::sync_history_window(&mut history_guard, history_messages, max_message_chars);
+        crate::ai::context::sync_history_window(
+            &mut history_guard,
+            history_messages,
+            max_message_chars,
+        );
     }
 
     {
@@ -181,7 +185,9 @@ pub async fn load_conversation_inner(
                 .and_then(|value| value.as_str());
             if matches!(
                 technical_type,
-                Some("assistant_tool_calls") | Some("translation_instruction") | Some("invalid_failure_event")
+                Some("assistant_tool_calls")
+                    | Some("translation_instruction")
+                    | Some("invalid_failure_event")
             ) {
                 return None;
             }
@@ -208,20 +214,15 @@ pub async fn load_conversation(
     state: State<'_, AIOrchestrator>,
 ) -> Result<LoadedConversation, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
-
     let max_chars = *state.max_message_chars.lock().await;
     load_conversation_inner(
         request,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
+        &state.selection.history,
+        &state.selection.current_conversation_id,
         max_chars,
-        &state.conversation_switch_lock,
-        Some(&state.conversation_generation),
+        &state.selection.conversation_switch_lock,
+        Some(&state.selection.conversation_generation),
         true,
     )
     .await
@@ -293,23 +294,22 @@ pub async fn delete_conversation(
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
-
+    let _memory_commit = state.owners.memory_commit.write().await;
+    let deleted_id = request.id.clone();
     delete_conversation_inner(
         request,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
-        Some(&state.memory_history_boundary),
-        Some(&state.memory_trigger_count),
-        &state.conversation_switch_lock,
-        Some(&state.conversation_generation),
+        &state.selection.history,
+        &state.selection.current_conversation_id,
+        Some(&state.selection.memory_history_boundary),
+        None,
+        &state.selection.conversation_switch_lock,
+        Some(&state.selection.conversation_generation),
         true,
     )
-    .await
+    .await?;
+    state.forget_conversation(&deleted_id).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -332,10 +332,6 @@ pub async fn list_character_ids(
 #[tauri::command]
 pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
     state.clear_history().await;
     Ok(String::new())
 }
@@ -575,11 +571,11 @@ pub async fn edit_conversation_message(
     edit_conversation_message_inner(
         request,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
+        &state.selection.history,
+        &state.selection.current_conversation_id,
         max_chars,
-        &state.conversation_switch_lock,
-        &state.conversation_generation,
+        &state.selection.conversation_switch_lock,
+        &state.selection.conversation_generation,
     )
     .await
 }
@@ -1459,10 +1455,11 @@ mod tests {
         assert_eq!(*boundary.lock().await, 0);
         assert_eq!(*trigger_count.lock().await, 0);
 
-        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let conv_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(conv_count, 0);
     }
 
@@ -1517,15 +1514,17 @@ mod tests {
         assert_eq!(*trigger_count.lock().await, 5);
 
         // conv-2 deleted, conv-1 preserved
-        let conv2_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-2'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let conv2_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(conv2_count, 0);
-        let conv1_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let conv1_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(conv1_count, 1);
     }
 }

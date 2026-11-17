@@ -20,11 +20,11 @@ const persistedTurnMessages = [
 afterEach(() => vi.restoreAllMocks());
 
 describe("application history command session ownership", () => {
-  it("cancels a true character switch by request id, but not a same-character runtime update", async () => {
+  it("keeps admitted work alive across character selection and runtime updates", async () => {
     const h = harness();
     h.set({ revision: 2, busy: true, turns: [turn("active", 2)] });
     await h.app.prepareCharacterSwitch("character-a"); expect(h.io.cancel).not.toHaveBeenCalled();
-    await h.app.prepareCharacterSwitch("character-b"); expect(h.io.cancel).toHaveBeenCalledWith("active", "character_switched");
+    await h.app.prepareCharacterSwitch("character-b"); expect(h.io.cancel).not.toHaveBeenCalled();
   });
   it("a delayed delete response cannot clear a newly selected conversation", async () => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
@@ -87,7 +87,7 @@ describe("application history command session ownership", () => {
     const poll = h.app.refresh();
     h.set({ conversation_id: "conversation-b", generation: 4, messages: [] });
     load.resolve({ topic: "", pinned_state: "", messages: [] });
-    await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(3));
     await switching;
     stale.resolve(before); await poll;
     expect(h.app.getSnapshot()).toMatchObject({ conversation_id: "conversation-b", generation: 4, messages: [], busy: false });

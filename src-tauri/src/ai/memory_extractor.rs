@@ -35,6 +35,7 @@ const EXTRACTION_PROMPT: &str = concat!(
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryExtractionOptions {
+    pub(crate) scope: Option<Arc<crate::chat::ownership::MemoryWriteScope>>,
     pub structured_memory_enabled: bool,
     pub target_language: Option<String>,
 }
@@ -229,10 +230,11 @@ pub async fn extract_and_store_memories_with_options(
                     for fact in structured {
                         let content = build_storage_content_from_structured_fact(&fact);
                         if let Err(e) = memory_manager
-                            .add_memory_with_importance_unlocked(
+                            .add_memory_with_scope(
                                 &content,
                                 &character_id,
                                 fact.importance,
+                                options.scope.as_deref(),
                             )
                             .await
                         {
@@ -265,7 +267,15 @@ pub async fn extract_and_store_memories_with_options(
                 }
                 let count = plain.len();
                 for memory in plain {
-                    if let Err(e) = memory_manager.add_memory(&memory, &character_id).await {
+                    if let Err(e) = memory_manager
+                        .add_memory_with_scope(
+                            &memory,
+                            &character_id,
+                            0.5,
+                            options.scope.as_deref(),
+                        )
+                        .await
+                    {
                         tracing::error!(target: "memory", "[Memory] Failed to store memory '{}': {}", memory, e);
                     }
                 }
@@ -278,7 +288,12 @@ pub async fn extract_and_store_memories_with_options(
                 let count = scored.len();
                 for sf in scored {
                     if let Err(e) = memory_manager
-                        .add_memory_with_importance_unlocked(&sf.fact, &character_id, sf.importance)
+                        .add_memory_with_scope(
+                            &sf.fact,
+                            &character_id,
+                            sf.importance,
+                            options.scope.as_deref(),
+                        )
                         .await
                     {
                         tracing::error!(
@@ -362,6 +377,7 @@ mod tests {
     #[test]
     fn extraction_prompt_includes_target_memory_language() {
         let prompt = extraction_prompt(&MemoryExtractionOptions {
+            scope: None,
             structured_memory_enabled: false,
             target_language: Some("日本語".to_string()),
         });
@@ -373,6 +389,7 @@ mod tests {
     #[test]
     fn structured_extraction_keeps_schema_keys_while_setting_fact_language() {
         let prompt = extraction_prompt(&MemoryExtractionOptions {
+            scope: None,
             structured_memory_enabled: true,
             target_language: Some("中文".to_string()),
         });

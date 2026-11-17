@@ -84,3 +84,6 @@ src-tauri/proptest-regressions/vision/tests/property_tests.txt
 
 # Isolated native chat acceptance artifacts (WebView profile, logs, test data)
 output/playwright/chat-lifecycle/
+
+# Local evidence for the backend state ownership validation
+output/state-ownership/

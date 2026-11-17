@@ -1327,15 +1327,21 @@ function App() {
 
     // Listen for generated images
     const unlistenImageGen = onImageGenDone((result: ImageGenResult) => {
+      const view = chatApplication.getSnapshot();
+      if (result.character_id && (result.character_id !== view.character_id
+        || result.conversation_id !== view.conversation_id)) return;
       const assetUrl = convertFileSrc(result.image_url);
       console.log("[App] Received generated image:", assetUrl);
       setGeneratedImage(assetUrl);
     });
 
     // Listen for chat-triggered image generation requests
-    const unlistenChatImageGen = onChatImageGen(({ prompt }) => {
+    const unlistenChatImageGen = onChatImageGen(event => {
+      const { prompt } = event;
       console.log("[App] chat-imagegen triggered, prompt:", prompt);
       generateImage(prompt).then(result => {
+        const view = chatApplication.getSnapshot();
+        if (event.character_id && (event.character_id !== view.character_id || event.conversation_id !== view.conversation_id)) return;
         const assetUrl = convertFileSrc(result.image_url);
         setGeneratedImage(assetUrl);
         bgSlideshow.setConfig({ mode: "generated" });
@@ -1385,10 +1391,10 @@ function App() {
     });
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
-    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
+    const unlistenModChatDelta = onChatTurnDelta((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-delta', delta, turn_id },
+        payload: { name: 'chat-delta', ...data },
       });
     });
 
@@ -1399,10 +1405,10 @@ function App() {
       });
     });
 
-    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
+    const unlistenModChatDone = onChatTurnFinish((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-done', turn_id, status },
+        payload: { name: 'chat-done', ...data },
       });
     });
 

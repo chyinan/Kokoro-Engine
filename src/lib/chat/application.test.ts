@@ -81,16 +81,16 @@ describe("persistence failures in the chat view", () => {
       ]);
   });
 
-  it("scopes an initial save failure in an existing conversation to its selection generation", () => {
+  it("retains an existing conversation failure when returning through a newer selection generation", () => {
     const beforeUser = { ...failedSave, conversation_generation: 2, user_message_id: null, text: "" };
     const selection = { ...emptyChatView, character_id: "character-a", conversation_id: "conversation-a", generation: 2, turns: [beforeUser] };
     expect(projectMessages(selection)).toEqual([expect.objectContaining({ persistenceFailure: true })]);
-    expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
+    expect(projectMessages({ ...selection, generation: 3 })).toEqual([expect.objectContaining({ persistenceFailure: true })]);
   });
 
   it.each([null, "conversation-a"])("keeps a hidden reply's save failure visible in %s without exposing its instruction", conversationId => {
     const failedHidden = {
-      ...failedSave, hidden: true, message: "Private touch instruction", conversation_id: conversationId,
+      ...failedSave, hidden: true, message: "Private touch instruction", conversation_id: conversationId ?? "reserved-hidden",
       conversation_generation: 2, user_message_id: null, persistence_retryable: true,
     };
     const selection = { ...emptyChatView, character_id: "character-a", conversation_id: conversationId, generation: 2, turns: [failedHidden] };
@@ -103,8 +103,8 @@ describe("persistence failures in the chat view", () => {
     expect(projected[1].canRetryFailure).toBeUndefined();
     expect(projectMessages({ ...selection, character_id: "character-b" })).toEqual([]);
     expect(projectMessages({ ...selection, conversation_id: "conversation-b" })).toEqual([]);
-    expect(projectMessages({ ...selection, generation: 3 })).toEqual([]);
-    expect(projectMessages({ ...selection, turns: [{ ...failedHidden, conversation_generation: undefined }] })).toEqual([]);
+    expect(projectMessages({ ...selection, generation: 3 })).toEqual(conversationId === null ? [] : projected);
+    expect(projectMessages({ ...selection, turns: [{ ...failedHidden, conversation_generation: undefined }] })).toEqual(conversationId === null ? [] : projected);
     const unavailable = projectMessages({ ...selection, turns: [{ ...failedHidden, persistence_retryable: false }] });
     expect(unavailable).toHaveLength(2);
     expect(unavailable[1].canRetryPersistence).toBeUndefined();
@@ -283,7 +283,7 @@ describe("UI-independent chat application", () => {
       await h.app.cancel();
       expect(h.io.cancel).toHaveBeenCalledWith("hidden", "stopped_by_user");
       expect(projectMessages({ ...view, character_id: "other-character" })).toEqual([]);
-      expect(projectMessages({ ...view, generation: 3 })).toEqual([]);
+      expect(projectMessages({ ...view, generation: 3 })).toEqual(projectMessages(view));
     } finally { stop(); }
   });
   it.each([false, true])("keeps completed tool results when revisiting a conversation with text=%s", async withText => {
@@ -313,26 +313,15 @@ describe("UI-independent chat application", () => {
     await h.app.refresh();
     expect(projectMessages(h.app.getSnapshot())).toEqual(original);
   });
-  it.each(["pending", "accepted", "streaming", "error", "cancelled"] as const)("does not revive or cancel an old-generation %s turn on revisit", async status => {
+  it.each(["pending", "accepted", "streaming", "error", "cancelled"] as const)("restores owned %s turns after revisit and only stops active requests", async status => {
     const h = harness();
-    const previous = {
-      ...turn("mod_previous", 4, status), conversation_generation: 1,
-      assistant_message_id: null, preparation_timed_out: true, error: "old failure",
-      tools: [{ turn_id: "turn_mod_previous", tool: "lookup", tool_trace_id: "0:0", result: { message: "old result" } }],
-    };
+    const previous = { ...turn("mod_previous", 4, status), conversation_generation: 1, assistant_message_id: null, error: "old failure" };
     h.set({ revision: 4, generation: 3, turns: [previous], messages: [{ id: 1, role: "user", content: "question", created_at: "now" }] });
     await h.app.refresh();
-    expect(projectMessages(h.app.getSnapshot())).toEqual([{ id: 1, role: "user", text: "question" }]);
+    expect(projectMessages(h.app.getSnapshot())).toHaveLength(status === "cancelled" ? 1 : 2);
     await h.app.cancel();
-    expect(h.io.cancel).not.toHaveBeenCalled();
-
-    if (["pending", "accepted", "streaming"].includes(status)) {
-      h.set({ turns: [{ ...previous, revision: 5, conversation_generation: 3 }] });
-      await h.app.refresh();
-      expect(projectMessages(h.app.getSnapshot())).toHaveLength(2);
-      await h.app.cancel();
-      expect(h.io.cancel).toHaveBeenCalledWith("mod_previous", "stopped_by_user");
-    }
+    if (isActiveTurn(previous)) expect(h.io.cancel).toHaveBeenCalledWith("mod_previous", "stopped_by_user");
+    else expect(h.io.cancel).not.toHaveBeenCalled();
   });
   it.each(["character_id", "conversation_id"] as const)("never supplements saved rows from a completed turn with a different %s", field => {
     const completed = {
@@ -463,7 +452,9 @@ describe("UI-independent chat application", () => {
     const user = { id: 1, role: "user", content: "question", created_at: "now" };
     const view = { ...emptyChatView, character_id: old.character_id!, conversation_id: old.conversation_id, revision: 2, generation: 3, messages: [user] };
     expect(projectMessages({ ...view, turns: [old] }).map(message => message.role)).toEqual(["user", "kokoro"]);
-    expect(projectMessages({ ...view, turns: [newer, old] }).map(message => message.role)).toEqual(["user"]);
+    const projected = projectMessages({ ...view, turns: [newer, old] });
+    expect(projected.map(message => message.role)).toEqual(status === "streaming" ? ["user", "kokoro"] : ["user"]);
+    expect(JSON.stringify(projected)).not.toContain("old result");
   });
   it("removes an old active cache entry if authoritative retention has expired", async () => {
     const h = harness(); h.set({ revision: 1, turns: [turn("old", 1)], busy: true });
@@ -582,5 +573,35 @@ describe("UI-independent chat application", () => {
     a.set(view); b.set(view); await a.app.refresh(); await b.app.refresh();
     expect(projectMessages(a.app.getSnapshot())).toEqual(projectMessages(b.app.getSnapshot()));
     expect(a.io.send).not.toHaveBeenCalled(); expect(b.io.send).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("stable ownership while choosing another conversation", () => {
+  it("restores the original stream and default Stop after A to B to A", async () => {
+    const { app, io, set } = harness();
+    const owned = { ...turn("owned", 10), conversation_generation: 1 };
+    set({ turns: [owned], revision: 10, busy: true });
+    await app.refresh();
+    expect(projectMessages(app.getSnapshot())).toEqual(expect.arrayContaining([expect.objectContaining({ text: "answer" })]));
+    set({ conversation_id: "conversation-b", generation: 2 });
+    await app.refresh();
+    expect(projectMessages(app.getSnapshot())).toEqual([]);
+    await app.cancel();
+    expect(io.cancel).not.toHaveBeenCalled();
+    set({ conversation_id: "conversation-a", generation: 3 });
+    await app.refresh();
+    expect(turnMatchesView(app.getSnapshot(), owned)).toBe(true);
+    expect(projectMessages(app.getSnapshot())).toEqual(expect.arrayContaining([expect.objectContaining({ text: "answer" })]));
+    await app.cancel();
+    expect(io.cancel).toHaveBeenCalledWith("owned", "stopped_by_user");
+  });
+  it("projects a reserved hidden turn only on its original empty selection", () => {
+    const hidden = { ...turn("hidden", 10), hidden: true, conversation_id: "reserved", conversation_generation: 4, user_message_id: null };
+    const view = { ...emptyChatView, character_id: "character-a", generation: 4, turns: [hidden] };
+    expect(turnMatchesView(view, hidden)).toBe(true);
+    expect(projectMessages(view)).toEqual(expect.arrayContaining([expect.objectContaining({ text: "answer" })]));
+    expect(projectMessages({ ...view, generation: 5 })).toEqual([]);
+    expect(projectMessages({ ...view, conversation_id: "other" })).toEqual([]);
   });
 });

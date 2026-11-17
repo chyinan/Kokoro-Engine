@@ -150,6 +150,42 @@ pub fn load_active_live2d_profile() -> Option<Live2dModelProfile> {
     ensure_profile_for_model(&models_dir, &model_path).ok()
 }
 
+/// Read the committed role's explicit cue asset/model once at admission.
+/// A None result with no explicit reference keeps the legacy selected-model boundary.
+pub(crate) fn committed_cue_map(
+    runtime: &crate::characters::activation::BackendRuntimeSnapshot,
+) -> Option<HashMap<String, Live2dCueBinding>> {
+    use crate::characters::activation::PackageAssetReference;
+    if let Some(reference) = &runtime.cue_profile {
+        let path = match reference {
+            PackageAssetReference::Package { path, .. } => path,
+            PackageAssetReference::Library { model_id } => model_id,
+        };
+        return Some(
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|value| serde_json::from_value(value["cues"].clone()).ok())
+                .unwrap_or_default(),
+        );
+    }
+    match &runtime.live2d_model {
+        Some(PackageAssetReference::Library { model_id }) => {
+            let models = crate::utils::paths::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("com.chyin.kokoro")
+                .join("live2d_models");
+            Some(
+                ensure_profile_for_model(&models, model_id)
+                    .map(|profile| profile.cue_map)
+                    .unwrap_or_default(),
+            )
+        }
+        Some(PackageAssetReference::Package { .. }) => Some(HashMap::new()),
+        None => None,
+    }
+}
+
 fn read_expression_name(value: &Value) -> Option<String> {
     if let Some(name) = value.get("Name").and_then(Value::as_str) {
         let trimmed = name.trim();

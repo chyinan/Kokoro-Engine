@@ -35,6 +35,9 @@ type RateLimiter = Arc<RwLock<HashMap<ChatId, RateState>>>;
 pub(crate) enum SessionMode {
     #[default]
     Private,
+    Topic {
+        thread: i32,
+    },
     Fresh {
         id: String,
     },
@@ -50,6 +53,15 @@ impl SessionMode {
             Self::Private => (
                 character_id,
                 channel_id("telegram", character_id, &chat_id.0.to_string()),
+                true,
+            ),
+            Self::Topic { thread } => (
+                character_id,
+                channel_id(
+                    "telegram",
+                    character_id,
+                    &format!("{}:thread:{thread}", chat_id.0),
+                ),
                 true,
             ),
             Self::Fresh { id } => (character_id, channel_id("telegram", character_id, id), true),
@@ -69,8 +81,8 @@ struct Sessions {
 
 #[derive(Default)]
 struct SessionBindings {
-    private: HashMap<(ChatId, String), SessionMode>,
-    continued: HashMap<ChatId, SessionMode>,
+    private: HashMap<(ChatId, Option<i32>, String), SessionMode>,
+    continued: HashMap<(ChatId, Option<i32>), SessionMode>,
 }
 
 #[derive(Default)]
@@ -86,30 +98,52 @@ struct ReplyDeliveryEntry {
 }
 
 impl Sessions {
+    #[cfg(test)]
     async fn mode(&self, chat: ChatId, character: &str) -> SessionMode {
+        self.mode_for(chat, None, character).await
+    }
+    async fn mode_for(&self, chat: ChatId, thread: Option<i32>, character: &str) -> SessionMode {
         let modes = self.modes.read().await;
         modes
             .continued
-            .get(&chat)
-            .or_else(|| modes.private.get(&(chat, character.to_owned())))
+            .get(&(chat, thread))
+            .or_else(|| modes.private.get(&(chat, thread, character.to_owned())))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                thread.map_or(SessionMode::Private, |thread| SessionMode::Topic { thread })
+            })
     }
 
+    #[cfg(test)]
     async fn start_new(&self, chat: ChatId, character: &str) {
+        self.start_new_for(chat, None, character).await;
+    }
+
+    async fn start_new_for(&self, chat: ChatId, thread: Option<i32>, character: &str) {
         let mut modes = self.modes.write().await;
-        modes.continued.remove(&chat);
+        modes.continued.remove(&(chat, thread));
         modes.private.insert(
-            (chat, character.to_owned()),
+            (chat, thread, character.to_owned()),
             SessionMode::Fresh {
                 id: uuid::Uuid::new_v4().to_string(),
             },
         );
     }
 
+    #[cfg(test)]
     async fn continue_desktop(&self, chat: ChatId, character_id: String, conversation_id: String) {
+        self.continue_desktop_for(chat, None, character_id, conversation_id)
+            .await;
+    }
+    async fn continue_desktop_for(
+        &self,
+        chat: ChatId,
+        thread: Option<i32>,
+        character_id: String,
+        conversation_id: String,
+    ) {
         self.modes.write().await.continued.insert(
-            chat,
+            (chat, thread),
             SessionMode::Desktop {
                 character_id,
                 conversation_id,
@@ -149,6 +183,19 @@ impl Sessions {
 
 type TelegramDeliveryError = Box<dyn std::error::Error + Send + Sync>;
 
+async fn send_text(
+    bot: &Bot,
+    chat: ChatId,
+    thread: Option<teloxide::types::ThreadId>,
+    text: impl Into<String>,
+) -> Result<Message, teloxide::RequestError> {
+    let request = bot.send_message(chat, text);
+    match thread {
+        Some(thread) => request.message_thread_id(thread).await,
+        None => request.await,
+    }
+}
+
 trait TelegramReplyDelivery: Sync {
     fn text(
         &self,
@@ -159,6 +206,8 @@ trait TelegramReplyDelivery: Sync {
 }
 
 struct TelegramDelivery<'a> {
+    thread: Option<teloxide::types::ThreadId>,
+    speech: Option<&'a crate::tts::manager::TtsExecutionSnapshot>,
     bot: &'a Bot,
     chat_id: ChatId,
     app: &'a tauri::AppHandle,
@@ -168,24 +217,33 @@ struct TelegramDelivery<'a> {
 impl TelegramReplyDelivery for TelegramDelivery<'_> {
     async fn text(&self, text: String) -> Result<(), TelegramDeliveryError> {
         for chunk in split_message(&text) {
-            self.bot.send_message(self.chat_id, chunk).await?;
+            send_text(self.bot, self.chat_id, self.thread, chunk).await?;
         }
         Ok(())
     }
     async fn voice(&self, text: &str) {
-        let _ = send_voice_reply(self.bot, self.chat_id, text, self.app).await;
+        let _ = send_voice_reply(
+            self.bot,
+            self.chat_id,
+            self.thread,
+            text,
+            self.app,
+            self.speech,
+        )
+        .await;
     }
     async fn images(&self, _text: &str) {
         for image in &self.media.images {
             if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(&image.data_base64) {
-                if let Err(error) = self
-                    .bot
-                    .send_photo(
-                        self.chat_id,
-                        InputFile::memory(data).file_name(image.file_name.clone()),
-                    )
-                    .await
-                {
+                let request = self.bot.send_photo(
+                    self.chat_id,
+                    InputFile::memory(data).file_name(image.file_name.clone()),
+                );
+                let result = match self.thread {
+                    Some(thread) => request.message_thread_id(thread).await,
+                    None => request.await,
+                };
+                if let Err(error) = result {
                     tracing::warn!(target: "telegram", "Image delivery failed: {error}");
                 }
             }
@@ -416,9 +474,14 @@ async fn dispatch_message(
         state.count += 1;
         if state.count > RATE_LIMIT_MAX {
             tracing::info!(target: "telegram", "[Telegram] Rate limit exceeded for chat_id={}", chat_id.0);
-            bot.send_message(chat_id, "⚠️ Too many messages. Please wait a moment.")
-                .await
-                .ok();
+            send_text(
+                bot,
+                chat_id,
+                msg.thread_id,
+                "⚠️ Too many messages. Please wait a moment.",
+            )
+            .await
+            .ok();
             return Ok(());
         }
     }
@@ -468,7 +531,7 @@ async fn handle_command(
                 /new — Start a fresh conversation\n\
                 /status — Show current session info\n\n\
                 Just send a text or voice message to chat!";
-            if let Err(e) = bot.send_message(chat_id, text).await {
+            if let Err(e) = send_text(bot, chat_id, msg.thread_id, text).await {
                 tracing::error!(target: "telegram", "[Telegram] Failed to send /start reply: {}", e);
             }
         }
@@ -481,23 +544,32 @@ async fn handle_command(
                 .as_deref()
                 .filter(|id| !id.trim().is_empty())
                 .unwrap_or(&active);
-            sessions.start_new(chat_id, character).await;
-            bot.send_message(chat_id, "✨ New Telegram conversation started.")
-                .await?;
+            sessions
+                .start_new_for(chat_id, msg.thread_id.map(|id| id.0 .0), character)
+                .await;
+            send_text(
+                bot,
+                chat_id,
+                msg.thread_id,
+                "✨ New Telegram conversation started.",
+            )
+            .await?;
         }
         "/continue" => {
             let state = app.state::<AIOrchestrator>();
             let (character_id, conversation_id) = {
                 let _activation = state.enter_chat_turn()?;
-                let _selection = state.conversation_switch_lock.lock().await;
+                let _selection = state.selection.conversation_switch_lock.lock().await;
                 (
                     state.get_character_id().await,
-                    state.current_conversation_id.lock().await.clone(),
+                    state.selection.current_conversation_id.lock().await.clone(),
                 )
             };
             let Some(conversation_id) = conversation_id else {
-                bot.send_message(
+                send_text(
+                    bot,
                     chat_id,
+                    msg.thread_id,
                     "Open an existing desktop conversation before using /continue.",
                 )
                 .await?;
@@ -508,18 +580,30 @@ async fn handle_command(
                 .as_deref()
                 .is_some_and(|id| !id.trim().is_empty() && id != character_id)
             {
-                bot.send_message(
+                send_text(
+                    bot,
                     chat_id,
+                    msg.thread_id,
                     "Telegram is configured to use a different character.",
                 )
                 .await?;
                 return Ok(());
             }
             sessions
-                .continue_desktop(chat_id, character_id, conversation_id)
+                .continue_desktop_for(
+                    chat_id,
+                    msg.thread_id.map(|id| id.0 .0),
+                    character_id,
+                    conversation_id,
+                )
                 .await;
-            bot.send_message(chat_id, "🔗 Continuing the selected desktop conversation.")
-                .await?;
+            send_text(
+                bot,
+                chat_id,
+                msg.thread_id,
+                "🔗 Continuing the selected desktop conversation.",
+            )
+            .await?;
         }
         "/status" => {
             let state = app.state::<AIOrchestrator>();
@@ -529,7 +613,9 @@ async fn handle_command(
                 .as_deref()
                 .filter(|id| !id.trim().is_empty())
                 .unwrap_or(&active_character);
-            let mode = sessions.mode(chat_id, character).await;
+            let mode = sessions
+                .mode_for(chat_id, msg.thread_id.map(|id| id.0 .0), character)
+                .await;
             let (character, conversation, _) = mode.bind(chat_id, character);
             let history_len = sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM conversation_messages AS m JOIN conversations AS c ON m.conversation_id = c.id
@@ -539,8 +625,10 @@ async fn handle_command(
                 SessionMode::Desktop { .. } => "Desktop conversation",
                 _ => "Telegram conversation",
             };
-            bot.send_message(
+            send_text(
+                bot,
                 chat_id,
+                msg.thread_id,
                 format!("📊 Session: {mode_str}\n💬 History: {history_len} messages"),
             )
             .await?;
@@ -622,7 +710,10 @@ async fn reply_to_message(
         .as_deref()
         .filter(|id| !id.trim().is_empty())
         .unwrap_or(&active_character);
-    let mode = sessions.mode(msg.chat.id, preferred).await;
+    let mode = sessions
+        .mode_for(msg.chat.id, msg.thread_id.map(|id| id.0 .0), preferred)
+        .await;
+    drop(_guard);
     reply_bound(
         bot, msg, text, images, config, sessions, app, &mode, preferred, None,
     )
@@ -650,8 +741,10 @@ async fn reply_bound(
             .as_deref()
             .is_some_and(|id| !id.trim().is_empty() && id != character_id)
     {
-        bot.send_message(
+        send_text(
+            bot,
             chat_id,
+            msg.thread_id,
             "The configured character changed. Use /new or /continue to select a conversation.",
         )
         .await?;
@@ -667,7 +760,7 @@ async fn reply_bound(
     };
     let result = match result {
         Ok(result) if result.status.as_deref() == Some("cancelled") => {
-            bot.send_message(chat_id, "Chat cancelled.").await?;
+            send_text(bot, chat_id, msg.thread_id, "Chat cancelled.").await?;
             return Ok(());
         }
         Ok(result) => result,
@@ -678,7 +771,7 @@ async fn reply_bound(
             } else {
                 "Kokoro Engine could not complete this chat. Check the client for details."
             };
-            bot.send_message(chat_id, feedback).await?;
+            send_text(bot, chat_id, msg.thread_id, feedback).await?;
             return Ok(());
         }
     };
@@ -700,6 +793,8 @@ async fn reply_bound(
             images: !result.external_media.images.is_empty(),
         },
         &TelegramDelivery {
+            thread: msg.thread_id,
+            speech: result.speech_snapshot.as_deref(),
             bot,
             chat_id,
             app,
@@ -798,7 +893,10 @@ async fn handle_voice(
         .as_deref()
         .filter(|id| !id.trim().is_empty())
         .unwrap_or(&active);
-    let mode = sessions.mode(msg.chat.id, preferred).await;
+    let mode = sessions
+        .mode_for(msg.chat.id, msg.thread_id.map(|id| id.0 .0), preferred)
+        .await;
+    drop(_guard);
     let (character, _, _) = mode.bind(msg.chat.id, preferred);
     let input =
         prepare_telegram_media_input(&state, character, msg.chat.id.0, msg.id.0, || async {
@@ -861,7 +959,10 @@ async fn handle_photo(
         .as_deref()
         .filter(|id| !id.trim().is_empty())
         .unwrap_or(&active);
-    let mode = sessions.mode(msg.chat.id, preferred).await;
+    let mode = sessions
+        .mode_for(msg.chat.id, msg.thread_id.map(|id| id.0 .0), preferred)
+        .await;
+    drop(_guard);
     let (character, _, _) = mode.bind(msg.chat.id, preferred);
     let input =
         prepare_telegram_media_input(&state, character, msg.chat.id.0, msg.id.0, || async {
@@ -915,40 +1016,162 @@ async fn handle_photo(
 async fn send_voice_reply(
     bot: &Bot,
     chat_id: ChatId,
+    thread: Option<teloxide::types::ThreadId>,
     text: &str,
     app: &tauri::AppHandle,
+    speech: Option<&crate::tts::manager::TtsExecutionSnapshot>,
 ) -> HandlerResult {
     let tts_service = match app.try_state::<TtsService>() {
         Some(s) => s,
         None => {
-            bot.send_message(chat_id, "⚠️ The TTS service is unavailable.")
-                .await?;
+            send_text(bot, chat_id, thread, "⚠️ The TTS service is unavailable.").await?;
             return Ok(());
         }
     };
 
-    match tts_service.synthesize_text(text, None).await {
+    let _ = tts_service;
+    let Some(speech) = speech else {
+        return Ok(());
+    };
+    match speech.synthesize(text).await {
         Ok(audio_bytes) if !audio_bytes.is_empty() => {
             let (mime_type, extension) =
                 crate::commands::bot::audio_metadata_for_external(&audio_bytes);
             let input = InputFile::memory(audio_bytes).file_name(format!("reply.{extension}"));
             let result = if mime_type == "audio/ogg" {
-                bot.send_voice(chat_id, input).await.map(|_| ())
+                {
+                    let request = bot.send_voice(chat_id, input);
+                    match thread {
+                        Some(thread) => request.message_thread_id(thread).await,
+                        None => request.await,
+                    }
+                    .map(|_| ())
+                }
             } else {
-                bot.send_audio(chat_id, input).await.map(|_| ())
+                {
+                    let request = bot.send_audio(chat_id, input);
+                    match thread {
+                        Some(thread) => request.message_thread_id(thread).await,
+                        None => request.await,
+                    }
+                    .map(|_| ())
+                }
             };
             result?;
         }
         outcome => {
             tracing::warn!(target: "telegram", "Voice reply unavailable: {outcome:?}");
-            bot.send_message(
+            send_text(
+                bot,
                 chat_id,
+                thread,
                 "⚠️ Kokoro Engine could not synthesize the voice reply.",
             )
             .await?;
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) async fn verify_bound_session_submission(app: &tauri::AppHandle) {
+    let sessions = Sessions::default();
+    let state = app.state::<AIOrchestrator>();
+    let selected = state.selection.current_conversation_id.lock().await.clone();
+    let first = sessions
+        .mode_for(ChatId(901), Some(7), "test-character")
+        .await;
+    let old = submit_message(
+        app,
+        ChatId(901),
+        1,
+        "topic original",
+        vec![],
+        &first,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    sessions
+        .start_new_for(ChatId(901), Some(7), "test-character")
+        .await;
+    let fresh = sessions
+        .mode_for(ChatId(901), Some(7), "test-character")
+        .await;
+    let new = submit_message(
+        app,
+        ChatId(901),
+        2,
+        "topic new",
+        vec![],
+        &fresh,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    assert_ne!(old.conversation_id, new.conversation_id);
+    sessions
+        .continue_desktop_for(
+            ChatId(901),
+            Some(7),
+            "test-character".into(),
+            "ownership-a".into(),
+        )
+        .await;
+    let continued = sessions
+        .mode_for(ChatId(901), Some(7), "other-character")
+        .await;
+    let shared = submit_message(
+        app,
+        ChatId(901),
+        3,
+        "topic continued",
+        vec![],
+        &continued,
+        "other-character",
+    )
+    .await
+    .unwrap();
+    assert_eq!(shared.conversation_id, "ownership-a");
+    for (id, text) in [
+        (&old.conversation_id, "topic original"),
+        (&new.conversation_id, "topic new"),
+        (&shared.conversation_id, "topic continued"),
+    ] {
+        let actual: String = sqlx::query_scalar(
+            "SELECT conversation_id FROM conversation_messages WHERE role='user' AND content=?",
+        )
+        .bind(text)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(&actual, id);
+    }
+    let other_topic = sessions
+        .mode_for(ChatId(901), Some(8), "test-character")
+        .await
+        .bind(ChatId(901), "test-character")
+        .1;
+    let other_chat = sessions
+        .mode_for(ChatId(902), Some(7), "test-character")
+        .await
+        .bind(ChatId(902), "test-character")
+        .1;
+    assert_ne!(other_topic, old.conversation_id);
+    assert_ne!(other_chat, old.conversation_id);
+    let restart = Sessions::default()
+        .mode_for(ChatId(901), Some(7), "test-character")
+        .await
+        .bind(ChatId(901), "test-character")
+        .1;
+    assert_eq!(
+        restart, old.conversation_id,
+        "restart reconstructs platform private mapping, never desktop selection"
+    );
+    assert_eq!(
+        *state.selection.current_conversation_id.lock().await,
+        selected
+    );
 }
 
 #[cfg(test)]
@@ -975,11 +1198,7 @@ mod tests {
     impl RecordingMessageHandler {
         async fn new() -> Self {
             Self {
-                state: AIOrchestrator::new("sqlite::memory:")
-                    .await
-                    .unwrap()
-                    .fork_with_isolated_history()
-                    .await,
+                state: AIOrchestrator::new("sqlite::memory:").await.unwrap(),
                 sessions: Sessions::default(),
                 effects: std::sync::Mutex::new(EntryEffects::default()),
             }
@@ -1036,7 +1255,7 @@ mod tests {
             let modes = self.sessions.modes.read().await;
             assert!(modes.private.is_empty());
             assert!(modes.continued.is_empty());
-            assert!(self.state.history.lock().await.is_empty());
+            assert!(self.state.selection.history.lock().await.is_empty());
         }
     }
 
@@ -1347,6 +1566,33 @@ mod tests {
         )
         .await
     }
+    #[test]
+    fn topic_delivery_payloads_keep_the_origin_thread() {
+        use teloxide::requests::HasPayload;
+        let bot = Bot::new("fixture-token");
+        let chat = ChatId(901);
+        let thread = teloxide::types::ThreadId(teloxide::types::MessageId(7));
+        let text = bot.send_message(chat, "reply").message_thread_id(thread);
+        let voice = bot
+            .send_voice(chat, InputFile::memory(vec![1u8]))
+            .message_thread_id(thread);
+        let audio = bot
+            .send_audio(chat, InputFile::memory(vec![2u8]))
+            .message_thread_id(thread);
+        let photo = bot
+            .send_photo(chat, InputFile::memory(vec![3u8]))
+            .message_thread_id(thread);
+        for payload in [
+            serde_json::to_value(text.payload_ref()).unwrap(),
+            serde_json::to_value(voice.payload_ref()).unwrap(),
+            serde_json::to_value(audio.payload_ref()).unwrap(),
+            serde_json::to_value(photo.payload_ref()).unwrap(),
+        ] {
+            assert_eq!(payload["chat_id"], 901);
+            assert_eq!(payload["message_thread_id"], 7);
+        }
+    }
+
     #[tokio::test]
     async fn new_rotates_only_its_character_and_chat_while_continue_stays_explicitly_bound() {
         let sessions = Sessions::default();
@@ -1453,8 +1699,7 @@ mod tests {
                 let state = AIOrchestrator::new("sqlite::memory:")
                     .await
                     .unwrap()
-                    .fork_with_isolated_history()
-                    .await;
+                    .clone();
                 let sessions = Sessions::default();
                 let delivery = RecordingDelivery::default();
                 let generations = std::sync::atomic::AtomicUsize::new(0);
@@ -1513,7 +1758,7 @@ mod tests {
                 if fail_save {
                     // A drifted second STT result must not be attempted, even
                     // while the final SQLite write is still failing.
-                    let fresh = state.fork_with_isolated_history().await;
+                    let fresh = state.clone();
                     let replay = prepare_telegram_media_input(&fresh, "default", 10, 1, || async {
                         preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         Ok(Some(TelegramPreparedInput {
@@ -1541,7 +1786,7 @@ mod tests {
                         .unwrap();
                 }
                 for _ in 0..2 {
-                    let fresh = state.fork_with_isolated_history().await;
+                    let fresh = state.clone();
                     let replay = prepare_telegram_media_input(&fresh, "default", 10, 1, || async {
                         preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         Err(std::io::Error::other("STT unavailable / Telegram file expired").into())
@@ -1600,8 +1845,7 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         // Download/network failure and unrecognized/unavailable STT produce no
         // user row, so the same platform message can be prepared successfully.
         assert!(
@@ -1650,8 +1894,7 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         let sessions = Sessions::default();
         sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES ('other', 'Other', '', '', 'test', 1, 1)")
             .execute(&state.db).await.unwrap();
@@ -1744,8 +1987,7 @@ mod tests {
             let state = AIOrchestrator::new("sqlite::memory:")
                 .await
                 .unwrap()
-                .fork_with_isolated_history()
-                .await;
+                .clone();
             // Replay delivery must not depend on whether memory extraction ran.
             state.set_memory_enabled(false).await;
             let sessions = Sessions::default();
@@ -1807,8 +2049,7 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         let sessions = Sessions::default();
         let delivery = RecordingDelivery::default();
         delivery
@@ -1875,15 +2116,14 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         let sessions = Sessions::default();
         sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES ('memory-bot', 'Bot', '', '', 'test', 1, 1)")
             .execute(&state.db).await.unwrap();
         let mut extractions = 0;
         let mut consolidations = 0;
         for id in 1..=20 {
-            let fork = state.fork_with_isolated_history().await;
+            let fork = state.clone();
             fork.apply_character_profile("memory-bot").await.unwrap();
             let text = ["typed prompt", "photo caption", "voice transcript"][id as usize % 3];
             let turn = begin_telegram_turn(&fork, "memory-bot", 10, id, text, false, &sessions)
@@ -1904,7 +2144,7 @@ mod tests {
         }
         assert_eq!((extractions, consolidations), (4, 1));
         start_new_telegram_session(&state, &sessions, "memory-bot", ChatId(10)).await;
-        let fork = state.fork_with_isolated_history().await;
+        let fork = state.clone();
         let turn = begin_telegram_turn(&fork, "memory-bot", 10, 21, "new prompt", false, &sessions)
             .await
             .unwrap();
@@ -1931,8 +2171,7 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         sqlx::query(
             "CREATE TRIGGER reject_telegram_user BEFORE INSERT ON conversation_messages
             WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'Telegram user fault'); END",
@@ -1955,8 +2194,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
-        assert!(state.history.lock().await.is_empty());
-        assert!(state.current_conversation_id.lock().await.is_none());
+        assert!(state.selection.history.lock().await.is_empty());
+        assert!(state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -1965,14 +2209,14 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         let first =
             begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions)
                 .await
                 .unwrap();
         assert!(first.previous_reply.is_none());
         state.clear_history().await;
+        sessions.start_new(ChatId(10), "default").await;
         let second =
             begin_telegram_turn(&state, "default", 10, 2, "second question", true, &sessions)
                 .await
@@ -2028,6 +2272,9 @@ mod tests {
         let wrong: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE role = 'assistant' AND conversation_id = ?")
             .bind(&second.target.conversation_id).fetch_one(&state.db).await.unwrap();
         assert_eq!(wrong, 0);
-        assert_eq!(state.history.lock().await.len(), 1);
+        assert!(
+            state.selection.history.lock().await.is_empty(),
+            "platform session rotation does not edit the desktop projection"
+        );
     }
 }

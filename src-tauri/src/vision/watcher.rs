@@ -12,7 +12,7 @@ use crate::vision::context::{AnalysisDispatch, VisionFrame};
 use reqwest::Client;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
 /// Shared handle to control the watcher loop.
@@ -268,7 +268,7 @@ async fn run_analysis_chain(
         }
 
         if should_emit_proactive && completion.recorded {
-            emit_proactive_vision_comment(&app_handle);
+            emit_proactive_vision_comment(&app_handle).await;
         }
 
         match completion.next_frame {
@@ -278,13 +278,27 @@ async fn run_analysis_chain(
     }
 }
 
-fn emit_proactive_vision_comment(app_handle: &AppHandle) {
+async fn emit_proactive_vision_comment(app_handle: &AppHandle) {
     tracing::info!(target: "vision", "Vision screen-comment trigger fired");
-    crate::chat::application::submit_proactive(app_handle.clone(), build_proactive_vision_instruction().into());
+    let scope = app_handle
+        .state::<crate::ai::context::AIOrchestrator>()
+        .desktop_admission_scope()
+        .await;
+    let Ok(scope) = scope else {
+        return;
+    };
+    let Some(request_id) = crate::chat::application::submit_proactive_bound(
+        app_handle.clone(),
+        build_proactive_vision_instruction().into(),
+        scope.clone(),
+    ) else {
+        return;
+    };
     let _ = app_handle.emit(
         "proactive-trigger",
         serde_json::json!({
             "trigger": "vision",
+            "character_id":scope.0,"conversation_id":scope.1,"client_request_id":request_id,
             "instruction": build_proactive_vision_instruction(),
         }),
     );

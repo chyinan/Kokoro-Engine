@@ -59,6 +59,21 @@ impl MemoryState {
 pub(crate) struct ExternalMemory(Mutex<MemoryState>);
 
 impl ExternalMemory {
+    pub fn remove_conversation(&self, conversation: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .conversations
+            .retain(|(_, id), _| id != conversation);
+    }
+    pub fn remove_character(&self, character: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .conversations
+            .retain(|(id, _), _| id != character);
+    }
+
     /// Shared memory-switch epoch, also used to fence deferred desktop work.
     pub fn epoch(&self) -> u64 {
         let mut state = self.0.lock().unwrap();

@@ -1,3 +1,4 @@
+use super::ownership_test::verify_state_ownership;
 use crate::actions::registry::{ActionError, ActionHandler, ActionParam, ActionPermissionLevel};
 use crate::actions::{tool_settings::ToolSettings, ActionContext, ActionRegistry, ActionResult};
 use crate::ai::context::AIOrchestrator;
@@ -32,6 +33,30 @@ use warp::Filter;
 type FixtureStream<T> = Pin<Box<dyn Stream<Item = Result<T, String>> + Send>>;
 
 struct CountToolExecutions(Arc<AtomicUsize>, bool);
+
+#[derive(Default)]
+pub(super) struct ToolScopes(pub std::sync::Mutex<Vec<ActionContext>>);
+struct RecordOwner(Arc<ToolScopes>);
+#[async_trait::async_trait]
+impl ActionHandler for RecordOwner {
+    fn name(&self) -> &str {
+        "record_owner"
+    }
+    fn description(&self) -> &str {
+        "Record bound identity"
+    }
+    fn parameters(&self) -> Vec<ActionParam> {
+        vec![]
+    }
+    async fn execute(
+        &self,
+        _: HashMap<String, String>,
+        context: ActionContext,
+    ) -> Result<ActionResult, ActionError> {
+        self.0 .0.lock().unwrap().push(context);
+        Ok(ActionResult::ok("owner recorded"))
+    }
+}
 
 #[async_trait::async_trait]
 impl ActionHandler for CountToolExecutions {
@@ -68,10 +93,10 @@ impl ActionHandler for CountToolExecutions {
 }
 
 #[derive(Default)]
-struct ControlledProvider {
-    prompts: Mutex<Vec<Value>>,
+pub(super) struct ControlledProvider {
+    pub(super) prompts: Mutex<Vec<Value>>,
     entered_pending: Notify,
-    finish_pending: Notify,
+    pub(super) finish_pending: Notify,
 }
 
 #[async_trait::async_trait]
@@ -138,6 +163,55 @@ impl LlmProvider for ControlledProvider {
             .rev()
             .find(|message| message["role"] == "user");
         let last_user = last_user.map(Value::to_string).unwrap_or_default();
+        if last_user.contains("[owner-approval]") {
+            let messages = payload.as_array().unwrap();
+            let user_index = messages
+                .iter()
+                .rposition(|message| message["role"] == "user")
+                .unwrap();
+            let continued = messages[user_index + 1..]
+                .iter()
+                .any(|message| message["role"] == "tool");
+            self.prompts.lock().unwrap().push(payload);
+            let events = if continued {
+                vec![LlmStreamEvent::Text("owner action completed".into())]
+            } else {
+                vec![
+                    LlmStreamEvent::Text("owner action pending".into()),
+                    LlmStreamEvent::ToolCall(LlmToolCall {
+                        id: "owner-write".into(),
+                        name: "owner_write".into(),
+                        args: HashMap::new(),
+                    }),
+                ]
+            };
+            return Ok(Box::pin(stream::iter(events.into_iter().map(Ok))));
+        }
+        if last_user.contains("[ownership-tools]") {
+            let messages = payload.as_array().unwrap();
+            let user_index = messages
+                .iter()
+                .rposition(|message| message["role"] == "user")
+                .unwrap();
+            let continued = messages[user_index + 1..]
+                .iter()
+                .any(|message| message["role"] == "tool");
+            self.prompts.lock().unwrap().push(payload);
+            if !continued {
+                self.entered_pending.notify_one();
+                self.finish_pending.notified().await;
+            }
+            let event = if continued {
+                LlmStreamEvent::Text("owned continuation".into())
+            } else {
+                LlmStreamEvent::ToolCall(LlmToolCall {
+                    id: "owned-call".into(),
+                    name: "record_owner".into(),
+                    args: HashMap::new(),
+                })
+            };
+            return Ok(Box::pin(stream::iter([Ok(event)])));
+        }
         if last_user.contains("[hidden-scope]") {
             let result_count = payload
                 .as_array()
@@ -245,7 +319,7 @@ async fn webhook_body(app: &tauri::AppHandle, body: Value) -> (u16, Value) {
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-async fn until_request_started(provider: &ControlledProvider) {
+pub(super) async fn until_request_started(provider: &ControlledProvider) {
     tokio::time::timeout(Duration::from_secs(5), provider.entered_pending.notified())
         .await
         .unwrap();
@@ -268,13 +342,16 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let now = "2026-11-14T00:00:00Z";
     sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('desktop', 'test-character', 'desktop', ?, ?)")
         .bind(now).bind(now).execute(&state.db).await.unwrap();
-    *state.current_conversation_id.lock().await = Some("desktop".into());
+    *state.selection.current_conversation_id.lock().await = Some("desktop".into());
     let provider = Arc::new(ControlledProvider::default());
     let mut registry = ActionRegistry::new();
     crate::actions::builtin::register_builtins(&mut registry);
     let tool_executions = Arc::new(AtomicUsize::new(0));
     registry.register(CountToolExecutions(tool_executions.clone(), false));
     registry.register(CountToolExecutions(tool_executions.clone(), true));
+    let scopes = Arc::new(ToolScopes::default());
+    registry.register(RecordOwner(scopes.clone()));
+    handle.manage(scopes);
     let runtime = Arc::new(ChatRuntimeState::default());
     let cancellation = Arc::new(TurnCancellationState::default());
     let imagegen = ImageGenService::init_from_config(&Default::default()).await;
@@ -284,6 +361,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     handle.manage(Arc::new(PendingToolApprovalState::default()));
     handle.manage(ActivationCoordinator::default());
     handle.manage(imagegen);
+    handle.manage(crate::tts::TtsService::new());
     handle.manage(WindowSizeState::default());
     handle.manage(crate::vision::watcher::VisionWatcher::new(
         Default::default(),
@@ -344,7 +422,12 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         assert!(continuation.contains("builtin__get_time"));
     }
     assert_eq!(
-        state.current_conversation_id.lock().await.as_deref(),
+        state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref(),
         Some("desktop")
     );
     assert_ne!(
@@ -639,7 +722,12 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         .to_string()
         .contains(text));
     assert_eq!(
-        state.current_conversation_id.lock().await.as_deref(),
+        state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref(),
         Some("desktop")
     );
 
@@ -824,6 +912,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     verify_external_tool_only_replies(&handle, &provider, &tool_executions).await;
     verify_audio_admission(&handle, &provider).await;
     verify_hidden_turn_scope(&handle, &tool_executions).await;
+    verify_state_ownership(&handle, &provider, temp.path()).await;
 }
 
 /// Exercise persisted identity and memory metadata through the real production
@@ -894,7 +983,15 @@ async fn verify_persisted_external_contracts(
         tools.load(Ordering::Relaxed),
     );
     let recovered = webhook_body(app, pending).await;
-    if recovered != first {
+    assert_ne!(
+        recovered.1["request_id"], first.1["request_id"],
+        "different logical inputs keep distinct request identities"
+    );
+    if recovered.0 != first.0
+        || recovered.1["reply"] != first.1["reply"]
+        || recovered.1["character_id"] != first.1["character_id"]
+        || recovered.1["conversation_id"] != first.1["conversation_id"]
+    {
         defects.push(format!(
             "P3 save recovery differs: {recovered:?} versus {first:?}"
         ));
@@ -1039,6 +1136,7 @@ async fn verify_persisted_external_contracts(
         );
     }
     let target = ConversationTarget {
+        require_character: false,
         character_id: "test-character".into(),
         conversation_id: "desktop".into(),
         create: false,
@@ -1125,6 +1223,7 @@ async fn verify_persisted_external_contracts(
     }
     let webhook_conversation: String = sqlx::query_scalar("SELECT conversation_id FROM conversation_messages WHERE role='user' AND content='[formatted-replay]' ORDER BY id LIMIT 1").fetch_one(&state.db).await.unwrap();
     let webhook_target = ConversationTarget {
+        require_character: false,
         conversation_id: webhook_conversation,
         ..target
     };
@@ -1147,7 +1246,7 @@ async fn verify_persisted_external_contracts(
 
     // Return this shared fixture to the initial state for the existing scenarios.
     state.set_memory_enabled(false).await;
-    state.history.lock().await.clear();
+    state.selection.history.lock().await.clear();
     state.set_memory_history_boundary(0).await;
     runtime.forget_completed_for_restart_test();
     sqlx::query("DELETE FROM conversation_messages")
@@ -1158,10 +1257,7 @@ async fn verify_persisted_external_contracts(
         .execute(&state.db)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM characters WHERE id IN ('test-character','other-character')")
-        .execute(&state.db)
-        .await
-        .unwrap();
+    // Characters remain real owners for subsequent shared channel scenarios.
     provider.prompts.lock().unwrap().clear();
     tools.store(0, Ordering::Relaxed);
 }
@@ -1447,7 +1543,7 @@ async fn verify_external_failure_memory_origin(
         contents(state.get_recent_memory_history(20).await),
         baseline
     );
-    // Exercise the in-memory fallback independently of the SQL boundary.
+    // A stale UI projection must not replace the committed conversation memory window.
     state
         .sync_history_from_rows(vec![
             ("user".to_string(), "fallback desktop".to_string(), None),
@@ -1457,7 +1553,7 @@ async fn verify_external_failure_memory_origin(
     state.set_memory_history_boundary(0).await;
     assert_eq!(
         contents(state.get_recent_memory_history(20).await),
-        vec![("user".into(), "fallback desktop".into())]
+        baseline
     );
 }
 
@@ -1527,6 +1623,7 @@ async fn verify_shared_native_memory_origin(
     let desktop_user = desktop.user_message_id.unwrap();
     let external_user = external.user_message_id.unwrap();
     let target = crate::chat::persistence::ConversationTarget {
+        require_character: false,
         character_id: "test-character".into(),
         conversation_id: "desktop".into(),
         create: false,
@@ -1561,6 +1658,7 @@ async fn verify_shared_native_memory_origin(
             // Real old batches used user_message_id and builtin/mcp tool source.
             sqlx::query("UPDATE conversation_messages SET metadata=json_remove(metadata,'$.external_user_message_id') WHERE conversation_id='desktop' AND json_extract(metadata,'$.user_message_id')=? AND json_extract(metadata,'$.type') IN ('assistant_tool_calls','tool_result')").bind(external_user).execute(&state.db).await.unwrap();
             for message in state
+                .selection
                 .history
                 .lock()
                 .await
@@ -1616,6 +1714,7 @@ async fn verify_shared_native_memory_origin(
     }
     // The user anchor can be outside the rolling in-memory window.
     let recent: Vec<_> = state
+        .selection
         .history
         .lock()
         .await
@@ -1649,9 +1748,9 @@ async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsi
     for (approve, fail_save) in [(false, false), (true, false), (true, true)] {
         settings.write().await.max_permission_level = ActionPermissionLevel::Safe;
         let generation = {
-            let _selection = state.conversation_switch_lock.lock().await;
-            *state.current_conversation_id.lock().await = None;
-            state.history.lock().await.clear();
+            let _selection = state.selection.conversation_switch_lock.lock().await;
+            *state.selection.current_conversation_id.lock().await = None;
+            state.selection.history.lock().await.clear();
             state.bump_conversation_generation()
         };
         let request = ChatRequest {
@@ -1707,14 +1806,17 @@ async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsi
             .find(|turn| turn.client_request_id == request.client_request_id.as_deref().unwrap())
             .unwrap();
         // Tool rows now join the final atomic write: until commit, a hidden
-        // turn keeps its original None scope for streaming, approval and Stop.
+        // turn owns a reserved ID, while its admission generation projects into the empty view.
         assert!(view.conversation_id.is_none());
         assert_eq!(view.version.generation, generation);
         assert_eq!(
             turn.character_id.as_deref(),
             Some(view.character_id.as_str())
         );
-        assert_eq!(turn.conversation_id, view.conversation_id);
+        assert!(turn
+            .conversation_id
+            .as_ref()
+            .is_some_and(|id| !id.is_empty()));
         assert_eq!(turn.conversation_generation, Some(view.version.generation));
         assert_eq!(turn.status, "streaming");
         assert!(turn.text.contains("Waiting for approval"));
@@ -1746,7 +1848,12 @@ async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsi
             .unwrap();
         let result = if fail_save {
             assert!(matches!(outcome, Err(KokoroError::ChatPersistence(_))));
-            assert!(state.current_conversation_id.lock().await.is_none());
+            assert!(state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .is_none());
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
                 .fetch_one(&state.db)
                 .await
@@ -1818,7 +1925,12 @@ async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsi
                 result.text
             );
         } else {
-            assert!(state.current_conversation_id.lock().await.is_none());
+            assert!(state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .is_none());
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
                 .fetch_one(&state.db)
                 .await

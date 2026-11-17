@@ -9,7 +9,6 @@ use crate::error::KokoroError;
 use crate::imagegen::ImageGenService;
 use crate::stt::{AudioSource, SttService};
 use crate::telegram::TelegramService;
-use crate::tts::TtsService;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
@@ -783,6 +782,11 @@ pub async fn get_bot_status(
 
 #[derive(Debug, Serialize)]
 struct BotReply {
+    character_id: String,
+    conversation_id: String,
+    request_id: String,
+    #[serde(skip)]
+    speech_snapshot: Option<Arc<crate::tts::manager::TtsExecutionSnapshot>>,
     reply: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     translation: Option<String>,
@@ -838,7 +842,6 @@ struct BotRequestBinding {
     conversation_id: String,
     request_id: String,
     previous_request_ids: Vec<String>,
-    _guard: crate::ai::context::ChatTurnGuard,
 }
 
 impl BotRequestBinding {
@@ -849,7 +852,7 @@ impl BotRequestBinding {
         conversation_key: Option<&str>,
         request_id: Option<&str>,
     ) -> Result<Self, KokoroError> {
-        let guard = state
+        let _guard = state
             .enter_chat_turn()
             .map_err(|e| KokoroError::Chat(format!("Character activation is in progress: {e}")))?;
         let character_id = match character_id.filter(|id| !id.trim().is_empty()) {
@@ -895,7 +898,6 @@ impl BotRequestBinding {
             request_id,
             previous_request_ids,
             character_id,
-            _guard: guard,
         })
     }
 }
@@ -1017,6 +1019,10 @@ async fn submit_bound_bot_reply(
     }
     let images = response.external_media.images;
     Ok(BotReply {
+        character_id: binding.character_id.clone(),
+        conversation_id: response.conversation_id,
+        request_id: binding.request_id.clone(),
+        speech_snapshot: response.speech_snapshot,
         reply: response.text,
         translation: response.translation,
         generated_image_count: images.len(),
@@ -1224,22 +1230,24 @@ async fn transcribe_bot_audio(
 async fn synthesize_bot_audio(
     app: &tauri::AppHandle,
     text: &str,
+    speech: Option<&crate::tts::manager::TtsExecutionSnapshot>,
 ) -> Result<Option<Vec<u8>>, String> {
-    let Some(tts_service) = app.try_state::<TtsService>() else {
-        return Err("The TTS service is unavailable.".into());
+    let _ = app;
+    let Some(speech) = speech else {
+        return Ok(None);
     };
-    tts_service
-        .synthesize_text(text, None)
+    speech
+        .synthesize(text)
         .await
-        .map(|audio| if audio.is_empty() { None } else { Some(audio) })
-        .map_err(|error| format!("TTS synthesis error: {}", error))
+        .map(|audio| (!audio.is_empty()).then_some(audio))
 }
 
 async fn generate_bot_images(
     app: &tauri::AppHandle,
     platform: &str,
-    prompts: &[String],
+    reply: &BotReply,
 ) -> Vec<GeneratedBotImage> {
+    let prompts = &reply.image_prompts;
     if prompts.is_empty() {
         return Vec::new();
     }
@@ -1257,7 +1265,11 @@ async fn generate_bot_images(
         match imagegen.generate(prompt.clone(), None, None, None).await {
             Ok(result) => match tokio::fs::read(&result.image_url).await {
                 Ok(data) => {
-                    let _ = app.emit("imagegen:done", &result);
+                    let mut event = serde_json::to_value(&result).unwrap_or_default();
+                    event["character_id"] = reply.character_id.clone().into();
+                    event["conversation_id"] = reply.conversation_id.clone().into();
+                    event["client_request_id"] = reply.request_id.clone().into();
+                    let _ = app.emit("imagegen:done", event);
                     let file_name = Path::new(&result.image_url)
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -1306,7 +1318,7 @@ async fn attach_generated_images_to_reply(
     platform: &str,
     reply: &mut BotReply,
 ) {
-    let images = generate_bot_images(app, platform, &reply.image_prompts).await;
+    let images = generate_bot_images(app, platform, reply).await;
     let new_images = images
         .into_iter()
         .map(bot_reply_image_from_generated)
@@ -1319,7 +1331,7 @@ async fn attach_voice_reply_to_webhook(app: &tauri::AppHandle, reply: &mut BotRe
     if reply.reply.is_empty() {
         return;
     }
-    match synthesize_bot_audio(app, &reply.reply).await {
+    match synthesize_bot_audio(app, &reply.reply, reply.speech_snapshot.as_deref()).await {
         Ok(Some(data)) => {
             let (mime_type, extension) = audio_metadata(&data);
             reply.audio = Some(BotReplyAudio {
@@ -2382,7 +2394,7 @@ async fn handle_discord_message(
                     }
                 }
             }
-            let generated_images = generate_bot_images(app, "discord", &reply.image_prompts).await;
+            let generated_images = generate_bot_images(app, "discord", &reply).await;
             for image in generated_images {
                 if let Err(error) = send_discord_file_message(
                     client,
@@ -2399,7 +2411,9 @@ async fn handle_discord_message(
                 }
             }
             if cfg.send_voice_reply {
-                match synthesize_bot_audio(app, &reply.reply).await {
+                match synthesize_bot_audio(app, &reply.reply, reply.speech_snapshot.as_deref())
+                    .await
+                {
                     Ok(Some(audio)) => {
                         if let Err(error) = send_discord_file_message(
                             client,
@@ -2517,8 +2531,7 @@ mod tests {
                 let state = AIOrchestrator::new("sqlite::memory:")
                     .await
                     .unwrap()
-                    .fork_with_isolated_history()
-                    .await;
+                    .clone();
                 let binding = BotRequestBinding::new(
                     &state,
                     platform,
@@ -2614,8 +2627,7 @@ mod tests {
         let state = AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await;
+            .clone();
         let binding = BotRequestBinding::new(
             &state,
             "webhook",

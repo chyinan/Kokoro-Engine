@@ -169,6 +169,43 @@ impl ChatRuntimeState {
             .map(|(created, outcome, _)| (created, outcome))
     }
 
+    pub(crate) fn desktop_replay(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Option<watch::Receiver<Option<Outcome>>>, String> {
+        let Some(id) = request.client_request_id.as_deref() else {
+            return Ok(None);
+        };
+        let journal = self.0.lock().unwrap();
+        let fingerprint = request.fingerprint(ChatPolicy::Desktop)?;
+        if let Some((original, outcome)) = journal.retired.get(id) {
+            if original != &fingerprint {
+                return Err(
+                    "chat_request_conflict: client_request_id was reused with different input"
+                        .into(),
+                );
+            }
+            return match outcome {
+                RetiredOutcome::Terminal(outcome) => {
+                    Ok(Some(watch::channel(Some(outcome.as_ref().clone())).1))
+                }
+                RetiredOutcome::SavedExternalReply => Err(
+                    "chat_request_conflict: retired request belongs to an external channel".into(),
+                ),
+            };
+        }
+        if let Some(entry) = journal.entries.get(id) {
+            if entry.fingerprint != fingerprint {
+                return Err(
+                    "chat_request_conflict: client_request_id was reused with different input"
+                        .into(),
+                );
+            }
+            return Ok(Some(entry.outcome.subscribe()));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn begin_with_policy(
         &self,
         request: &ChatRequest,
@@ -240,7 +277,10 @@ impl ChatRuntimeState {
                 .map(|(id, _)| id.clone());
             if let Some(id) = oldest {
                 if let Some(entry) = journal.entries.remove(&id) {
-                    let outcome = entry.outcome.borrow().clone().expect("terminal entry");
+                    let mut outcome = entry.outcome.borrow().clone().expect("terminal entry");
+                    if let Ok(response) = &mut outcome {
+                        response.speech_snapshot = None;
+                    }
                     // A recoverable external save/preparation failure must still
                     // reach SQLite after journal eviction. Started generations
                     // remain protected by the persisted user identity.
@@ -395,11 +435,16 @@ impl ChatRuntimeState {
     }
 
     pub fn turn_scope(&self, id: &str) -> Option<ChatTurnSnapshot> {
-        self.0
-            .lock()
-            .unwrap()
+        let journal = self.0.lock().unwrap();
+        journal
             .entries
             .get(id)
+            .or_else(|| {
+                journal
+                    .entries
+                    .values()
+                    .find(|entry| entry.snapshot.turn_id.as_deref() == Some(id))
+            })
             .map(|entry| entry.snapshot.clone())
     }
 
@@ -757,7 +802,32 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
     name: &str,
     payload: S,
 ) -> Result<(), tauri::Error> {
-    if let Ok(value) = serde_json::to_value(&payload) {
+    let mut emitted = serde_json::to_value(&payload).unwrap_or(Value::Null);
+    if let Some(runtime) = app.try_state::<Arc<ChatRuntimeState>>() {
+        if let Some(id) = emitted["client_request_id"]
+            .as_str()
+            .or_else(|| emitted["turn_id"].as_str())
+        {
+            if let Some(scope) = runtime.turn_scope(id) {
+                emitted["character_id"] = scope.character_id.into();
+                if emitted.get("conversation_id").is_none_or(Value::is_null) {
+                    emitted["conversation_id"] = scope.conversation_id.into();
+                }
+                emitted["client_request_id"] = scope.client_request_id.into();
+                if emitted
+                    .get("conversation_generation")
+                    .is_none_or(Value::is_null)
+                {
+                    emitted["conversation_generation"] = scope.conversation_generation.into();
+                }
+                if emitted.get("turn_id").is_none() {
+                    emitted["turn_id"] = scope.turn_id.into();
+                }
+            }
+        }
+    }
+    {
+        let value = emitted.clone();
         let runtime = app.try_state::<Arc<ChatRuntimeState>>();
         let queue = app.try_state::<ModScriptQueue>();
         if let Some(snapshot) = relay_chat_event(
@@ -769,7 +839,7 @@ pub async fn emit_chat_event<S: Serialize + Clone>(
             let _ = app.emit("chat-runtime-changed", snapshot);
         }
     }
-    if let Err(error) = app.emit(name, payload) {
+    if let Err(error) = app.emit(name, emitted) {
         tracing::warn!(target: "chat", "event {name} delivery failed: {error}");
     }
     Ok(())
@@ -826,9 +896,9 @@ pub async fn get_chat_view(
             return Ok(None);
         }
     }
-    let _selection = state.conversation_switch_lock.lock().await;
+    let _selection = state.selection.conversation_switch_lock.lock().await;
     let character_id = state.character_id.lock().await.clone();
-    let conversation_id = state.current_conversation_id.lock().await.clone();
+    let conversation_id = state.selection.current_conversation_id.lock().await.clone();
     // Capture the journal before SQLite so any completed turn included in this
     // revision has already persisted its history before the read starts.
     let (revision, turns) = runtime.desktop_snapshots(conversation_id.as_deref());
@@ -876,12 +946,13 @@ pub async fn get_chat_view(
 }
 
 /// One execution owner schedules speech; restoring a view never synthesizes.
-pub fn speak_completed_turn(
+pub(crate) fn speak_completed_turn(
     app: tauri::AppHandle,
     client_request_id: String,
     turn_id: String,
     text: String,
     speech: crate::characters::activation::ResolvedTts,
+    snapshot: Option<Arc<crate::tts::manager::TtsExecutionSnapshot>>,
 ) {
     use crate::characters::activation::ResolvedTtsMode;
     let text = speech_text(&text);
@@ -893,26 +964,19 @@ pub fn speak_completed_turn(
     {
         return;
     }
+    // Disabled/unconfigured speech stays disabled for this turn. A configured
+    // but unavailable provider is represented by an explicit failed snapshot.
+    let Some(snapshot) = snapshot else {
+        return;
+    };
     tauri::async_runtime::spawn(async move {
-        let params = crate::tts::TtsParams {
-            voice: speech.voice,
-            speed: speech.speed.map(|value| value as f32),
-            pitch: speech.pitch.map(|value| value as f32),
-            emotion: None,
-            required_capabilities: None,
-            extra_params: None,
+        let Some(tts) = app.try_state::<crate::tts::TtsService>() else {
+            return;
         };
-        let tts = app.state::<crate::tts::TtsService>();
-        if let Err(error) = tts
-            .speak(
-                app.clone(),
-                text,
-                speech.provider_id,
-                Some(params),
-                format!("chat_{turn_id}"),
-            )
-            .await
-        {
+        let result = tts
+            .speak_snapshot(app.clone(), text, format!("chat_{turn_id}"), snapshot)
+            .await;
+        if let Err(error) = result {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");
             let runtime = app.state::<Arc<ChatRuntimeState>>();
             if let Some(snapshot) =
@@ -930,6 +994,7 @@ mod tests {
     fn pending_with_memory_bytes(bytes: usize) -> PendingChatSave {
         PendingChatSave {
             target: super::super::persistence::ConversationTarget {
+                require_character: false,
                 character_id: "character-a".into(),
                 conversation_id: "conversation-a".into(),
                 create: false,
@@ -942,10 +1007,13 @@ mod tests {
             text: "answer".into(),
             has_assistant_text: true,
             speech: None,
+            speech_snapshot: None,
             post_commit: super::super::post_commit::DesktopPostCommit {
+                scope: None,
+                request_id: "request".into(),
+                turn_id: "turn".into(),
                 character_id: "character-a".into(),
                 conversation_id: Some("conversation-a".into()),
-                generation: 0,
                 database_generation: 0,
                 provider: Arc::new(crate::llm::provider::OpenAIProvider::new(
                     "fixture".into(),
@@ -1045,14 +1113,14 @@ mod tests {
         let journal = ChatRuntimeState::default();
         sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('a', 'default', 'now', 'now')")
             .execute(&state.db).await.unwrap();
-        *state.current_conversation_id.lock().await = Some("a".into());
+        *state.selection.current_conversation_id.lock().await = Some("a".into());
         let initial = get_chat_view(&state, &journal, None)
             .await
             .unwrap()
             .unwrap();
 
         // A matched version must return without contending for the selection lock.
-        let guard = state.conversation_switch_lock.lock().await;
+        let guard = state.selection.conversation_switch_lock.lock().await;
         let idle = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             get_chat_view(&state, &journal, Some(initial.version)),
@@ -1118,7 +1186,7 @@ mod tests {
         let journal = ChatRuntimeState::default();
         sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('a', 'default', 'now', 'now')")
             .execute(&state.db).await.unwrap();
-        *state.current_conversation_id.lock().await = Some("a".into());
+        *state.selection.current_conversation_id.lock().await = Some("a".into());
         sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at) VALUES (1, 'a', 'user', 'device A', '{\"client_request_id\":\"a\"}', 'now')")
             .execute(&state.db).await.unwrap();
         let mut original = request("a");

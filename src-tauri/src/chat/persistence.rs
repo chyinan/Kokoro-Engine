@@ -58,6 +58,7 @@ pub(crate) fn validate_user_input(text: &str) -> Result<(), KokoroError> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ConversationTarget {
+    pub require_character: bool,
     pub character_id: String,
     pub conversation_id: String,
     pub create: bool,
@@ -183,6 +184,15 @@ async fn save_once(
     let now = chrono::Utc::now().to_rfc3339();
     let conversation = &target.conversation_id;
     let character = &target.character_id;
+    if target.require_character {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM characters WHERE id=?)")
+            .bind(character)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !exists {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
+    }
     if target.create {
         sqlx::query(
             "INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
@@ -389,7 +399,6 @@ pub(crate) struct PendingUserSave {
     pub messages: Vec<MessageWrite>,
     pub expected_revision: Option<i64>,
     pub turn_id: String,
-    pub generation: u64,
     pub vision: Option<crate::vision::context::VisionObservation>,
 }
 
@@ -404,6 +413,7 @@ pub(crate) struct PendingChatSave {
     pub text: String,
     pub has_assistant_text: bool,
     pub speech: Option<crate::characters::activation::ResolvedTts>,
+    pub speech_snapshot: Option<std::sync::Arc<crate::tts::manager::TtsExecutionSnapshot>>,
     pub post_commit: super::post_commit::DesktopPostCommit,
 }
 
@@ -456,7 +466,16 @@ impl ExternalReplyMedia {
 }
 
 #[derive(Clone)]
+pub(crate) struct ExternalReplyExecution {
+    pub memory_scope: std::sync::Arc<super::ownership::MemoryWriteScope>,
+    pub speech: Option<std::sync::Arc<crate::tts::manager::TtsExecutionSnapshot>>,
+    pub memory_provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+    pub memory_language: String,
+}
+
+#[derive(Clone)]
 struct PendingExternalReply {
+    execution: Option<std::sync::Arc<ExternalReplyExecution>>,
     text: String,
     translation: Option<String>,
     media: ExternalReplyMedia,
@@ -482,6 +501,7 @@ impl PendingExternalReply {
 }
 
 struct ExternalReplyEntry {
+    character_id: String,
     conversation_id: String,
     request_id: String,
     pending: PendingExternalReply,
@@ -504,7 +524,13 @@ impl ExternalReplies {
             })
     }
 
-    fn remember(&self, conversation: &str, request: &str, pending: PendingExternalReply) {
+    fn remember(
+        &self,
+        character: &str,
+        conversation: &str,
+        request: &str,
+        pending: PendingExternalReply,
+    ) {
         const MAX_PENDING_REPLIES: usize = 32;
         const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
         let mut replies = self.0.lock().unwrap();
@@ -514,6 +540,7 @@ impl ExternalReplies {
             return;
         }
         replies.push_back(ExternalReplyEntry {
+            character_id: character.to_owned(),
             conversation_id: conversation.to_owned(),
             request_id: request.to_owned(),
             pending,
@@ -529,6 +556,22 @@ impl ExternalReplies {
         }
     }
 
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+    pub(crate) fn forget_conversation(&self, conversation: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.conversation_id != conversation);
+    }
+    pub(crate) fn forget_character(&self, character: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.character_id != character);
+    }
+
     fn forget(&self, conversation: &str, request: &str) {
         self.0
             .lock()
@@ -540,15 +583,17 @@ impl ExternalReplies {
 /// Bind an external turn during its first write, then reuse that target for
 /// context reads and the assistant write even when the desktop selection moves.
 pub(crate) struct ExternalTurn {
+    scope: std::sync::Arc<super::ownership::MemoryWriteScope>,
     pub target: ConversationTarget,
     pub history: Vec<crate::ai::context::Message>,
     pub previous_reply: Option<(String, Option<String>)>,
+    pub previous_execution: Option<std::sync::Arc<ExternalReplyExecution>>,
     pub previous_reply_newly_committed: bool,
     pub previous_reply_media: ExternalReplyMedia,
     pub previous_memory_work: Option<MemoryWork>,
     pub(crate) user_message_id: i64,
     memory_ticket: Option<MemoryTicket>,
-    request_id: String,
+    pub(crate) request_id: String,
 }
 
 impl ExternalTurn {
@@ -607,56 +652,72 @@ impl ExternalTurn {
         continue_selected: bool,
         input_text: Option<&str>,
     ) -> Result<Self, KokoroError> {
-        Self::begin_with_input_metadata(
-            state,
-            character_id,
-            external_conversation_id,
-            request_id,
-            text,
-            continue_selected,
-            input_text.map(|text| serde_json::json!({"external_input_text": text})),
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn begin_with_input_metadata(
-        state: &crate::ai::context::AIOrchestrator,
-        character_id: &str,
-        external_conversation_id: String,
-        request_id: String,
-        text: &str,
-        continue_selected: bool,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<Self, KokoroError> {
-        validate_user_input(text)?;
-        let _selection = state.conversation_switch_lock.lock().await;
-        let selected = state.current_conversation_id.lock().await.clone();
-        let select_new = continue_selected
-            && selected.is_none()
-            && state.get_character_id().await == character_id;
-        let owned_selected = if continue_selected && state.get_character_id().await == character_id
-        {
-            selected
+        // Test compatibility boundary: old direct-persistence fixtures model
+        // selecting a desktop conversation before entering the explicit owner.
+        let selected = if continue_selected && state.get_character_id().await == character_id {
+            state.selection.current_conversation_id.lock().await.clone()
         } else {
             None
         };
-        let save_id = format!("{request_id}:user");
         let existing = Self::saved_user_message(state, character_id, &request_id)
             .await?
-            .map(|(conversation, _)| conversation);
-        let create = existing.is_none() && owned_selected.is_none();
+            .map(|(id, _)| id);
+        let conversation_id = existing.or(selected).unwrap_or(external_conversation_id);
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?)")
+                .bind(&conversation_id)
+                .fetch_one(&state.db)
+                .await?;
         let target = ConversationTarget {
-            character_id: character_id.to_owned(),
-            conversation_id: existing.or(owned_selected).unwrap_or_else(|| {
-                if select_new {
-                    uuid::Uuid::new_v4().to_string()
-                } else {
-                    external_conversation_id
-                }
-            }),
-            create,
+            require_character: false,
+            character_id: character_id.into(),
+            conversation_id,
+            create: !exists,
         };
+        let result = Self::begin_with_input_metadata(
+            state,
+            target,
+            request_id,
+            text,
+            input_text.map(|text| serde_json::json!({"external_input_text":text})),
+            None,
+        )
+        .await?;
+        if continue_selected
+            && state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .is_none()
+        {
+            *state.selection.current_conversation_id.lock().await =
+                Some(result.target.conversation_id.clone());
+            state.bump_conversation_generation();
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn begin_with_input_metadata(
+        state: &crate::ai::context::AIOrchestrator,
+        target: ConversationTarget,
+        request_id: String,
+        text: &str,
+        metadata: Option<serde_json::Value>,
+        scope: Option<std::sync::Arc<super::ownership::MemoryWriteScope>>,
+    ) -> Result<Self, KokoroError> {
+        validate_user_input(text)?;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let scope = scope.unwrap_or_else(|| {
+            state.memory_write_scope(
+                &target.character_id,
+                &target.conversation_id,
+                &request_id,
+                state.external_memory.epoch(),
+            )
+        });
+        scope.ensure_owner_current()?;
+        let save_id = format!("{request_id}:user");
         let previous_metadata: Option<Option<String>> = sqlx::query_scalar(
             "SELECT metadata FROM conversation_messages WHERE conversation_id=? AND role='user' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?"
         ).bind(&target.conversation_id).bind(&save_id).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
@@ -665,7 +726,7 @@ impl ExternalTurn {
             .save_external_messages_locked(
                 &target,
                 &[MessageWrite::new("user", text, metadata).with_save_id(save_id)],
-                select_new && create,
+                false,
                 None,
             )
             .await?;
@@ -679,6 +740,7 @@ impl ExternalTurn {
         let mut previous_reply_media = ExternalReplyMedia::default();
         let mut previous_memory_work = None;
         let mut previous_reply_newly_committed = false;
+        let mut previous_execution = None;
         let previous_reply = if saved[0].changed {
             None
         } else {
@@ -713,6 +775,9 @@ impl ExternalTurn {
                 .external_replies
                 .get(&target.conversation_id, &request_id)
             {
+                if let Some(execution) = &pending.execution {
+                    execution.memory_scope.ensure_owner_current()?;
+                }
                 let result = Self::save_reply_locked(
                     state,
                     &target,
@@ -734,6 +799,7 @@ impl ExternalTurn {
                 previous_memory_work = result?;
                 previous_reply_newly_committed = true;
                 previous_reply_media = pending.media;
+                previous_execution = pending.execution;
                 Some((pending.text, pending.translation))
             } else {
                 return Err(KokoroError::Chat(
@@ -747,12 +813,14 @@ impl ExternalTurn {
             state.saved_history_for(&target, Some(saved[0].id)).await?
         };
         Ok(Self {
+            scope,
             target: ConversationTarget {
                 create: false,
                 ..target
             },
             history,
             previous_reply,
+            previous_execution,
             previous_reply_newly_committed,
             previous_reply_media,
             previous_memory_work,
@@ -824,10 +892,11 @@ impl ExternalTurn {
         translation: Option<&str>,
         media: ExternalReplyMedia,
     ) -> Result<Option<MemoryWork>, KokoroError> {
-        self.save_reply_batch(state, text, translation, media, Vec::new())
+        self.save_reply_batch(state, text, translation, media, Vec::new(), None)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn save_reply_batch(
         &self,
         state: &crate::ai::context::AIOrchestrator,
@@ -835,8 +904,10 @@ impl ExternalTurn {
         translation: Option<&str>,
         media: ExternalReplyMedia,
         messages: Vec<MessageWrite>,
+        execution: Option<std::sync::Arc<ExternalReplyExecution>>,
     ) -> Result<Option<MemoryWork>, KokoroError> {
-        let _selection = state.conversation_switch_lock.lock().await;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        self.scope.ensure_owner_current()?;
         let revision = current_revision(&state.db, &self.target)
             .await
             .ok()
@@ -857,9 +928,11 @@ impl ExternalTurn {
         if matches!(result, Err(KokoroError::ChatPersistence(_))) {
             if let Some(expected_revision) = revision {
                 state.external_replies.remember(
+                    &self.target.character_id,
                     &self.target.conversation_id,
                     &self.request_id,
                     PendingExternalReply {
+                        execution,
                         text: text.to_owned(),
                         translation: translation.map(str::to_owned),
                         media,
@@ -888,6 +961,14 @@ impl ExternalTurn {
         expected_revision: Option<i64>,
         messages: &[MessageWrite],
     ) -> Result<Option<MemoryWork>, KokoroError> {
+        let input_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE id=? AND conversation_id=? AND role='user' AND json_extract(metadata,'$.chat_save_id')=?)")
+            .bind(user_message_id).bind(&target.conversation_id).bind(format!("{request_id}:user"))
+            .fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        if !input_exists {
+            return Err(KokoroError::Validation(
+                "Original external input no longer exists".into(),
+            ));
+        }
         let final_save_id = format!("{request_id}:assistant");
         let mut batch = messages.to_vec();
         let final_message = if batch
@@ -961,12 +1042,12 @@ mod tests {
         AIOrchestrator::new("sqlite::memory:")
             .await
             .unwrap()
-            .fork_with_isolated_history()
-            .await
+            .clone()
     }
 
     fn target(conversation: &str, create: bool) -> ConversationTarget {
         ConversationTarget {
+            require_character: false,
             character_id: "default".into(),
             conversation_id: conversation.into(),
             create,
@@ -991,8 +1072,8 @@ mod tests {
     }
 
     async fn desktop_turn(state: &AIOrchestrator, label: &str) -> u64 {
-        let _selection = state.conversation_switch_lock.lock().await;
-        let selected = state.current_conversation_id.lock().await.clone();
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let selected = state.selection.current_conversation_id.lock().await.clone();
         let target = target(selected.as_deref().unwrap_or("desktop"), selected.is_none());
         state
             .save_messages_locked(
@@ -1016,6 +1097,7 @@ mod tests {
         state
             .save_messages_locked(
                 &ConversationTarget {
+                    require_character: false,
                     create: false,
                     ..target
                 },
@@ -1043,6 +1125,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn late_external_reply_cannot_recreate_its_deleted_new_conversation() {
+        let state = state().await;
+        sqlx::query("INSERT INTO characters(id,name) VALUES ('owner','Owner')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let target = ConversationTarget {
+            require_character: true,
+            character_id: "owner".into(),
+            conversation_id: "deleted-new".into(),
+            create: true,
+        };
+        let turn = ExternalTurn::begin_with_input_metadata(
+            &state,
+            target,
+            "request".into(),
+            "question",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(turn.target.require_character);
+        sqlx::query("DELETE FROM conversations WHERE id='deleted-new'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(turn.save_reply(&state, "late reply", None).await.is_err());
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id='deleted-new'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(rows, 0);
+        state.forget_conversation("deleted-new").await;
+        let fresh = ExternalTurn::begin_with_input_metadata(
+            &state,
+            ConversationTarget {
+                require_character: true,
+                character_id: "owner".into(),
+                conversation_id: "deleted-new".into(),
+                create: true,
+            },
+            "new-request".into(),
+            "new input",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(turn
+            .save_reply(&state, "old reply after recreation", None)
+            .await
+            .is_err());
+        fresh.save_reply(&state, "new reply", None).await.unwrap();
+        let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM conversation_messages WHERE conversation_id='deleted-new' AND role='assistant'").fetch_all(&state.db).await.unwrap();
+        assert_eq!(replies, vec!["new reply"]);
+    }
+
+    #[tokio::test]
     async fn managed_external_turns_preserve_desktop_and_external_memory_cadence_and_transcripts() {
         for (platform, continue_selected) in
             [("telegram", true), ("line", false), ("discord", false)]
@@ -1064,7 +1206,13 @@ mod tests {
                 desktop_history.extend([label.clone(), format!("answer-{label}")]);
             }
             assert_eq!(desktop_count, 4);
-            let desktop_id = state.current_conversation_id.lock().await.clone().unwrap();
+            let desktop_id = state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .clone()
+                .unwrap();
             let external_id = external_identity(platform, &["default", "chat"]);
 
             for index in 1..=20 {
@@ -1188,7 +1336,7 @@ mod tests {
                     }
                 }
                 assert_eq!(
-                    *state.current_conversation_id.lock().await,
+                    *state.selection.current_conversation_id.lock().await,
                     Some(desktop_id.clone())
                 );
             }
@@ -1343,7 +1491,7 @@ mod tests {
                 "webhook",
                 "qq",
             ] {
-                let fork = state.fork_with_isolated_history().await;
+                let fork = state.clone();
                 let request = format!("{conversation}-{index}");
                 let turn = external_turn(&fork, conversation, &request).await;
                 let work = turn
@@ -1368,7 +1516,7 @@ mod tests {
                     .await
                     .unwrap()
                     .is_none());
-                let replay_fork = state.fork_with_isolated_history().await;
+                let replay_fork = state.clone();
                 let replay = external_turn(&replay_fork, conversation, &request).await;
                 assert!(replay.previous_reply.is_some());
                 assert!(replay.previous_memory_work.is_none());
@@ -1383,7 +1531,7 @@ mod tests {
     async fn external_memory_counts_only_committed_replies_and_retries_the_fifth_once() {
         let state = state().await;
         for index in 1..=4 {
-            let fork = state.fork_with_isolated_history().await;
+            let fork = state.clone();
             let turn = external_turn(&fork, "faults", &format!("request-{index}")).await;
             assert_eq!(
                 turn.save_reply(&fork, "answer", None)
@@ -1396,7 +1544,7 @@ mod tests {
         }
         sqlx::query("CREATE TRIGGER reject_memory_user BEFORE INSERT ON conversation_messages WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'user fault'); END")
             .execute(&state.db).await.unwrap();
-        let fork = state.fork_with_isolated_history().await;
+        let fork = state.clone();
         assert!(matches!(
             ExternalTurn::begin(
                 &fork,
@@ -1436,7 +1584,7 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        let retry_fork = state.fork_with_isolated_history().await;
+        let retry_fork = state.clone();
         let replay = external_turn(&retry_fork, "faults", "fifth").await;
         let work = replay.previous_memory_work.unwrap();
         assert_eq!(work.count, 5);
@@ -1469,7 +1617,7 @@ mod tests {
     #[tokio::test]
     async fn external_memory_switch_and_new_conversation_reset_counts_and_history_boundaries() {
         let state = state().await;
-        let fork = state.fork_with_isolated_history().await;
+        let fork = state.clone();
         let old = external_turn(&fork, "switch", "old").await;
         let old_work = old
             .save_reply(&fork, "old answer", None)
@@ -1490,7 +1638,7 @@ mod tests {
             .unwrap()
             .is_none());
         state.set_memory_enabled(true).await;
-        let fresh = state.fork_with_isolated_history().await;
+        let fresh = state.clone();
         let current = external_turn(&fresh, "switch", "current").await;
         // A pre-toggle generation can finish later but must not enter the new
         // cadence or memory transcript, even though its assistant row is newer.
@@ -1637,10 +1785,87 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn external_pending_execution_snapshots_are_released_by_owner_cleanup() {
+        for cleanup in ["conversation", "character", "restore"] {
+            let state = state().await;
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                "cleanup-session".into(),
+                "cleanup-request".into(),
+                "neutral cleanup",
+                false,
+            )
+            .await
+            .unwrap();
+            sqlx::query("CREATE TRIGGER reject_cleanup_reply BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'cleanup failure'); END").execute(&state.db).await.unwrap();
+            let execution =
+                std::sync::Arc::new(ExternalReplyExecution {
+                    memory_scope: turn.scope.clone(),
+                    speech: None,
+                    memory_provider: std::sync::Arc::new(
+                        crate::llm::provider::OpenAIProvider::new(String::new(), None, None),
+                    ),
+                    memory_language: "Japanese".into(),
+                });
+            let retained = std::sync::Arc::downgrade(&execution);
+            assert!(turn
+                .save_reply_batch(
+                    &state,
+                    "saved output",
+                    None,
+                    ExternalReplyMedia::default(),
+                    Vec::new(),
+                    Some(execution)
+                )
+                .await
+                .is_err());
+            assert!(retained.upgrade().is_some());
+            match cleanup {
+                "conversation" => state.forget_conversation("cleanup-session").await,
+                "character" => state.forget_character("default").await,
+                _ => state.reset_runtime_owners().await,
+            }
+            assert!(
+                retained.upgrade().is_none(),
+                "{cleanup} retained a provider snapshot"
+            );
+            assert!(state
+                .external_replies
+                .get("cleanup-session", "cleanup-request")
+                .is_none());
+            sqlx::query("DROP TRIGGER reject_cleanup_reply")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            assert!(ExternalTurn::begin(
+                &state,
+                "default",
+                "cleanup-session".into(),
+                "cleanup-request".into(),
+                "neutral cleanup",
+                false
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM conversation_messages WHERE role='assistant'"
+                )
+                .fetch_one(&state.db)
+                .await
+                .unwrap(),
+                0
+            );
+        }
+    }
+
     #[test]
     fn external_reply_cache_counts_media_toward_its_byte_limit() {
         let replies = ExternalReplies::default();
         let pending = PendingExternalReply {
+            execution: None,
             messages: Vec::new(),
             text: String::new(),
             translation: None,
@@ -1653,8 +1878,8 @@ mod tests {
             database_guard_generation: crate::ai::context::database_operation_generation(),
             memory_ticket: None,
         };
-        replies.remember("conversation", "first", pending.clone());
-        replies.remember("conversation", "second", pending);
+        replies.remember("character", "conversation", "first", pending.clone());
+        replies.remember("character", "conversation", "second", pending);
         assert!(replies.get("conversation", "first").is_none());
         assert!(replies.get("conversation", "second").is_some());
     }
@@ -1675,7 +1900,7 @@ mod tests {
             MessageWrite::new("user", "question", None).with_save_id("request:user".into()),
         ];
         let error = {
-            let _selection = state.conversation_switch_lock.lock().await;
+            let _selection = state.selection.conversation_switch_lock.lock().await;
             state
                 .save_messages_locked(&target("new", true), &messages, true, None)
                 .await
@@ -1684,8 +1909,13 @@ mod tests {
         assert!(matches!(error, KokoroError::ChatPersistence(_)));
         assert_eq!(state.get_message_count().await, 0);
         assert_eq!(state.get_memory_trigger_count().await, 0);
-        assert!(state.history.lock().await.is_empty());
-        assert!(state.current_conversation_id.lock().await.is_none());
+        assert!(state.selection.history.lock().await.is_empty());
+        assert!(state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .is_none());
         let count: i64 = sqlx::query_scalar(
             "SELECT (SELECT COUNT(*) FROM conversations) +
             (SELECT COUNT(*) FROM conversation_messages)",

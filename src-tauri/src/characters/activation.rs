@@ -288,9 +288,7 @@ impl ActivationCoordinator {
                 &persona,
                 &row.try_get::<String, _>("example_dialogue")?,
             ),
-            response_language: requested_runtime
-                .response_language
-                .unwrap_or_else(|| previous_committed.response_language.clone()),
+            response_language: requested_runtime.response_language.unwrap_or_default(),
             proactive_enabled: requested_runtime
                 .proactive_enabled
                 .unwrap_or(previous_committed.proactive_enabled),
@@ -735,7 +733,7 @@ fn normalized_user_name(name: String) -> String {
     }
 }
 
-fn resolve_tts(
+pub(crate) fn resolve_tts(
     requested: Option<&CharacterTtsProfile>,
     config: &TtsSystemConfig,
     local_presets: &[LocalTtsPreset],
@@ -1104,7 +1102,7 @@ fn asset_metadata_is_redirected(metadata: &fs::Metadata) -> bool {
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
-fn compose_system_prompt(persona: &str, example_dialogue: &str) -> String {
+pub(crate) fn compose_system_prompt(persona: &str, example_dialogue: &str) -> String {
     let persona = persona.trim();
     let example_dialogue = example_dialogue.trim();
     if example_dialogue.is_empty() {
@@ -1281,9 +1279,7 @@ async fn revert_staged_greeting_in_tx(
     }
 }
 
-async fn ensure_committed_runtime_table(
-    pool: &SqlitePool,
-) -> Result<(), KokoroError> {
+async fn ensure_committed_runtime_table(pool: &SqlitePool) -> Result<(), KokoroError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS character_activation_runtime (\
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),\

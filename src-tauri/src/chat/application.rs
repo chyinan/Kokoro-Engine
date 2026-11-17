@@ -107,12 +107,15 @@ async fn persist_failure_event_to_conversation(
     failure_event: &crate::error::FailureEvent,
     user_message_id: Option<i64>,
     keep_through_message_id: Option<i64>,
+    scope: &crate::chat::ownership::MemoryWriteScope,
 ) -> Result<(), KokoroError> {
     let (Some(conversation_id), Some(character_id)) =
         (&failure_event.conversation_id, &failure_event.character_id)
     else {
         return Ok(());
     };
+    let _selection = state.selection.conversation_switch_lock.lock().await;
+    scope.ensure_owner_current()?;
     let mut metadata = serde_json::json!({
         "type": "failure_event",
         "event": failure_event,
@@ -128,6 +131,7 @@ async fn persist_failure_event_to_conversation(
         metadata["keep_through_message_id"] = id.into();
     }
     let target = ConversationTarget {
+        require_character: false,
         character_id: character_id.clone(),
         conversation_id: conversation_id.clone(),
         create: false,
@@ -153,6 +157,7 @@ async fn emit_and_persist_failure_event(
     failure_event: crate::error::FailureEvent,
     user_message_id: Option<i64>,
     keep_through_message_id: Option<i64>,
+    scope: &crate::chat::ownership::MemoryWriteScope,
 ) -> Result<(), KokoroError> {
     policy
         .emit(app, "chat-failure", failure_event.clone())
@@ -165,6 +170,7 @@ async fn emit_and_persist_failure_event(
         &failure_event,
         user_message_id,
         keep_through_message_id,
+        scope,
     )
     .await
     {
@@ -670,8 +676,14 @@ async fn save_visible_draft(
     turn_id: &str,
     row_id: Option<i64>,
     text: &str,
+    scope: &crate::chat::ownership::MemoryWriteScope,
 ) -> Option<i64> {
+    let _selection = state.selection.conversation_switch_lock.lock().await;
+    if !scope.owner_is_current() {
+        return row_id;
+    }
     let target = ConversationTarget {
+        require_character: false,
         character_id: character_id.into(),
         conversation_id: conversation_id.into(),
         create: false,
@@ -714,90 +726,13 @@ async fn cleanup_turn_artifacts(
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-async fn ensure_conversation_created_for_hidden_turn(
-    state: &AIOrchestrator,
-    char_id: &str,
-    conversation_id: &mut Option<String>,
-    is_newly_created_for_hidden: &mut bool,
-    turn_id: &str,
-    bound_generation: u64,
-    cancel_state: &TurnCancellationState,
-    runtime: &crate::chat::runtime::ChatRuntimeState,
-) -> Result<String, KokoroError> {
-    if let Some(ref cid) = conversation_id {
-        return Ok(cid.clone());
-    }
-    let _switch_guard = state.conversation_switch_lock.lock().await;
-    let current_gen = state.current_conversation_generation();
-    let current_conv_id = state.current_conversation_id.lock().await.clone();
-
-    // 关键一致性校验：
-    // hidden turn 启动时记录了 bound_generation（且初始会话状态必定为 None）。
-    // 在模型等待期间，若全局会话状态发生任何变化（例如用户或其他来源新建了会话、切换了会话、清空了历史，
-    // 导致 current_conv_id != None 或 current_gen != bound_generation），
-    // 坚决不能无条件采纳新的全局会话，而必须立即取消当前旧 turn！
-    if current_gen != bound_generation || current_conv_id.is_some() {
-        tracing::warn!(
-            target: "chat",
-            "[Chat] Conversation state changed during hidden turn {} (bound_gen={}, current_gen={}, current_conv_id={:?}); cancelling turn",
-            turn_id,
-            bound_generation,
-            current_gen,
-            current_conv_id
-        );
-        let _ = cancel_state
-            .cancel_turn(
-                turn_id,
-                Some("conversation state changed during hidden turn".to_string()),
-            )
-            .await;
-        return Err(KokoroError::Chat(
-            TURN_CANCELLED_BY_USER_MESSAGE.to_string(),
-        ));
-    }
-
-    let new_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query(
-        "INSERT INTO conversations (id, character_id, title, topic, pinned_state, created_at, updated_at) VALUES (?, ?, '新对话', '', '{}', ?, ?)"
-    )
-    .bind(&new_id)
-    .bind(char_id)
-    .bind(&now)
-    .bind(&now)
-    .execute(&state.db)
-    .await
-    .map_err(|e| KokoroError::Database(e.to_string()))?;
-
-    *state.current_conversation_id.lock().await = Some(new_id.clone());
-    let generation = state.bump_conversation_generation();
-    // Keep the journal and selected conversation in the same scope before a
-    // subscriber can refresh, including while the next tool awaits approval.
-    runtime.event(
-        "chat-turn-scope",
-        &serde_json::json!({
-            "turn_id": turn_id,
-            "conversation_id": new_id,
-            "conversation_generation": generation,
-        }),
-    );
-    if state.persist_conversation_selection {
-        crate::ai::context::AIOrchestrator::persist_conversation_id(Some(&new_id));
-    }
-    *is_newly_created_for_hidden = true;
-    *conversation_id = Some(new_id.clone());
-    Ok(new_id)
-}
-
 async fn delete_empty_conversation_if_unused(
     state: &AIOrchestrator,
     conversation_id: &str,
     expected_turn_id: Option<&str>,
     draft_row_id: Option<i64>,
 ) -> Result<bool, KokoroError> {
-    let _switch_guard = state.conversation_switch_lock.lock().await;
+    let _switch_guard = state.selection.conversation_switch_lock.lock().await;
 
     // 1. Query all message rows currently belonging to this conversation
     let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
@@ -868,7 +803,14 @@ async fn delete_empty_conversation_if_unused(
             .map_err(|e| KokoroError::Database(e.to_string()))?;
 
         // If this conversation is currently active, resync in-memory history to reflect removed turn artifacts
-        if state.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
+        if state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref()
+            == Some(conversation_id)
+        {
             let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
                 "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
             )
@@ -878,10 +820,10 @@ async fn delete_empty_conversation_if_unused(
             .map_err(|e| KokoroError::Database(e.to_string()))?;
 
             let max_chars = *state.max_message_chars.lock().await;
-            let mut history = state.history.lock().await;
+            let mut history = state.selection.history.lock().await;
             let new_len =
                 crate::ai::context::sync_history_window(&mut history, remaining_rows, max_chars);
-            let mut boundary = state.memory_history_boundary.lock().await;
+            let mut boundary = state.selection.memory_history_boundary.lock().await;
             *boundary = (*boundary).min(new_len);
         }
 
@@ -922,14 +864,13 @@ async fn delete_empty_conversation_if_unused(
 
     // 7. Reset active conversation state if it matched
     {
-        let mut current_id = state.current_conversation_id.lock().await;
+        let mut current_id = state.selection.current_conversation_id.lock().await;
         if current_id.as_deref() == Some(conversation_id) {
             *current_id = None;
             state.bump_conversation_generation();
-            state.history.lock().await.clear();
-            *state.memory_history_boundary.lock().await = 0;
-            *state.memory_trigger_count.lock().await = 0;
-            if state.persist_conversation_selection {
+            state.selection.history.lock().await.clear();
+            *state.selection.memory_history_boundary.lock().await = 0;
+            if state.selection.persist_conversation_selection {
                 crate::ai::context::AIOrchestrator::persist_conversation_id(None);
             }
         }
@@ -1206,6 +1147,13 @@ pub(crate) fn channel_id(namespace: &str, owner: &str, id: &str) -> String {
 
 #[derive(Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct ChatRequest {
+    /// Resolved once by the trusted entry boundary; never accepted over IPC.
+    #[serde(skip)]
+    pub(crate) resolved_target: Option<ConversationTarget>,
+    #[serde(skip)]
+    pub(crate) memory_scope: Option<Arc<crate::chat::ownership::MemoryWriteScope>>,
+    #[serde(skip)]
+    pub(crate) admission_fingerprint: Option<String>,
     pub message: String,
     pub api_key: Option<String>,
     pub endpoint: Option<String>,
@@ -1254,6 +1202,9 @@ pub struct ChatRequest {
 
 impl ChatRequest {
     pub(crate) fn fingerprint(&self, policy: ChatPolicy) -> Result<String, String> {
+        if let Some(fingerprint) = &self.admission_fingerprint {
+            return Ok(fingerprint.clone());
+        }
         use sha2::{Digest, Sha256};
         let value = if policy.is_desktop() {
             serde_json::to_value((self, policy))
@@ -1325,6 +1276,8 @@ fn tool_only_completion_notice(language: &str) -> Result<String, KokoroError> {
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct StreamChatResponse {
+    #[serde(skip)]
+    pub(crate) speech_snapshot: Option<Arc<crate::tts::manager::TtsExecutionSnapshot>>,
     #[serde(default)]
     pub text: String,
     pub conversation_id: String,
@@ -1696,6 +1649,7 @@ async fn emit_tool_trace_event(
     policy.emit(app, "chat-turn-tool", payload).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool_after_approval(
     app: &tauri::AppHandle,
     registry_state: &std::sync::Arc<RwLock<ActionRegistry>>,
@@ -1704,6 +1658,10 @@ async fn execute_single_tool_after_approval(
     conversation_id: Option<&str>,
     tool_call: &ToolInvocation,
     expected_registry_generation: u64,
+    request_id: &str,
+    turn_id: &str,
+    cue_names: Option<&Arc<HashSet<String>>>,
+    memory_scope: &Arc<crate::chat::ownership::MemoryWriteScope>,
 ) -> Result<ActionResult, String> {
     let hook_runtime = app.try_state::<HookRuntime>();
     let (registry_generation, resolved) = {
@@ -1748,12 +1706,18 @@ async fn execute_single_tool_after_approval(
     }
     let effective_args = apply_before_action_args_payload(args_payload);
     let ctx = ActionContext {
+        memory_scope: Some(memory_scope.clone()),
+        cue_names: cue_names.cloned(),
+        request_id: Some(request_id.into()),
+        turn_id: Some(turn_id.into()),
         app: app.clone(),
         character_id: character_id.to_string(),
         conversation_id: conversation_id.map(str::to_owned),
         source: Some("chat".to_string()),
     };
-    let result = handler.execute(effective_args, ctx).await.map_err(|e| e.0);
+    let result = crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx)
+        .await
+        .map_err(|e| e.0);
     if let Some(hooks) = hook_runtime.as_ref() {
         hooks
             .emit_best_effort(
@@ -1845,6 +1809,9 @@ async fn wait_for_tool_approval_decision(
 }
 
 struct ToolApprovalExecutionContext<'a> {
+    memory_scope: &'a Arc<crate::chat::ownership::MemoryWriteScope>,
+    cue_names: Option<&'a Arc<HashSet<String>>>,
+    request_id: &'a str,
     app: &'a tauri::AppHandle,
     approval_state: &'a PendingToolApprovalState,
     registry_state: &'a std::sync::Arc<RwLock<ActionRegistry>>,
@@ -1937,6 +1904,10 @@ async fn wait_for_tool_approval_and_execute(
                     ctx.conversation_id,
                     &outcome.invocation,
                     outcome.registry_generation,
+                    ctx.request_id,
+                    ctx.turn_id,
+                    ctx.cue_names,
+                    ctx.memory_scope,
                 )) => {
                     match res {
                         Ok(exec_res) => exec_res,
@@ -2235,7 +2206,6 @@ struct PreparedChatTurn {
     conversation_id: Option<String>,
     user_message_id: Option<i64>,
     bound_generation: u64,
-    completion_generation: u64,
     memory_epoch: u64,
     regeneration: Option<RegenerationPlan>,
     selected_vision_observation: Option<crate::vision::context::VisionObservation>,
@@ -2250,6 +2220,113 @@ struct PreparedChatTurn {
     external_turn: Option<persistence::ExternalTurn>,
 }
 
+/// Compatibility lives here: UI defaults are read once, before journal admission.
+async fn resolve_request_scope(
+    state: &AIOrchestrator,
+    request: &mut ChatRequest,
+    policy: ChatPolicy,
+) -> Result<(), KokoroError> {
+    if request.resolved_target.is_some() {
+        return Ok(());
+    }
+    ensure_client_request_id(&mut request.client_request_id);
+    request.admission_fingerprint = Some(request.fingerprint(policy).map_err(KokoroError::Chat)?);
+    let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+    let _selection = state.selection.conversation_switch_lock.lock().await;
+    let selected_character = state.get_character_id().await;
+    let character = request
+        .character_id
+        .clone()
+        .or_else(|| policy.is_desktop().then_some(selected_character.clone()))
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| KokoroError::Validation("Chat character is missing".into()))?;
+    if policy.is_desktop()
+        && (character != selected_character
+            || request
+                .conversation_generation
+                .is_some_and(|generation| generation != state.current_conversation_generation()))
+    {
+        return Err(KokoroError::Validation(
+            "Desktop selection changed before admission".into(),
+        ));
+    }
+    let character_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM characters WHERE id=?)")
+            .bind(&character)
+            .fetch_one(&state.db)
+            .await?;
+    if !character_exists {
+        return Err(KokoroError::Validation(
+            "Chat character no longer exists".into(),
+        ));
+    }
+    let mut conversation = request.conversation_id.clone();
+    if policy.is_desktop() && conversation.is_none() {
+        conversation = state.selection.current_conversation_id.lock().await.clone();
+    }
+    if !policy.is_desktop() {
+        let saved: Option<String> = sqlx::query_scalar("SELECT m.conversation_id FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.character_id=? AND m.role='user' AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?")
+            .bind(&character).bind(format!("{}:user", request.client_request_id.as_deref().unwrap())).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        if saved.is_some() {
+            conversation = saved;
+        }
+    }
+    let conversation = conversation
+        .or_else(|| policy.is_desktop().then(|| Uuid::new_v4().to_string()))
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| KokoroError::Validation("Chat conversation is missing".into()))?;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT character_id FROM conversations WHERE id=?")
+            .bind(&conversation)
+            .fetch_optional(&state.db)
+            .await?;
+    let create = owner.is_none();
+    if let Some(owner) = owner {
+        if owner != character {
+            return Err(KokoroError::Validation(
+                "Conversation is not available for this character".into(),
+            ));
+        }
+    } else if request.conversation_id.is_some()
+        && (policy.is_desktop()
+            || matches!(
+                policy,
+                ChatPolicy::External {
+                    create_conversation: false,
+                    ..
+                }
+            ))
+    {
+        return Err(KokoroError::Validation(
+            "Chat conversation no longer exists".into(),
+        ));
+    }
+    let target = ConversationTarget {
+        require_character: true,
+        character_id: character.clone(),
+        conversation_id: conversation.clone(),
+        create,
+    };
+    crate::chat::ownership::TurnIdentity::new(
+        &character,
+        &conversation,
+        request.client_request_id.as_deref().unwrap(),
+    )?;
+    request.character_id = Some(character);
+    request.conversation_id = Some(conversation);
+    if policy.is_desktop() {
+        request.conversation_generation = Some(state.current_conversation_generation());
+    }
+    request.memory_scope = Some(state.memory_write_scope(
+        &target.character_id,
+        &target.conversation_id,
+        request.client_request_id.as_deref().unwrap(),
+        state.external_memory.epoch(),
+    ));
+    request.resolved_target = Some(target);
+    Ok(())
+}
+
 pub(crate) async fn submit_chat(
     app: tauri::AppHandle,
     mut request: ChatRequest,
@@ -2259,7 +2336,18 @@ pub(crate) async fn submit_chat(
     // polled. Import must not invalidate a turn which can still write or finish.
     let database_operation_guard = crate::ai::context::try_acquire_database_operation_read_guard()
         .map_err(|error| KokoroError::Chat(error.into()))?;
-    ensure_client_request_id(&mut request.client_request_id);
+    if policy.is_desktop() {
+        if let Some(outcome) = app
+            .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
+            .desktop_replay(&request)
+            .map_err(KokoroError::Chat)?
+        {
+            let mut response = wait_chat_outcome(outcome).await?;
+            response.newly_committed = false;
+            return Ok(response);
+        }
+    }
+    resolve_request_scope(app.state::<AIOrchestrator>().inner(), &mut request, policy).await?;
     let request_id = request.client_request_id.clone().unwrap();
     let runtime = app
         .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
@@ -2395,13 +2483,6 @@ pub async fn retry_chat_persistence(
                         "chat_turn_busy: A chat turn is already in progress".into(),
                     ));
                 }
-                if state.get_character_id().await != pending.target.character_id
-                    || state.current_conversation_generation() != pending.generation
-                {
-                    return Err(KokoroError::Validation(
-                        "Conversation changed before the failed save could be retried.".into(),
-                    ));
-                }
                 let snapshot = runtime
                     .start_user_save_retry(&client_request_id)
                     .ok_or_else(|| {
@@ -2430,28 +2511,35 @@ pub async fn retry_chat_persistence(
             .try_acquire_chat_turn(&client_request_id)
             .await
             .map_err(KokoroError::Chat)?;
-        let _selection = state.conversation_switch_lock.lock().await;
-        let selection_changed = if let Some(generation) = pending.creation_generation {
-            state.current_conversation_generation() != generation
-                || state.current_conversation_id.lock().await.is_some()
-                || state.get_character_id().await != pending.target.character_id
-        } else {
-            false
-        };
-        let result = if selection_changed {
-            Err(KokoroError::Validation(
-                "Conversation changed before the failed save could be retried.".into(),
-            ))
-        } else {
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let select_on_commit = pending.target.create
+            && pending.creation_generation == Some(state.current_conversation_generation())
+            && state.get_character_id().await == pending.target.character_id
+            && state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .is_none();
+        let result = if pending
+            .post_commit
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.owner_is_current())
+        {
             state
                 .save_messages_expected_locked(
                     &pending.target,
                     &pending.messages,
-                    pending.target.create,
+                    select_on_commit,
                     None,
                     Some(pending.expected_revision),
                 )
                 .await
+        } else {
+            Err(KokoroError::Validation(
+                "Chat owner was deleted or replaced".into(),
+            ))
         };
         let saved = match result {
             Ok(saved) => saved,
@@ -2508,7 +2596,12 @@ pub async fn retry_chat_persistence(
                 )
                 .await;
             if state.get_character_id().await == pending.target.character_id
-                && state.current_conversation_id.lock().await.as_deref()
+                && state
+                    .selection
+                    .current_conversation_id
+                    .lock()
+                    .await
+                    .as_deref()
                     == Some(response.conversation_id.as_str())
             {
                 if let Some(speech) = pending.speech {
@@ -2518,6 +2611,7 @@ pub async fn retry_chat_persistence(
                         pending.turn_id,
                         response.text.clone(),
                         speech,
+                        pending.speech_snapshot.clone(),
                     );
                 }
             }
@@ -2528,29 +2622,33 @@ pub async fn retry_chat_persistence(
     .map_err(|error| KokoroError::Chat(error.to_string()))?
 }
 
-pub fn submit_proactive(app: tauri::AppHandle, instruction: String) {
+pub(crate) fn submit_proactive_bound(
+    app: tauri::AppHandle,
+    instruction: String,
+    scope: (String, Option<String>, u64),
+) -> Option<String> {
     if app
         .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
         .is_playing(&app)
     {
-        return;
+        return None;
     }
+    let request_id = format!("proactive_{}", Uuid::new_v4());
+    let request = ChatRequest {
+        message: instruction,
+        hidden: true,
+        character_id: Some(scope.0),
+        conversation_id: scope.1,
+        conversation_generation: Some(scope.2),
+        client_request_id: Some(request_id.clone()),
+        ..Default::default()
+    };
     tauri::async_runtime::spawn(async move {
-        let character_id = app
-            .state::<AIOrchestrator>()
-            .character_id
-            .lock()
-            .await
-            .clone();
-        let request: ChatRequest = serde_json::from_value(serde_json::json!({
-            "message": instruction, "hidden": true, "character_id": character_id,
-            "client_request_id": format!("proactive_{}", Uuid::new_v4())
-        }))
-        .expect("proactive request");
         if let Err(error) = submit_chat(app, request, ChatPolicy::Desktop).await {
-            tracing::debug!(target: "chat", "proactive request ended: {error}");
+            tracing::debug!(target:"chat","proactive request ended: {error}");
         }
     });
+    Some(request_id)
 }
 
 struct ChatDependencies<'a> {
@@ -2612,50 +2710,91 @@ async fn execute_chat_with_pending(
         )));
     }
 
-    let _chat_turn_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-
     let mut request = request;
     persistence::validate_user_input(&request.message)?;
-    ensure_client_request_id(&mut request.client_request_id);
-
-    let client_request_id = request
-        .client_request_id
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-
-    let current_character_id = state.character_id.lock().await.clone();
-    if desktop
-        && request
-            .character_id
-            .as_ref()
-            .is_some_and(|id| id != &current_character_id)
-    {
-        return Err(KokoroError::Chat(
-            "Character changed while request was in-flight".into(),
-        ));
-    }
-    let char_id = request
-        .character_id
-        .get_or_insert(current_character_id.clone())
+    let target = request
+        .resolved_target
+        .as_ref()
+        .ok_or_else(|| KokoroError::Validation("Unresolved chat identity".into()))?
         .clone();
-
+    let identity = crate::chat::ownership::TurnIdentity::new(
+        &target.character_id,
+        &target.conversation_id,
+        request
+            .client_request_id
+            .as_deref()
+            .ok_or_else(|| KokoroError::Validation("Chat request identity is missing".into()))?,
+    )?;
+    let memory_scope = request
+        .memory_scope
+        .clone()
+        .ok_or_else(|| KokoroError::Validation("Unresolved chat lifetime".into()))?;
+    memory_scope.ensure_owner_current()?;
+    let client_request_id = identity.request_id.clone();
+    let char_id = identity.character_id.clone();
     let _turn_execution_guard = state
         .try_acquire_chat_turn(&client_request_id)
         .await
         .map_err(KokoroError::Chat)?;
-
-    let speech = if desktop {
-        app.state::<crate::characters::activation::ActivationCoordinator>()
+    // Activation protects only the snapshot. No activation lock is held across
+    // model, tool, media or memory I/O.
+    let (prompt_snapshot, llm_snapshot, speech, speech_snapshot) = {
+        let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+        let mut prompt = state
+            .prompt_snapshot(&char_id)
+            .await
+            .map_err(|error| KokoroError::Chat(error.to_string()))?;
+        prompt.vision_context_history_mode = vision_watcher
+            .config
+            .read()
+            .await
+            .vision_context_history_mode
+            .clone();
+        let providers = llm_state.execution_snapshot().await;
+        let committed = app
+            .state::<crate::characters::activation::ActivationCoordinator>()
             .get_committed(&state.db)
             .await
             .ok()
             .flatten()
-            .filter(|committed| committed.runtime.character_id == current_character_id)
-            .map(|committed| committed.runtime.tts)
-    } else {
-        None
+            .filter(|committed| committed.runtime.character_id == char_id);
+        if let Some(cues) = committed
+            .as_ref()
+            .and_then(|committed| crate::live2d::committed_cue_map(&committed.runtime))
+        {
+            prompt.cue_map = Some(cues);
+        }
+        let speech = committed.map(|committed| committed.runtime.tts);
+        let profile = if !desktop && speech.is_none() {
+            let profile: Option<String> =
+                sqlx::query_scalar("SELECT runtime_profile_json FROM characters WHERE id=?")
+                    .bind(&char_id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            profile
+                .and_then(|profile| {
+                    serde_json::from_str::<crate::characters::manifest::CharacterRuntimeProfile>(
+                        &profile,
+                    )
+                    .ok()
+                })
+                .and_then(|profile| profile.tts)
+        } else {
+            None
+        };
+        let speech_snapshot = if let Some(tts) = app.try_state::<crate::tts::TtsService>() {
+            tts.execution_snapshot(speech.as_ref(), profile.as_ref())
+                .await
+        } else {
+            None
+        };
+        (prompt, providers, speech, speech_snapshot)
     };
 
+    let cue_names = prompt_snapshot
+        .cue_map
+        .as_ref()
+        .map(|cues| Arc::new(cues.keys().cloned().collect::<HashSet<_>>()));
     let assistant_turn_id = pending_user_save.as_ref().map_or_else(
         || Uuid::new_v4().to_string(),
         |pending| pending.turn_id.clone(),
@@ -2707,36 +2846,9 @@ async fn execute_chat_with_pending(
 
     let prep_fut = async {
         // 0. Resolve character ID for this request (not stored in shared state)
-        let char_id = request
-            .character_id
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-        let requested_conversation_id = request.conversation_id.clone();
-        let (initial_conversation_id, initial_generation) =
-            state.conversation_state_snapshot().await;
-        if desktop
-            && request
-                .conversation_generation
-                .is_some_and(|generation| generation != initial_generation)
-        {
-            return Err(KokoroError::Chat(
-                "Conversation changed while request was in-flight".into(),
-            ));
-        }
-        if desktop {
-            let _ = policy
-                .emit(
-                    app,
-                    "chat-turn-scope",
-                    serde_json::json!({
-                        "client_request_id": client_request_id,
-                        "turn_id": assistant_turn_id,
-                        "conversation_id": initial_conversation_id,
-                        "conversation_generation": initial_generation,
-                    }),
-                )
-                .await;
-        }
+        let char_id = identity.character_id.clone();
+        let requested_conversation_id = Some(identity.conversation_id.clone());
+        let initial_generation = request.conversation_generation.unwrap_or(0);
         #[cfg(debug_assertions)]
         let lifecycle_hold = if std::env::var_os("KOKORO_TEST_DATA_ROOT").is_some()
             && std::env::var_os("KOKORO_CHAT_LIFECYCLE_TEST_PREPARATION").is_some()
@@ -2756,14 +2868,9 @@ async fn execute_chat_with_pending(
         {
             std::future::pending::<()>().await;
         }
-        // Keep shared character_id in sync for modules that still read it (heartbeat)
-        if desktop {
-            state.set_character_id(char_id.clone()).await;
-        }
-
         // Record user activity
         if desktop {
-            state.touch_activity().await;
+            state.touch_character_activity(&char_id).await;
         }
 
         // Typing simulation
@@ -2775,7 +2882,10 @@ async fn execute_chat_with_pending(
                 request.message.chars().count(),
                 is_question,
             );
-            let _ = policy.emit(app, "chat-typing", &typing_params).await;
+            let mut typing_event = serde_json::to_value(&typing_params).unwrap_or_default();
+            typing_event["client_request_id"] = client_request_id.clone().into();
+            typing_event["turn_id"] = assistant_turn_id.clone().into();
+            let _ = policy.emit(app, "chat-typing", typing_event).await;
         }
 
         // 1. Select current-turn vision context before any user-message persistence.
@@ -2791,24 +2901,7 @@ async fn execute_chat_with_pending(
         };
 
         // 2. Update History with User Message under conversation_switch_lock
-        let system_provider = llm_state.system_provider().await;
-
-        let profile_state = if desktop || char_id == current_character_id {
-            None
-        } else {
-            let profile = state.fork_with_isolated_history().await;
-            if !profile
-                .apply_character_profile(&char_id)
-                .await
-                .map_err(|error| KokoroError::Database(format!("{error:#}")))?
-            {
-                return Err(KokoroError::Validation(format!(
-                    "Unknown character: {char_id}"
-                )));
-            }
-            Some(profile)
-        };
-        let prompt_state = profile_state.as_ref().unwrap_or(state);
+        let (llm_config, chat_provider, system_provider) = llm_snapshot.clone();
         let fingerprint = request.fingerprint(policy).map_err(KokoroError::Chat)?;
         let original_input = request
             .external_input_text
@@ -2903,14 +2996,14 @@ async fn execute_chat_with_pending(
             user_message_id,
             history_snapshot,
             bound_generation,
-            completion_generation,
+            _completion_generation,
             memory_epoch,
             regeneration,
         ) = 'bind: {
-            let _switch_guard = state.conversation_switch_lock.lock().await;
-            let current_conv_id = state.current_conversation_id.lock().await.clone();
-            let current_generation = state.current_conversation_generation();
-
+            let _switch_guard = state.selection.conversation_switch_lock.lock().await;
+            memory_scope.ensure_owner_current()?;
+            let current_conv_id = (!target.create).then(|| identity.conversation_id.clone());
+            let current_generation = initial_generation;
             if let ChatPolicy::External {
                 create_conversation,
                 ..
@@ -2929,12 +3022,11 @@ async fn execute_chat_with_pending(
                 }
                 let turn = persistence::ExternalTurn::begin_with_input_metadata(
                     state,
-                    &char_id,
-                    cid.to_owned(),
+                    target.clone(),
                     client_request_id.clone(),
                     &request.message,
-                    false,
                     Some(metadata),
+                    Some(memory_scope.clone()),
                 )
                 .await?;
                 let cid = turn.target.conversation_id.clone();
@@ -2959,46 +3051,12 @@ async fn execute_chat_with_pending(
                 );
             }
 
-            // 校验目标会话一致性与世代一致性，防止跨会话串写、清空后复活幽灵会话、或 A -> B -> A 绕过校验
-            let generation_valid = current_generation == initial_generation;
-            let conversation_valid = match (
-                &requested_conversation_id,
-                &initial_conversation_id,
-                &current_conv_id,
-            ) {
-                // 请求显式指定了目标会话：当前锁内会话必须严格匹配
-                (Some(req_cid), _, Some(curr)) => req_cid == curr,
-                (Some(_), _, None) => false, // 指定了会话，但当前已被清空（如 clear_history）
-                // 请求未指定会话：
-                (None, Some(init), Some(curr)) => init == curr, // 进入时有会话，锁内未变
-                (None, None, None) => true, // 进入时无会话，锁内仍无会话（合法新建会话）
-                _ => false,                 // 其他情况均为排队期间会话已变化
-            };
-            let is_valid = generation_valid && conversation_valid;
-
-            if !is_valid {
-                tracing::warn!(
-                    target: "chat",
-                    "[stream_chat] Aborting chat turn: target conversation changed while request was queued. requested={:?}, initial={:?}, current={:?}, initial_gen={}, current_gen={}",
-                    requested_conversation_id,
-                    initial_conversation_id,
-                    current_conv_id,
-                    initial_generation,
-                    current_generation
-                );
-                return Err(KokoroError::Chat(
-                    "Conversation changed while request was in-flight".to_string(),
-                ));
-            }
-
             if let Some(conversation_id) = current_conv_id.as_deref() {
                 validate_conversation_character_id(&state.db, conversation_id, &char_id).await?;
             }
-
             if let Ok(mut recorded) = active_conv_id_for_prep.lock() {
-                *recorded = current_conv_id.clone();
+                *recorded = Some(identity.conversation_id.clone());
             }
-
             let bound_generation = initial_generation;
 
             let regeneration = match (&request.retry_failure, &request.regenerate_reply) {
@@ -3096,10 +3154,9 @@ async fn execute_chat_with_pending(
                         )
                     } else {
                         let target = ConversationTarget {
+                            require_character: true,
                             character_id: char_id.clone(),
-                            conversation_id: current_conv_id
-                                .clone()
-                                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                            conversation_id: identity.conversation_id.clone(),
                             create,
                         };
                         #[cfg(debug_assertions)]
@@ -3135,8 +3192,16 @@ async fn execute_chat_with_pending(
                     .save_messages_expected_locked(
                         &target,
                         &messages,
-                        create,
-                        Some(system_provider.clone()),
+                        create
+                            && state.current_conversation_generation() == initial_generation
+                            && state.get_character_id().await == char_id
+                            && state
+                                .selection
+                                .current_conversation_id
+                                .lock()
+                                .await
+                                .is_none(),
+                        None,
                         pending_user_save.as_ref().and(original_revision),
                     )
                     .await;
@@ -3153,12 +3218,22 @@ async fn execute_chat_with_pending(
                             messages,
                             expected_revision: Some(revision),
                             turn_id: assistant_turn_id.clone(),
-                            generation: current_generation,
                             vision: selected_vision_observation.clone(),
                         }),
                     );
                 }
                 let saved = saved?;
+                if saved.iter().any(|row| row.changed) {
+                    state
+                        .schedule_conversation_summary(
+                            &target,
+                            &client_request_id,
+                            system_provider.clone(),
+                            prompt_snapshot.response_language.clone(),
+                            Some(memory_scope.clone()),
+                        )
+                        .await;
+                }
                 (
                     Some(target.conversation_id),
                     saved.last().map(|message| message.id),
@@ -3169,23 +3244,6 @@ async fn execute_chat_with_pending(
                     request.hidden,
                     trailing_visible_user.map(|(id, _)| id),
                 );
-
-                // 防御性对齐：若因长会话预算或回溯导致当前 history 尾部缺失该用户消息，在内存中补齐供当前 turn 组装 prompt
-                if !request.hidden {
-                    let mut history = state.history.lock().await;
-                    let trailing_matches = history.back().is_some_and(|m| m.role == "user");
-                    if !trailing_matches {
-                        history.push_back(crate::ai::context::Message {
-                            role: "user".to_string(),
-                            content: request.message.clone(),
-                            metadata: None,
-                        });
-                        // Enforce rolling window limit even on defensive path
-                        while history.len() > crate::ai::context::MAX_IN_MEMORY_HISTORY_MESSAGES {
-                            history.pop_front();
-                        }
-                    }
-                }
 
                 (cid, mid)
             };
@@ -3201,16 +3259,18 @@ async fn execute_chat_with_pending(
                         "client_request_id": client_request_id,
                         "turn_id": assistant_turn_id,
                         "character_id": char_id,
-                        "conversation_id": cid,
+                        "conversation_id": identity.conversation_id,
                         "conversation_generation": state.current_conversation_generation(),
                         "user_message_id": mid,
                     }),
                 )
                 .await;
 
-            // 在释放会话切换锁前截取不可变历史快照，确保后续 prompt 组装使用与本次请求会话严格对齐的历史消息
-            let history_snapshot: Vec<crate::ai::context::Message> =
-                state.history.lock().await.iter().cloned().collect();
+            let history_snapshot = if cid.is_some() {
+                state.saved_history_for(&target, None).await?
+            } else {
+                Vec::new()
+            };
 
             (
                 cid,
@@ -3224,12 +3284,12 @@ async fn execute_chat_with_pending(
         };
 
         if let Ok(mut guard) = active_conv_id_for_prep.lock() {
-            *guard = conversation_id.clone();
+            *guard = Some(identity.conversation_id.clone());
         }
 
         if let Some(hooks) = hook_runtime.as_ref() {
             let hook_payload = build_chat_hook_payload(
-                conversation_id.clone(),
+                Some(identity.conversation_id.clone()),
                 &char_id,
                 None,
                 Some(request.message.clone()),
@@ -3255,7 +3315,7 @@ async fn execute_chat_with_pending(
             .filter(|_| user_message_id.is_some() && regeneration.is_none())
         {
             let hook_payload = build_chat_hook_payload(
-                conversation_id.clone(),
+                Some(identity.conversation_id.clone()),
                 &char_id,
                 None,
                 Some(request.message.clone()),
@@ -3283,8 +3343,6 @@ async fn execute_chat_with_pending(
 
         // ── LAYER 3: PERSONA GENERATION ─────────────────────────────
 
-        let llm_config = llm_state.config().await;
-        let chat_provider = llm_state.provider().await;
         let effective_provider_id = chat_provider.id().to_string();
         let native_tools_enabled = llm_config
             .providers
@@ -3298,9 +3356,6 @@ async fn execute_chat_with_pending(
             llm_config.active_provider, effective_provider_id, native_tools_enabled
         );
         let vision_config = vision_watcher.config.read().await.clone();
-        state
-            .set_vision_context_history_mode(vision_config.vision_context_history_mode.clone())
-            .await;
         let vision_enabled = desktop && vision_config.vlm_enabled;
 
         let (tool_prompt, native_tools) = {
@@ -3323,7 +3378,7 @@ async fn execute_chat_with_pending(
             let definitions = ActionRegistry::tool_definitions(actions);
             ((!prompt.is_empty()).then_some(prompt), definitions)
         };
-        let memory_target_language = prompt_state.response_language.lock().await.clone();
+        let memory_target_language = prompt_snapshot.response_language.clone();
 
         if cancel_state.is_cancelled(&assistant_turn_id).await {
             tracing::info!(
@@ -3344,17 +3399,17 @@ async fn execute_chat_with_pending(
         {
             (Vec::new(), Vec::new())
         } else {
-            prompt_state
+            state
                 .compose_chat_prompt(
                     &request.message,
                     request.allow_image_gen.unwrap_or(false),
                     tool_prompt,
                     native_tools_enabled,
                     &char_id,
-                    conversation_id.as_deref(),
+                    Some(&identity.conversation_id),
                     Some(history_snapshot),
                     desktop,
-                    &_chat_turn_guard,
+                    &prompt_snapshot,
                 )
                 .await
                 .map_err(|e| KokoroError::Chat(e.to_string()))?
@@ -3363,7 +3418,7 @@ async fn execute_chat_with_pending(
         // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
         for warning in compose_warnings {
             tracing::warn!("[compose_prompt] {}", warning);
-            let _ = policy.emit(app, "chat-warning", &warning).await;
+            let _ = policy.emit(app, "chat-warning", serde_json::json!({"message":warning,"client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id,"conversation_generation":request.conversation_generation})).await;
         }
 
         Ok(PreparedChatTurn {
@@ -3371,7 +3426,6 @@ async fn execute_chat_with_pending(
             conversation_id,
             user_message_id,
             bound_generation,
-            completion_generation,
             memory_epoch,
             regeneration,
             selected_vision_observation,
@@ -3456,7 +3510,6 @@ async fn execute_chat_with_pending(
         mut conversation_id,
         user_message_id,
         bound_generation,
-        completion_generation,
         memory_epoch,
         regeneration,
         selected_vision_observation,
@@ -3474,21 +3527,28 @@ async fn execute_chat_with_pending(
     if let Some(turn) = external_turn.as_ref() {
         if let Some((text, translation)) = &turn.previous_reply {
             let displayed_text = strip_leaked_tags(text);
-            super::follow_up::schedule_external_memory_tasks(
-                policy.source(),
-                &request.message,
-                &char_id,
-                turn,
-                state,
-                llm_state,
-                &memory_target_language,
-                turn.previous_memory_work,
-            )
-            .await;
+            if let Some(execution) = &turn.previous_execution {
+                super::follow_up::schedule_external_memory_tasks(
+                    policy.source(),
+                    &request.message,
+                    &char_id,
+                    turn,
+                    state,
+                    execution.memory_provider.clone(),
+                    &execution.memory_language,
+                    turn.previous_memory_work,
+                    execution.memory_scope.clone(),
+                )
+                .await;
+            }
             let _ = policy.emit(app, "chat-turn-text-complete", serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation})).await;
             let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
                 .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
             return Ok(StreamChatResponse {
+                speech_snapshot: turn
+                    .previous_execution
+                    .as_ref()
+                    .and_then(|execution| execution.speech.clone()),
                 text: displayed_text,
                 translation: translation.clone(),
                 conversation_id: turn.target.conversation_id.clone(),
@@ -3566,7 +3626,7 @@ async fn execute_chat_with_pending(
 
     if let Some(hooks) = hook_runtime.as_ref() {
         let hook_payload = build_chat_hook_payload(
-            conversation_id.clone(),
+            Some(identity.conversation_id.clone()),
             &char_id,
             Some(assistant_turn_id.clone()),
             Some(effective_request_message.clone()),
@@ -3620,7 +3680,7 @@ async fn execute_chat_with_pending(
         serde_json::json!({
             "turn_id": assistant_turn_id,
             "client_request_id": request.client_request_id,
-            "conversation_id": conversation_id,
+            "conversation_id": identity.conversation_id,
             "user_message_id": user_message_id,
         }),
     ).await
@@ -3728,6 +3788,7 @@ async fn execute_chat_with_pending(
     let mut cancel_rx = cancel_state.subscribe_cancellation(&assistant_turn_id).await;
 
     for round in 0..max_tool_rounds {
+        memory_scope.ensure_owner_current()?;
         tracing::info!(target: "chat", "[Chat] Tool loop round {}", round + 1);
         ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id)
             .await
@@ -3745,6 +3806,7 @@ async fn execute_chat_with_pending(
                 policy.emit(app, "chat-turn-delta", payload).await.map_err(|error| KokoroError::Chat(error.to_string()))
             },
         ).await?;
+        memory_scope.ensure_owner_current()?;
         let super::model_round::RoundOutput {
             text: round_response,
             reasoning: round_reasoning_content,
@@ -3756,10 +3818,10 @@ async fn execute_chat_with_pending(
         if let Some(failure) = failure {
             let retryable = !dispatched_tools;
             let failure_event = build_chat_error_event(failure.stage, &failure.message, &assistant_turn_id, retryable)
-                .into_failure_event(conversation_id.clone(), Some(assistant_turn_id.clone()), Some(char_id.clone()), None);
+                .into_failure_event(Some(identity.conversation_id.clone()), Some(assistant_turn_id.clone()), Some(char_id.clone()), None);
             emit_and_persist_failure_event(
                 app, policy, state, failure_event,
-                user_message_id, keep_through_message_id,
+                user_message_id, keep_through_message_id, &memory_scope,
             ).await?;
             stream_failure_message = Some(failure.message);
             stream_timed_out = failure.timed_out;
@@ -3786,7 +3848,7 @@ async fn execute_chat_with_pending(
                     if !draft_content.is_empty() {
                         if let Some(cid) = &conversation_id {
                             draft_row_id = save_visible_draft(
-                                state, &char_id, cid, &assistant_turn_id, draft_row_id, &draft_content,
+                                state, &char_id, cid, &assistant_turn_id, draft_row_id, &draft_content, &memory_scope,
                             ).await;
                             *draft_row_id_for_stream.lock().await = draft_row_id;
                         }
@@ -3888,7 +3950,7 @@ async fn execute_chat_with_pending(
             if !draft_content.is_empty() {
                 if let Some(cid) = &conversation_id {
                     draft_row_id = save_visible_draft(
-                        state, &char_id, cid, &assistant_turn_id, draft_row_id, &draft_content,
+                        state, &char_id, cid, &assistant_turn_id, draft_row_id, &draft_content, &memory_scope,
                     ).await;
                     *draft_row_id_for_stream.lock().await = draft_row_id;
                 }
@@ -3922,8 +3984,12 @@ async fn execute_chat_with_pending(
             .map_err(KokoroError::Chat)?;
         let allowed_tool_ids = (!desktop).then(|| native_tools.iter().map(|tool| tool.name.clone()).collect());
         let tool_scope = ToolExecutionScope {
+            memory_scope: Some(&memory_scope),
+            cue_names: cue_names.as_ref(),
+            request_id: &client_request_id,
+            turn_id: &assistant_turn_id,
             character_id: &char_id,
-            conversation_id: conversation_id.as_deref(),
+            conversation_id: Some(&identity.conversation_id),
             source: policy.source(),
             allow_hooks: desktop,
             allowed_tool_ids: allowed_tool_ids.as_ref(),
@@ -3998,7 +4064,7 @@ async fn execute_chat_with_pending(
                     .as_ref()
                     .unwrap_or(&PermissionDecision::Allow),
                 approved_by_user: None,
-                conversation_id: conversation_id.as_deref(),
+                conversation_id: Some(&identity.conversation_id),
                 character_id: Some(&char_id),
             });
             tracing::info!(target: "tools", "[ToolAudit] {:?}", audit_event);
@@ -4009,12 +4075,15 @@ async fn execute_chat_with_pending(
                     Some(PermissionDecision::DenyPendingApproval { .. })
                 ) {
                     let approval_ctx = ToolApprovalExecutionContext {
+                        memory_scope: &memory_scope,
+                        cue_names: cue_names.as_ref(),
+                        request_id: &client_request_id,
                         app,
                         approval_state: approval_state.as_ref(),
                         registry_state: action_registry,
                         tool_settings_state,
                         character_id: &char_id,
-                        conversation_id: conversation_id.as_deref(),
+                        conversation_id: Some(&identity.conversation_id),
                         turn_id: &assistant_turn_id,
                         tool_trace_id: &tool_trace_id,
                         cancel_state: cancel_state.as_ref(),
@@ -4196,9 +4265,7 @@ async fn execute_chat_with_pending(
                     )
                     .await
                     {
-                        Ok(true) => {
-                            conversation_id = None;
-                        }
+                        Ok(true) => {}
                         Ok(false) => {
                             tracing::info!(
                                 target: "chat",
@@ -4243,7 +4310,7 @@ async fn execute_chat_with_pending(
                 "turn_id": assistant_turn_id,
                 "status": "error",
                 "client_request_id": request.client_request_id,
-                "conversation_id": conversation_id,
+                "conversation_id": identity.conversation_id,
                 "assistant_message_id": finish_draft_row_id,
             }),
         ).await
@@ -4326,7 +4393,7 @@ async fn execute_chat_with_pending(
                 "turn_id": assistant_turn_id,
                 "status": "completed",
                 "client_request_id": request.client_request_id,
-                "conversation_id": conversation_id,
+                "conversation_id": identity.conversation_id,
                 "assistant_message_id": draft_row_id,
             }),
         ).await
@@ -4336,7 +4403,7 @@ async fn execute_chat_with_pending(
 
     if let Some(hooks) = hook_runtime.as_ref() {
         let hook_payload = build_chat_hook_payload(
-            conversation_id.clone(),
+            Some(identity.conversation_id.clone()),
             &char_id,
             Some(assistant_turn_id.clone()),
             Some(request.message.clone()),
@@ -4367,8 +4434,8 @@ async fn execute_chat_with_pending(
         }
     }
 
-    let user_lang = state.user_language.lock().await.clone();
-    let resp_lang = state.response_language.lock().await.clone();
+    let user_lang = prompt_snapshot.user_language.clone();
+    let resp_lang = prompt_snapshot.response_language.clone();
     let translation_pending = all_translations.is_empty()
         && !full_response.is_empty()
         && !user_lang.is_empty()
@@ -4455,27 +4522,17 @@ async fn execute_chat_with_pending(
         let mut cue_messages = vec![system_message(
                 crate::ai::prompts::CUE_ANALYZER_PROMPT.to_string(),
         )];
-        if let Some(profile) = crate::live2d::load_active_live2d_profile() {
-            let available_cues = profile
-                .cue_map
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
+        if let Some(cues) = cue_names.as_ref() {
+            let mut cues = cues.iter().cloned().collect::<Vec<_>>();
+            cues.sort();
+            let available_cues = cues.join(", ");
             cue_messages.push(system_message(format!(
                 "Available cues for the active model: {}.\nChoose exactly one from this list, or return null if none fit.",
                 if available_cues.is_empty() { "(none)" } else { &available_cues }
             )));
         }
         cue_messages.push(user_text_message(full_response.clone()));
-        let valid_fallback_cues =
-            crate::live2d::load_active_live2d_profile().map(|profile| {
-                profile
-                    .cue_map
-                    .keys()
-                    .cloned()
-                    .collect::<std::collections::HashSet<_>>()
-            });
+        let valid_fallback_cues = cue_names.as_ref();
         let cue_fut = system_provider.chat(cue_messages, None);
         let cue_timeout = chat_fallback_execution_timeout();
         let cue_res = tokio::select! {
@@ -4519,7 +4576,7 @@ async fn execute_chat_with_pending(
                                 tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
                                 let _ = policy.emit(app,
                                     "chat-cue",
-                                    serde_json::json!({ "cue": trimmed, "source": "fallback-cue" }),
+                                    serde_json::json!({ "cue": trimmed, "source": "fallback-cue", "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id }),
                                 ).await;
                             } else {
                                 tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
@@ -4565,8 +4622,11 @@ async fn execute_chat_with_pending(
         if !final_provider_data.is_empty() { metadata["provider_data"] = final_provider_data.into(); }
         pending_tool_messages.push(MessageWrite::new("assistant", &canonical_response, Some(metadata.to_string()))
             .with_save_id(format!("{client_request_id}:assistant")));
-        let work = turn.save_reply_batch(state, &canonical_response, final_translation.as_deref(), external_media.clone(), pending_tool_messages).await?;
-        super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, llm_state, &memory_target_language, work).await;
+        let work = turn.save_reply_batch(state, &canonical_response, final_translation.as_deref(), external_media.clone(), pending_tool_messages,
+            Some(Arc::new(persistence::ExternalReplyExecution {
+                speech: speech_snapshot.clone(), memory_provider: system_provider.clone(), memory_language: memory_target_language.clone(), memory_scope: memory_scope.clone(),
+            }))).await?;
+        super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, system_provider.clone(), &memory_target_language, work, memory_scope.clone()).await;
         let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
             .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
         let _ = policy.emit(app, "chat-turn-finish", serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"})).await;
@@ -4580,18 +4640,17 @@ async fn execute_chat_with_pending(
         intent_routing_enabled:upgrade_config.intent_routing_enabled,
     };
     let memory = {
-        let _selection = state.conversation_switch_lock.lock().await;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
         if !request.hidden && state.is_memory_enabled() && state.external_memory.epoch() == memory_epoch
-            && state.current_conversation_generation() == completion_generation
-            && conversation_id.is_some() && *state.current_conversation_id.lock().await == conversation_id
+            && conversation_id.is_some()
         {
-            let mut history = state.get_recent_memory_history(10).await;
+            let mut history = state.memory_history_for(&target, 10).await;
             if !full_response.is_empty() {
                 history.push(crate::ai::context::Message { role:"assistant".into(), content:canonical_response.clone(), metadata:None });
                 history.drain(..history.len().saturating_sub(10));
             }
             Some(crate::chat::post_commit::DesktopMemoryWork {
-                epoch:memory_epoch, count:state.get_memory_trigger_count().await, history,
+                epoch:memory_epoch, count:state.memory_progress_for(&target).await.0, history,
                 language:memory_target_language,
                 event:select_memory_ingress_decision(&request.message, &ingress_options),
                 structured:should_use_structured_extraction(upgrade_config.structured_memory_enabled, &ingress_options),
@@ -4599,8 +4658,9 @@ async fn execute_chat_with_pending(
         } else { None }
     };
     let mut post_commit = crate::chat::post_commit::DesktopPostCommit {
+        scope: Some(memory_scope.clone()),
+        request_id: client_request_id.clone(), turn_id: assistant_turn_id.clone(),
         character_id:char_id.clone(), conversation_id:conversation_id.clone(),
-        generation:completion_generation + u64::from(conversation_id.is_none()),
         database_generation:crate::ai::context::database_operation_generation(),
         provider:system_provider.clone(), memory,
         background:if request.allow_image_gen.unwrap_or(false) && !full_response.is_empty() && !bg_generated_by_tool {
@@ -4613,16 +4673,12 @@ async fn execute_chat_with_pending(
     // The assistant, its related context and native tool rows, and conversation
     // metadata become visible as committed history in one short transaction.
     if !full_response.is_empty() || !pending_tool_messages.is_empty() {
-        let _selection = state.conversation_switch_lock.lock().await;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        memory_scope.ensure_owner_current()?;
         let create = conversation_id.is_none();
-        if create && (state.current_conversation_generation() != bound_generation
-            || state.current_conversation_id.lock().await.is_some())
-        {
-            return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
-        }
-        let target = ConversationTarget {
-            character_id: char_id.clone(),
-            conversation_id: conversation_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()),
+        let target = ConversationTarget { require_character: true,
+            character_id: identity.character_id.clone(),
+            conversation_id: identity.conversation_id.clone(),
             create,
         };
         let mut messages = pending_tool_messages;
@@ -4658,7 +4714,7 @@ async fn execute_chat_with_pending(
         } else {
             persistence::current_revision(&state.db, &target).await.ok().flatten()
         };
-        let saved = match state.save_messages_locked(&target, &messages, create, None).await {
+        let saved = match state.save_messages_locked(&target, &messages, create && state.current_conversation_generation() == bound_generation && state.get_character_id().await == char_id && state.selection.current_conversation_id.lock().await.is_none(), None).await {
             Ok(saved) => saved,
             Err(error) => {
                 if let Some(expected_revision) = retry_revision {
@@ -4673,6 +4729,7 @@ async fn execute_chat_with_pending(
                         text: full_response.clone(),
                         has_assistant_text: !full_response.is_empty(),
                         speech: speech.clone(),
+                        speech_snapshot: speech_snapshot.clone(),
                         post_commit: { post_commit.conversation_id = Some(target.conversation_id.clone()); post_commit },
                     });
                 }
@@ -4698,7 +4755,7 @@ async fn execute_chat_with_pending(
                 "turn_id": assistant_turn_id,
                 "status": "completed",
                 "client_request_id": request.client_request_id,
-                "conversation_id": conversation_id,
+                "conversation_id": identity.conversation_id,
                 "assistant_message_id": draft_row_id,
             }),
         ).await
@@ -4710,7 +4767,7 @@ async fn execute_chat_with_pending(
 
     match stream_result {
         Ok(assistant_message_id) => {
-            if assistant_message_id.is_some() {
+            if desktop && assistant_message_id.is_some() {
                 if let Some(speech) = speech {
                     let text = app
                         .state::<Arc<crate::chat::runtime::ChatRuntimeState>>()
@@ -4722,12 +4779,14 @@ async fn execute_chat_with_pending(
                         assistant_turn_id.clone(),
                         text,
                         speech,
+                        speech_snapshot.clone(),
                     );
                 }
             }
             Ok(StreamChatResponse {
+                speech_snapshot: speech_snapshot.clone(),
                 text: String::new(),
-                conversation_id: conversation_id.unwrap_or_default(),
+                conversation_id: identity.conversation_id.clone(),
                 user_message_id,
                 assistant_message_id,
                 client_request_id: request.client_request_id,
@@ -4759,9 +4818,7 @@ async fn execute_chat_with_pending(
                     )
                     .await
                     {
-                        Ok(true) => {
-                            conversation_id = None;
-                        }
+                        Ok(true) => {}
                         Ok(false) => {
                             tracing::info!(
                                 target: "chat",
@@ -4790,7 +4847,7 @@ async fn execute_chat_with_pending(
                         "turn_id": assistant_turn_id,
                         "status": "cancelled",
                         "client_request_id": request.client_request_id,
-                        "conversation_id": conversation_id,
+                        "conversation_id": identity.conversation_id,
                         "assistant_message_id": serde_json::Value::Null,
                     }),
                 )
@@ -4798,7 +4855,7 @@ async fn execute_chat_with_pending(
                 .map_err(|e| KokoroError::Chat(e.to_string()))?;
             Ok(StreamChatResponse {
                 text: String::new(),
-                conversation_id: conversation_id.unwrap_or_default(),
+                conversation_id: identity.conversation_id.clone(),
                 user_message_id,
                 assistant_message_id: None,
                 client_request_id: request.client_request_id,
@@ -6756,7 +6813,7 @@ mod tests {
         assert_eq!(init_id, None);
         assert_eq!(init_gen, 0);
 
-        *state.current_conversation_id.lock().await = Some("conv-test".to_string());
+        *state.selection.current_conversation_id.lock().await = Some("conv-test".to_string());
         state.bump_conversation_generation();
 
         let (updated_id, updated_gen) = state.conversation_state_snapshot().await;
@@ -7020,475 +7077,6 @@ mod tests {
         // Non-hidden turns (e.g. regenerate) correctly reflect trailing user id
         assert_eq!(resolve_turn_user_message_id(false, Some(42)), Some(42));
         assert_eq!(resolve_turn_user_message_id(false, None), None);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_conversation_created_for_hidden_turn_creates_and_binds() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-        let runtime = crate::chat::runtime::ChatRuntimeState::default();
-        assert!(state.current_conversation_id.lock().await.is_none());
-
-        let mut conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        let bound_generation = state.current_conversation_generation();
-        for id in ["hidden", "unrelated"] {
-            runtime
-                .begin(&ChatRequest {
-                    client_request_id: Some(id.into()),
-                    character_id: Some("test_char".into()),
-                    conversation_generation: Some(bound_generation),
-                    hidden: true,
-                    ..Default::default()
-                })
-                .unwrap();
-            runtime.event(
-                "chat-turn-start",
-                &serde_json::json!({
-                    "client_request_id": id,
-                    "turn_id": if id == "hidden" { "turn-1" } else { "other-turn" },
-                }),
-            );
-        }
-        let created_id = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut conv_id,
-            &mut is_newly_created,
-            "turn-1",
-            bound_generation,
-            cancel_state.as_ref(),
-            &runtime,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(conv_id.as_deref(), Some(created_id.as_str()));
-        assert!(is_newly_created);
-        assert_eq!(
-            state.current_conversation_id.lock().await.as_deref(),
-            Some(created_id.as_str())
-        );
-        let (revision, turns) = runtime.journal_snapshot();
-        let bound = turns
-            .iter()
-            .find(|turn| turn.client_request_id == "hidden")
-            .unwrap();
-        assert_eq!(bound.conversation_id.as_deref(), Some(created_id.as_str()));
-        assert_eq!(bound.conversation_generation, Some(bound_generation + 1));
-        let unrelated = turns
-            .iter()
-            .find(|turn| turn.client_request_id == "unrelated")
-            .unwrap();
-        assert!(unrelated.conversation_id.is_none());
-        assert_eq!(unrelated.conversation_generation, Some(bound_generation));
-
-        // Subsequent call reuses existing conversation without re-creating
-        let mut second_newly_created = false;
-        let second_id = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut conv_id,
-            &mut second_newly_created,
-            "turn-1",
-            bound_generation,
-            cancel_state.as_ref(),
-            &runtime,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(second_id, created_id);
-        assert!(!second_newly_created);
-        assert_eq!(runtime.journal_snapshot().0, revision);
-    }
-
-    #[tokio::test]
-    async fn test_delete_empty_conversation_if_unused_cleans_up() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-
-        let mut conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        let bound_generation = state.current_conversation_generation();
-        let created_id = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut conv_id,
-            &mut is_newly_created,
-            "turn-1",
-            bound_generation,
-            cancel_state.as_ref(),
-            &crate::chat::runtime::ChatRuntimeState::default(),
-        )
-        .await
-        .unwrap();
-
-        // Conversation exists in DB
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
-            .bind(&created_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
-
-        // Delete empty conversation
-        let deleted = delete_empty_conversation_if_unused(&state, &created_id, None, None)
-            .await
-            .unwrap();
-        assert!(deleted);
-
-        // Conversation is gone from DB
-        let count_after: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
-                .bind(&created_id)
-                .fetch_one(&state.db)
-                .await
-                .unwrap();
-        assert_eq!(count_after, 0);
-
-        // state.current_conversation_id is reset to None
-        assert!(state.current_conversation_id.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_hidden_proactive_delayed_creation_and_noop_rollback() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-        assert!(state.current_conversation_id.lock().await.is_none());
-
-        // Scenario 1: Hidden turn with no tool calls and model returns PASS (pure no-op)
-        // Delayed creation means conversation_id stays None throughout.
-        let full_response = "PASS";
-        assert!(is_proactive_noop_response(full_response));
-
-        // In pure no-op, conversation_id is None, so 0 DB rows are created.
-        let total_convs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-        assert_eq!(total_convs, 0);
-        assert!(state.current_conversation_id.lock().await.is_none());
-
-        // Scenario 2: Hidden turn invokes native tools, lazily creating a conversation,
-        // but final model reply is empty / PASS.
-        // The temporary empty conversation must be cleaned up cleanly.
-        let mut tool_conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        let bound_generation = state.current_conversation_generation();
-        let cid = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut tool_conv_id,
-            &mut is_newly_created,
-            "turn-1",
-            bound_generation,
-            cancel_state.as_ref(),
-            &crate::chat::runtime::ChatRuntimeState::default(),
-        )
-        .await
-        .unwrap();
-
-        // Tool messages were added
-        state
-            .add_message_with_metadata_for_conversation(
-                "assistant".to_string(),
-                "".to_string(),
-                Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-1"}"#.to_string()),
-                "test_char",
-                Some(&cid),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Turn completes as no-op: delete_empty_conversation_if_unused cleans up artifacts and deletes empty conversation
-        if is_newly_created {
-            let deleted = delete_empty_conversation_if_unused(&state, &cid, Some("turn-1"), None)
-                .await
-                .unwrap();
-            assert!(deleted);
-            tool_conv_id = None;
-        }
-
-        assert!(tool_conv_id.is_none());
-        let convs_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-        assert_eq!(convs_after, 0);
-        assert!(state.current_conversation_id.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_ensure_conversation_created_for_hidden_turn_cancels_if_conversation_switched() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-        assert!(state.current_conversation_id.lock().await.is_none());
-
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        cancel_state.register_turn("turn-hidden-1").await;
-        let bound_generation = state.current_conversation_generation();
-
-        // While hidden turn is waiting, user/system switches to or creates conversation B
-        *state.current_conversation_id.lock().await = Some("conv-B".to_string());
-        state.bump_conversation_generation();
-
-        let mut conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-
-        // Hidden turn tries to lazily create a conversation
-        let res = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut conv_id,
-            &mut is_newly_created,
-            "turn-hidden-1",
-            bound_generation,
-            cancel_state.as_ref(),
-            &crate::chat::runtime::ChatRuntimeState::default(),
-        )
-        .await;
-
-        // Must return an Err and must NOT adopt conversation B
-        assert!(res.is_err());
-        assert_eq!(conv_id, None);
-        assert!(!is_newly_created);
-
-        // Turn must be marked cancelled in cancel_state
-        assert!(cancel_state.is_cancelled("turn-hidden-1").await);
-
-        // Global active conversation B must remain intact
-        assert_eq!(
-            state.current_conversation_id.lock().await.as_deref(),
-            Some("conv-B")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ensure_conversation_created_for_hidden_turn_cancels_if_generation_changed_even_if_none(
-    ) {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-        assert!(state.current_conversation_id.lock().await.is_none());
-
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        cancel_state.register_turn("turn-hidden-2").await;
-        let bound_generation = state.current_conversation_generation();
-
-        // While waiting, conversations were created and cleared so current_conversation_id is None again,
-        // but generation has advanced (ABA scenario).
-        state.bump_conversation_generation();
-        assert!(state.current_conversation_id.lock().await.is_none());
-
-        let mut conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-
-        let res = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut conv_id,
-            &mut is_newly_created,
-            "turn-hidden-2",
-            bound_generation,
-            cancel_state.as_ref(),
-            &crate::chat::runtime::ChatRuntimeState::default(),
-        )
-        .await;
-
-        // Divergence detected: must be cancelled
-        assert!(res.is_err());
-        assert_eq!(conv_id, None);
-        assert!(!is_newly_created);
-        assert!(cancel_state.is_cancelled("turn-hidden-2").await);
-    }
-
-    #[tokio::test]
-    async fn test_delete_empty_conversation_if_unused_preserves_external_messages_and_cleans_technical_rows(
-    ) {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-
-        let mut tool_conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        let bound_generation = state.current_conversation_generation();
-        let cid = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut tool_conv_id,
-            &mut is_newly_created,
-            "turn-1",
-            bound_generation,
-            cancel_state.as_ref(),
-            &crate::chat::runtime::ChatRuntimeState::default(),
-        )
-        .await
-        .unwrap();
-
-        // 1. Technical tool messages added by turn-1
-        state
-            .add_message_with_metadata_for_conversation(
-                "assistant".to_string(),
-                "".to_string(),
-                Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-1"}"#.to_string()),
-                "test_char",
-                Some(&cid),
-                None,
-            )
-            .await
-            .unwrap();
-
-        state
-            .add_message_with_metadata_for_conversation(
-                "tool".to_string(),
-                "tool output".to_string(),
-                Some(r#"{"type":"tool_result","turn_id":"turn-1","tool":"search"}"#.to_string()),
-                "test_char",
-                Some(&cid),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // 2. Real message arrives from background source (pet, telegram, or user)
-        let (_, real_msg_id) = state
-            .add_message_with_metadata_for_conversation(
-                "user".to_string(),
-                "Important message from Telegram".to_string(),
-                None,
-                "test_char",
-                Some(&cid),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // 3. Hidden turn completes as no-op or failure: call delete_empty_conversation_if_unused
-        let deleted = delete_empty_conversation_if_unused(&state, &cid, Some("turn-1"), None)
-            .await
-            .unwrap();
-
-        // Must NOT delete the conversation because it contains real messages!
-        assert!(
-            !deleted,
-            "Conversation must be preserved when other messages exist"
-        );
-
-        // Conversation still exists in DB
-        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
-            .bind(&cid)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-        assert_eq!(conv_count, 1);
-
-        // Current conversation pointer is still active
-        assert_eq!(
-            state.current_conversation_id.lock().await.as_deref(),
-            Some(cid.as_str())
-        );
-
-        // Technical rows were deleted, but the real message remains intact
-        let remaining_messages: Vec<(i64, String, String)> = sqlx::query_as(
-            "SELECT id, role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
-        )
-        .bind(&cid)
-        .fetch_all(&state.db)
-        .await
-        .unwrap();
-
-        assert_eq!(remaining_messages.len(), 1);
-        assert_eq!(remaining_messages[0].0, real_msg_id);
-        assert_eq!(remaining_messages[0].1, "user");
-        assert_eq!(remaining_messages[0].2, "Important message from Telegram");
-
-        // In-memory history was resynced and contains the real user message
-        let history = state.history.lock().await;
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].role, "user");
-        assert_eq!(history[0].content, "Important message from Telegram");
-    }
-
-    #[tokio::test]
-    async fn test_delete_empty_conversation_if_unused_cleans_turn_draft_and_deletes_when_empty() {
-        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
-
-        let mut tool_conv_id: Option<String> = None;
-        let mut is_newly_created = false;
-        let cancel_state = Arc::new(TurnCancellationState::new());
-        let bound_generation = state.current_conversation_generation();
-        let cid = ensure_conversation_created_for_hidden_turn(
-            &state,
-            "test_char",
-            &mut tool_conv_id,
-            &mut is_newly_created,
-            "turn-2",
-            bound_generation,
-            cancel_state.as_ref(),
-            &crate::chat::runtime::ChatRuntimeState::default(),
-        )
-        .await
-        .unwrap();
-
-        // Technical tool message
-        state
-            .add_message_with_metadata_for_conversation(
-                "assistant".to_string(),
-                "".to_string(),
-                Some(r#"{"type":"assistant_tool_calls","turn_id":"turn-2"}"#.to_string()),
-                "test_char",
-                Some(&cid),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Draft assistant message (metadata IS NULL)
-        let (_, draft_row_id) = state
-            .add_message_with_metadata_for_conversation(
-                "assistant".to_string(),
-                "partial streaming draft...".to_string(),
-                None,
-                "test_char",
-                Some(&cid),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Turn cancelled/failed: cleanup with draft_row_id
-        let deleted =
-            delete_empty_conversation_if_unused(&state, &cid, Some("turn-2"), Some(draft_row_id))
-                .await
-                .unwrap();
-
-        // All rows belonged to turn-2, so conversation must be deleted!
-        assert!(
-            deleted,
-            "Conversation must be deleted when only turn artifacts exist"
-        );
-
-        // Conversation gone from DB
-        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ?")
-            .bind(&cid)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
-        assert_eq!(conv_count, 0);
-
-        // Messages gone from DB
-        let msg_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?",
-        )
-        .bind(&cid)
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
-        assert_eq!(msg_count, 0);
-
-        // Current conversation pointer reset to None
-        assert!(state.current_conversation_id.lock().await.is_none());
-        assert!(state.history.lock().await.is_empty());
     }
 
     #[tokio::test]
