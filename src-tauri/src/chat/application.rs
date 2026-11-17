@@ -162,11 +162,8 @@ async fn emit_and_persist_failure_event(
     user_message_id: Option<i64>,
     keep_through_message_id: Option<i64>,
     scope: &crate::chat::ownership::MemoryWriteScope,
-) -> Result<(), KokoroError> {
-    policy
-        .emit(chat, ChatEvent::Failure, failure_event.clone())
-        .await
-        .map_err(|error| KokoroError::Chat(error.to_string()))?;
+) {
+    policy.emit(chat, ChatEvent::Failure, failure_event.clone());
 
     if let Err(error) = persist_failure_event_to_conversation(
         state,
@@ -189,8 +186,6 @@ async fn emit_and_persist_failure_event(
             error
         );
     }
-
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -1128,14 +1123,8 @@ impl ChatPolicy {
         }
     }
 
-    async fn emit(
-        self,
-        chat: &ChatService,
-        event: ChatEvent,
-        payload: impl Serialize,
-    ) -> Result<(), std::convert::Infallible> {
+    fn emit(self, chat: &ChatService, event: ChatEvent, payload: impl Serialize) {
         chat.events.publish(self.is_desktop(), event, payload);
-        Ok(())
     }
 }
 
@@ -1640,14 +1629,14 @@ fn rejected_tool_trace_payload_for_test(
     rejected_tool_trace_payload(outcome, turn_id, error, approval_request_id)
 }
 
-async fn emit_tool_trace_event(
+fn emit_tool_trace_event(
     chat: &ChatService,
     policy: ChatPolicy,
     tool_trace_id: &str,
     mut payload: serde_json::Value,
-) -> Result<(), std::convert::Infallible> {
+) {
     payload["tool_trace_id"] = serde_json::Value::String(tool_trace_id.to_owned());
-    policy.emit(chat, ChatEvent::Tool, payload).await
+    policy.emit(chat, ChatEvent::Tool, payload);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1864,9 +1853,7 @@ async fn wait_for_tool_approval_and_execute(
         ChatPolicy::Desktop,
         ctx.tool_trace_id,
         requested_payload,
-    )
-    .await
-    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+    );
 
     let decision = wait_for_tool_approval_decision(
         ctx.approval_state,
@@ -2569,21 +2556,19 @@ async fn run_chat_worker(
                 scope.character_id,
                 None,
             );
-            let _ = policy.emit(&chat, ChatEvent::Failure, failure).await;
-            let _ = policy
-                .emit(
-                    &chat,
-                    ChatEvent::Finished,
-                    serde_json::json!({
-                        "turn_id": scope.turn_id,
-                        "client_request_id": request_id,
-                        "conversation_id": scope.conversation_id,
-                        "status": "error",
-                        "stage": "persistence",
-                        "code": KokoroError::CHAT_PERSISTENCE_CODE,
-                    }),
-                )
-                .await;
+            policy.emit(&chat, ChatEvent::Failure, failure);
+            policy.emit(
+                &chat,
+                ChatEvent::Finished,
+                serde_json::json!({
+                    "turn_id": scope.turn_id,
+                    "client_request_id": request_id,
+                    "conversation_id": scope.conversation_id,
+                    "status": "error",
+                    "stage": "persistence",
+                    "code": KokoroError::CHAT_PERSISTENCE_CODE,
+                }),
+            );
         }
     }
     if let Some(snapshot) = runtime.complete(&request_id, result) {
@@ -2715,20 +2700,18 @@ impl ChatService {
                     .post_commit
                     .dispatch(state.clone(), chat.events.clone());
                 chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
-                let _ = ChatPolicy::Desktop
-                    .emit(
-                        &chat,
-                        ChatEvent::Finished,
-                        serde_json::json!({
-                            "turn_id": pending.turn_id,
-                            "client_request_id": client_request_id,
-                            "conversation_id": response.conversation_id,
-                            "assistant_message_id": response.assistant_message_id,
-                            "status": "completed",
-                            "text": response.text,
-                        }),
-                    )
-                    .await;
+                ChatPolicy::Desktop.emit(
+                    &chat,
+                    ChatEvent::Finished,
+                    serde_json::json!({
+                        "turn_id": pending.turn_id,
+                        "client_request_id": client_request_id,
+                        "conversation_id": response.conversation_id,
+                        "assistant_message_id": response.assistant_message_id,
+                        "status": "completed",
+                        "text": response.text,
+                    }),
+                );
                 if let Some(speech) = pending.speech {
                     chat.speak_completed_turn(
                         client_request_id,
@@ -2892,25 +2875,16 @@ async fn execute_chat_with_pending(
         ));
     }
 
-    policy
-        .emit(
-            chat,
-            ChatEvent::Acknowledged,
-            serde_json::json!({
-                "turn_id": assistant_turn_id,
-                "client_request_id": client_request_id,
-                "character_id": char_id,
-                "conversation_id": request.conversation_id,
-            }),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                target: "chat",
-                "[stream_chat] Failed to emit chat-turn-acknowledged: {}",
-                e
-            );
-        });
+    policy.emit(
+        chat,
+        ChatEvent::Acknowledged,
+        serde_json::json!({
+            "turn_id": assistant_turn_id,
+            "client_request_id": client_request_id,
+            "character_id": char_id,
+            "conversation_id": request.conversation_id,
+        }),
+    );
 
     let active_conversation_id_holder = std::sync::Arc::new(std::sync::Mutex::new(None));
     let active_conv_id_for_prep = std::sync::Arc::clone(&active_conversation_id_holder);
@@ -3009,7 +2983,7 @@ async fn execute_chat_with_pending(
             let mut typing_event = serde_json::to_value(&typing_params).unwrap_or_default();
             typing_event["client_request_id"] = client_request_id.clone().into();
             typing_event["turn_id"] = assistant_turn_id.clone().into();
-            let _ = policy.emit(chat, ChatEvent::Typing, typing_event).await;
+            policy.emit(chat, ChatEvent::Typing, typing_event);
         }
 
         // 1. Select current-turn vision context before any user-message persistence.
@@ -3160,10 +3134,10 @@ async fn execute_chat_with_pending(
                 if let Ok(mut guard) = active_conv_id_for_prep.lock() {
                     *guard = Some(cid.clone());
                 }
-                let _ = policy.emit(chat, ChatEvent::Bound, serde_json::json!({
+                policy.emit(chat, ChatEvent::Bound, serde_json::json!({
                     "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":char_id,
                     "conversation_id":cid,"user_message_id":mid,"message":request.message,
-                })).await;
+                }));
                 external_turn = Some(turn);
                 break 'bind (
                     Some(cid),
@@ -3383,20 +3357,18 @@ async fn execute_chat_with_pending(
             // Bind persisted identity before releasing the same lock used by
             // get_chat_view. A subscriber joining during prompt preparation must
             // not project a second optimistic user beside this SQLite row.
-            let _ = policy
-                .emit(
-                    chat,
-                    ChatEvent::Bound,
-                    serde_json::json!({
-                        "client_request_id": client_request_id,
-                        "turn_id": assistant_turn_id,
-                        "character_id": char_id,
-                        "conversation_id": identity.conversation_id,
-                        "conversation_generation": projection_generation,
-                        "user_message_id": mid,
-                    }),
-                )
-                .await;
+            policy.emit(
+                chat,
+                ChatEvent::Bound,
+                serde_json::json!({
+                    "client_request_id": client_request_id,
+                    "turn_id": assistant_turn_id,
+                    "character_id": char_id,
+                    "conversation_id": identity.conversation_id,
+                    "conversation_generation": projection_generation,
+                    "user_message_id": mid,
+                }),
+            );
 
             let history_snapshot = if cid.is_some() {
                 state.saved_history_for(&target, None).await?
@@ -3550,7 +3522,7 @@ async fn execute_chat_with_pending(
         // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
         for warning in compose_warnings {
             tracing::warn!("[compose_prompt] {}", warning);
-            let _ = policy.emit(chat, ChatEvent::Warning, serde_json::json!({"message":warning,"client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id,"conversation_generation":request.conversation_generation})).await;
+            policy.emit(chat, ChatEvent::Warning, serde_json::json!({"message":warning,"client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id,"conversation_generation":request.conversation_generation}));
         }
 
         Ok(PreparedChatTurn {
@@ -3590,7 +3562,7 @@ async fn execute_chat_with_pending(
                 .lock()
                 .ok()
                 .and_then(|g| g.clone());
-            let _ = policy.emit(chat,
+            policy.emit(chat,
                 ChatEvent::Finished,
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
@@ -3599,7 +3571,7 @@ async fn execute_chat_with_pending(
                     "conversation_id": recorded_conv_id,
                     "assistant_message_id": serde_json::Value::Null,
                 }),
-            ).await;
+            );
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
         }
         _ = tokio::time::sleep(preparation_timeout) => {
@@ -3614,7 +3586,7 @@ async fn execute_chat_with_pending(
                 .lock()
                 .ok()
                 .and_then(|g| g.clone());
-            let _ = policy.emit(chat,
+            policy.emit(chat,
                 ChatEvent::Finished,
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
@@ -3624,7 +3596,7 @@ async fn execute_chat_with_pending(
                     "conversation_id": recorded_conv_id,
                     "assistant_message_id": serde_json::Value::Null,
                 }),
-            ).await;
+            );
             return Err(KokoroError::Chat(format!(
                 "Turn preparation timed out after {}s",
                 preparation_timeout.as_secs()
@@ -3685,7 +3657,7 @@ async fn execute_chat_with_pending(
                 )
                 .await;
             }
-            let _ = policy.emit(chat, ChatEvent::TextComplete, serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation})).await;
+            policy.emit(chat, ChatEvent::TextComplete, serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation}));
             let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
                 .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
             return Ok(StreamChatResponse {
@@ -3827,8 +3799,7 @@ async fn execute_chat_with_pending(
             "conversation_id": identity.conversation_id,
             "user_message_id": user_message_id,
         }),
-    ).await
-    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+    );
 
     // For hidden messages (touch/proactive interactions), the user message
     // wasn't added to history, so include it before dedicated vision rendering.
@@ -3947,7 +3918,8 @@ async fn execute_chat_with_pending(
                 let payload = build_turn_delta_payload_if_not_cancelled(
                     cancel_state.as_ref(), &assistant_turn_id, text, request.client_request_id.as_deref(),
                 ).await.map_err(KokoroError::Chat)?;
-                policy.emit(chat, ChatEvent::Delta, payload).await.map_err(|error| KokoroError::Chat(error.to_string()))
+                policy.emit(chat, ChatEvent::Delta, payload);
+                Ok(())
             },
         ).await?;
         memory_scope.ensure_owner_current()?;
@@ -3966,7 +3938,7 @@ async fn execute_chat_with_pending(
             emit_and_persist_failure_event(
                 chat, policy, state, failure_event,
                 user_message_id, keep_through_message_id, &memory_scope,
-            ).await?;
+            ).await;
             stream_failure_message = Some(failure.message);
             stream_timed_out = failure.timed_out;
             stream_failed = true;
@@ -4015,8 +3987,7 @@ async fn execute_chat_with_pending(
                 )
                 .await
                 .map_err(KokoroError::Chat)?;
-                policy.emit(chat, ChatEvent::Delta, payload).await
-                    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                policy.emit(chat, ChatEvent::Delta, payload);
             }
         }
 
@@ -4249,8 +4220,7 @@ async fn execute_chat_with_pending(
                     ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id)
                         .await
                         .map_err(KokoroError::Chat)?;
-                    emit_tool_trace_event(chat, policy, &tool_trace_id, resolved_payload).await
-                        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+                    emit_tool_trace_event(chat, policy, &tool_trace_id, resolved_payload);
                     ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id)
                         .await
                         .map_err(KokoroError::Chat)?;
@@ -4258,14 +4228,14 @@ async fn execute_chat_with_pending(
                 } else {
                     tracing::error!(target: "tools", "[ToolCall] {} failed: {}", outcome.tool_name(), error);
                     let payload = tool_error_payload(&outcome, &assistant_turn_id, error);
-                    let _ = emit_tool_trace_event(chat, policy, &tool_trace_id, payload).await;
+                    emit_tool_trace_event(chat, policy, &tool_trace_id, payload);
                     outcome.result.clone()
                 }
             } else {
                 if let Ok(success) = &outcome.result {
                     tracing::info!(target: "tools", "[ToolCall] {} => {}", outcome.tool_name(), success.message);
                     let payload = tool_success_payload(&outcome, &assistant_turn_id, success);
-                    let _ = emit_tool_trace_event(chat, policy, &tool_trace_id, payload).await;
+                    emit_tool_trace_event(chat, policy, &tool_trace_id, payload);
                 }
                 outcome.result.clone()
             };
@@ -4437,7 +4407,7 @@ async fn execute_chat_with_pending(
                 cleanup_turn_artifacts(state, cid, &assistant_turn_id, None).await;
             }
             // Flush typewriter/reveal buffer in frontend
-            let _ = policy.emit(chat,
+            policy.emit(chat,
                 ChatEvent::TextComplete,
                 serde_json::json!({
                     "turn_id": assistant_turn_id,
@@ -4445,7 +4415,7 @@ async fn execute_chat_with_pending(
                     "translation_pending": false,
                     "translation": serde_json::Value::Null,
                 }),
-            ).await;
+            );
         }
 
         policy.emit(chat,
@@ -4457,8 +4427,7 @@ async fn execute_chat_with_pending(
                 "conversation_id": identity.conversation_id,
                 "assistant_message_id": finish_draft_row_id,
             }),
-        ).await
-        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+        );
 
         let err_msg = stream_failure_message
             .unwrap_or_else(|| "Chat stream failed or timed out".to_string());
@@ -4529,8 +4498,7 @@ async fn execute_chat_with_pending(
                 "translation_pending": false,
                 "translation": serde_json::Value::Null,
             }),
-        ).await
-        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+        );
         policy.emit(chat,
             ChatEvent::Finished,
             serde_json::json!({
@@ -4540,8 +4508,7 @@ async fn execute_chat_with_pending(
                 "conversation_id": identity.conversation_id,
                 "assistant_message_id": draft_row_id,
             }),
-        ).await
-        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+        );
         return Ok(None);
     }
 
@@ -4598,8 +4565,7 @@ async fn execute_chat_with_pending(
                 serde_json::Value::String(all_translations.join(" "))
             },
         }),
-    ).await
-    .map_err(|e| KokoroError::Chat(e.to_string()))?;
+    );
 
     // Fallback translation: if main LLM missed the [TRANSLATE:...] tag, use system LLM to fill in
     if translation_pending {
@@ -4718,10 +4684,10 @@ async fn execute_chat_with_pending(
                                 .unwrap_or(false);
                             if is_valid {
                                 tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
-                                let _ = policy.emit(chat,
+                                policy.emit(chat,
                                     ChatEvent::Cue,
                                     serde_json::json!({ "cue": trimmed, "source": "fallback-cue", "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id }),
-                                ).await;
+                                );
                             } else {
                                 tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
                             }
@@ -4739,13 +4705,13 @@ async fn execute_chat_with_pending(
     if !all_translations.is_empty() {
         let combined_translation = all_translations.join(" ");
         final_translation = Some(combined_translation.clone());
-        let _ = policy.emit(chat,
+        policy.emit(chat,
             ChatEvent::Translation,
             serde_json::json!({
                 "turn_id": assistant_turn_id,
                 "translation": combined_translation,
             }),
-        ).await;
+        );
     }
 
     if let Some(turn) = external_turn.as_ref() {
@@ -4773,7 +4739,7 @@ async fn execute_chat_with_pending(
         super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, system_provider.clone(), &memory_target_language, work, memory_scope.clone()).await;
         let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
             .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
-        let _ = policy.emit(chat, ChatEvent::Finished, serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"})).await;
+        policy.emit(chat, ChatEvent::Finished, serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"}));
         return Ok(Some(row));
     }
 
@@ -4906,8 +4872,7 @@ async fn execute_chat_with_pending(
                 "conversation_id": identity.conversation_id,
                 "assistant_message_id": draft_row_id,
             }),
-        ).await
-        .map_err(|e| KokoroError::Chat(e.to_string()))?;
+        );
 
         Ok(draft_row_id)
     }
@@ -4988,20 +4953,17 @@ async fn execute_chat_with_pending(
                     cleanup_turn_artifacts(state, cid, &assistant_turn_id, draft_row_id).await;
                 }
             }
-            policy
-                .emit(
-                    chat,
-                    ChatEvent::Finished,
-                    serde_json::json!({
-                        "turn_id": assistant_turn_id,
-                        "status": "cancelled",
-                        "client_request_id": request.client_request_id,
-                        "conversation_id": identity.conversation_id,
-                        "assistant_message_id": serde_json::Value::Null,
-                    }),
-                )
-                .await
-                .map_err(|e| KokoroError::Chat(e.to_string()))?;
+            policy.emit(
+                chat,
+                ChatEvent::Finished,
+                serde_json::json!({
+                    "turn_id": assistant_turn_id,
+                    "status": "cancelled",
+                    "client_request_id": request.client_request_id,
+                    "conversation_id": identity.conversation_id,
+                    "assistant_message_id": serde_json::Value::Null,
+                }),
+            );
             Ok(StreamChatResponse {
                 text: String::new(),
                 conversation_id: identity.conversation_id.clone(),
