@@ -255,3 +255,31 @@ A 的聊天在切换到 B 后仍应完成并保存到 A，但自动语音属于�
 - 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round5-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json` 和同目录 `recovery-report.json`。
 
 两个套件的二进制 SHA-256 均为 `550465A2A840877CE939C296D49CF11CA21F10DBF9D0B2FE4DD01716FA74E600`。`output/state-ownership/source-manifest-pr4-round5.json` 的 51 个 PR 源文件最终复算 changed=0；端口 1420/19333/19334/19335/19336 无监听残留。新原生程序验证了真实 IPC/窗口/持久化和受控语音交付路径；真实云语音服务、音频硬件输出、Telegram 网络及非 Windows 平台仍未验证。测试日志、隔离数据库和本机配置未纳入提交。
+
+
+## PR #4 第六轮修复：语音测试的事件归属和同步（2026-11-17）
+
+独立复审在 `cargo test --offline --manifest-path src-tauri/Cargo.toml --lib chat::` 观察到一次测试失败：`events.last().status` 得到 Null，而断言要求 cancelled。原始失败没有完整事件载荷，无法确定具体串扰来源；随后单独和全量通过也不能消除已发生的失败。本轮只修改 `ownership_test.rs` 和本文档，没有生产修复。
+
+`verify_automatic_speech_selection` 在模型 Notify 暂停期间从生产 runtime 取得原 turn ID，再建立只接收 `chat_<turn_id>` 的 `SpeechObservation`，之后才释放模型。收集器保留目标请求的所有事件，等待目标 start/end；正常播放另等待目标 browser-delegate。每次等待均重新检查状态条件，以 Notify 唤醒，不使用 sleep 或固定回调顺序。断言按明确事件名读取终态，保留原角色/会话/请求/turn 身份、SQL 用户/助手各一行、选中时正常媒体以及取消时目标没有迟到媒体的检查。真实入口还主动发送无关请求的 end，确保不会提前结束等待。
+
+两个独立同步测试控制如下顺序：无关 end → 目标 end → 延迟的目标 start，以及目标 start/end → 无关 delegate → 延迟的目标 delegate。它们直接轮询等待 future 的 Pending/Ready 状态，没有时间偶然性；第二例还确认异常的目标 audio 不会被过滤，仍可供负向断言发现。第一例刻意产生“最后一个回调没有 status、目标终态却是 cancelled”的顺序，证明不能用 last() 判断终态。保留旧收集/唤醒语义时两个测试均红灯（`pr4-round6-red.log`）；这证明了旧算法的确定性反例，不将其声称为原复审失败的已确认交错。
+
+本轮普通 Rust 测试使用独立 `output/state-ownership/pr4-round6-isolated-data`。`production-comparison-pr4-round6.json` 对精确父提交 `8fe7b711a4d024fa2726a40088f7fcae65143ebb` 核对生产变更为 0；第五轮源码清单的 51 个路径只有 `ownership_test.rs` 哈希改变，其余 50 个相同。第五轮原生 exe 的 SHA-256 仍为 `550465A2A840877CE939C296D49CF11CA21F10DBF9D0B2FE4DD01716FA74E600`。
+
+因此本轮不重建或重跑原生套件，明确复用第五轮的 lifecycle 39/39、persistence 17/17 和 recovery passed；这不是第六轮新跑的结果。前端源码/契约也未改变，未重复运行 npm/build/IPC，其证据仍归属第五轮。真实云服务、音频硬件、平台网络和非 Windows 的未验证范围不变。
+
+
+连续验证中另保留了一次早期等待失败：`pr4-round6-chat-1.log` 为 187 通过 / 1 失败，位置在既有 `verify_admission_selection_generation` 的 journal/busy 轮询超时，尚未进入自动语音测试。加入 worker 早退结果/journal 诊断后的单轮为 188/188（`pr4-round6-chat-diagnostic.log`），没有再次捕获早退，故该次超时的具体因果仍未证明。代码检查发现 `is_chat_busy()` 的 try_lock 观察会短暂占用 worker 准入使用的同一互斥锁；轮询干扰准入是代码支持的风险推断，不是对原失败载荷的事实补充。该测试现改为按原请求过滤的 acknowledged Notify，再检查 accepted/turn ID；prompt Mutex 仍控制快照暂停。保留提前返回及超时的 journal 诊断，没有延长超时、重试请求或强制单线程。下述最终连续验证从这个收尾后的版本重新开始。
+
+
+第六轮最终检查（日志在 `output/state-ownership/`）：
+
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml --lib chat::ownership_test::speech_observation_ -- --nocapture`：两个受控顺序测试 2/2；`pr4-round6-green.log`，红灯反例保留于 `pr4-round6-red.log`。之后最终聊天套件及全量也包含这两例。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml --lib chat::channels_test::desktop_webhook_and_telegram_execute_the_same_bound_chat -- --exact --nocapture`：收尾后连续两轮各 1/1（109.95s、110.15s）；`pr4-round6-final-target-1.log`、`pr4-round6-final-target-2.log`。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml --lib chat::`：收尾后连续两轮各 **188/188**（110.88s、110.94s）；`pr4-round6-final-chat-1.log`、`pr4-round6-final-chat-2.log`。没有传单线程参数，`RUST_TEST_THREADS` 未设置。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：**1010/1010**，bin/doc 0，无后台 panic；`pr4-round6-final-rust-all.log`。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`pr4-round6-final-clippy.log`。
+- `rustfmt --check --edition 2021 src-tauri/src/chat/ownership_test.rs` 与 `git diff --check`：通过。
+
+`source-manifest-pr4-round6.json` 的当前 51 个源文件最终复算 changed=0；相对 `8fe7b71` 的生产源变更仍为 0，只有测试和本文档参与提交。第五轮二进制最终复算仍为上述 SHA-256，原生证据继续按“第五轮复用”标识，未冒充第六轮执行结果。早期未通过的聊天套件和诊断日志保留，不由后来通过的日志覆盖。

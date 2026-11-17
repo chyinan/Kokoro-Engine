@@ -4,7 +4,7 @@ use crate::characters::activation::ActivationCoordinator;
 use crate::chat::{application::ChatRequest, runtime::ChatRuntimeState};
 use crate::telegram::bot::{submit_message, SessionMode};
 use std::{sync::Arc, time::Duration};
-use tauri::{Listener, Manager};
+use tauri::{Emitter, Listener, Manager};
 use teloxide::types::ChatId;
 
 pub(super) async fn verify_state_ownership(
@@ -908,7 +908,18 @@ pub(super) async fn verify_admission_selection_generation(
         } else {
             None
         };
-        let worker = tokio::spawn(submit_chat(
+        let acknowledged = Arc::new(tokio::sync::Notify::new());
+        let ack_listener = prompt_guard.as_ref().map(|_| {
+            let acknowledged = acknowledged.clone();
+            let target = request_id.clone();
+            app.listen("chat-turn-acknowledged", move |event| {
+                let value: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+                if value["client_request_id"] == target {
+                    acknowledged.notify_one();
+                }
+            })
+        });
+        let mut worker = tokio::spawn(submit_chat(
             app.clone(),
             ChatRequest {
                 message: "[wait] preserve admission selection".into(),
@@ -920,15 +931,19 @@ pub(super) async fn verify_admission_selection_generation(
             },
             ChatPolicy::Desktop,
         ));
-        if prompt_guard.is_some() {
-            // Observation only: the held mutex is the actual pause, no timing sleeps.
+        if let Some(ack_listener) = ack_listener {
+            // Acknowledgement is emitted only after the target owns execution.
+            // Unlike is_chat_busy's try_lock probe, it cannot contend with admission.
             tokio::time::timeout(Duration::from_secs(5), async {
-                while runtime.turn_scope(&request_id).is_none() || !state.is_chat_busy() {
-                    tokio::task::yield_now().await;
+                tokio::select! {
+                    result = &mut worker => panic!("{request_id}: worker returned before snapshot pause: {result:?}; scope={}", serde_json::to_string(&runtime.turn_scope(&request_id)).unwrap()),
+                    _ = acknowledged.notified() => {}
                 }
-            })
-            .await
-            .unwrap();
+            }).await.unwrap_or_else(|_| panic!("{request_id}: acknowledgement missing; scope={}", serde_json::to_string(&runtime.turn_scope(&request_id)).unwrap()));
+            app.unlisten(ack_listener);
+            let accepted = runtime.turn_scope(&request_id).unwrap();
+            assert_eq!(accepted.status, "accepted");
+            assert!(accepted.turn_id.is_some());
             create_conversation(app.state()).await.unwrap();
         }
         drop(prompt_guard);
@@ -1784,6 +1799,123 @@ impl crate::tts::interface::TtsProvider for SelectionVoice {
         }
     }
 }
+type SpeechEvent = (String, serde_json::Value);
+
+struct SpeechObservation {
+    request_id: String,
+    events: std::sync::Mutex<Vec<SpeechEvent>>,
+    changed: tokio::sync::Notify,
+}
+impl SpeechObservation {
+    fn new(request_id: String) -> Self {
+        Self {
+            request_id,
+            events: Default::default(),
+            changed: Default::default(),
+        }
+    }
+    fn record(&self, name: &str, value: serde_json::Value) {
+        if value["request_id"].as_str() != Some(self.request_id.as_str()) {
+            return;
+        }
+        self.events.lock().unwrap().push((name.into(), value));
+        self.changed.notify_one();
+    }
+    fn snapshot(&self) -> Vec<SpeechEvent> {
+        self.events.lock().unwrap().clone()
+    }
+    async fn wait_for(&self, required: &[&str]) -> Vec<SpeechEvent> {
+        loop {
+            let changed = self.changed.notified();
+            let events = self.snapshot();
+            if required
+                .iter()
+                .all(|required| events.iter().any(|(name, _)| name == required))
+            {
+                return events;
+            }
+            changed.await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn speech_observation_ignores_unrelated_end_and_waits_for_reordered_target_events() {
+    use futures::poll;
+    use serde_json::json;
+    let observation = SpeechObservation::new("chat_target".into());
+    let waiting = observation.wait_for(&["tts:start", "tts:end"]);
+    tokio::pin!(waiting);
+    assert!(poll!(&mut waiting).is_pending());
+    observation.record(
+        "tts:end",
+        json!({"request_id":"chat_other","status":"completed"}),
+    );
+    assert!(
+        poll!(&mut waiting).is_pending(),
+        "an unrelated terminal cannot complete the target wait"
+    );
+    observation.record(
+        "tts:end",
+        json!({"request_id":"chat_target","status":"cancelled"}),
+    );
+    assert!(
+        poll!(&mut waiting).is_pending(),
+        "a delayed target start callback is still required"
+    );
+    observation.record(
+        "tts:start",
+        json!({"request_id":"chat_target","text":"reply"}),
+    );
+    let events = waiting.await;
+    assert_eq!(events.len(), 2);
+    let terminal = events.iter().find(|(name, _)| name == "tts:end").unwrap();
+    assert_eq!(terminal.1["status"], "cancelled");
+    // This controlled callback order makes the former last().status assertion
+    // return Null, even though the target's terminal status is cancelled.
+    assert!(events.last().unwrap().1["status"].is_null());
+}
+
+#[tokio::test]
+async fn speech_observation_waits_for_selected_media_even_after_the_terminal() {
+    use futures::poll;
+    use serde_json::json;
+    let observation = SpeechObservation::new("chat_selected".into());
+    let waiting = observation.wait_for(&["tts:start", "tts:browser-delegate", "tts:end"]);
+    tokio::pin!(waiting);
+    observation.record("tts:start", json!({"request_id":"chat_selected"}));
+    observation.record(
+        "tts:end",
+        json!({"request_id":"chat_selected","status":"completed"}),
+    );
+    assert!(poll!(&mut waiting).is_pending());
+    observation.record(
+        "tts:browser-delegate",
+        json!({"request_id":"chat_other","text":"unrelated"}),
+    );
+    assert!(poll!(&mut waiting).is_pending());
+    observation.record(
+        "tts:browser-delegate",
+        json!({"request_id":"chat_selected","text":"reply"}),
+    );
+    let events = waiting.await;
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|(_, event)| event["request_id"] == "chat_selected"));
+    observation.record(
+        "tts:audio",
+        json!({"request_id":"chat_selected","data":[1]}),
+    );
+    assert!(
+        observation
+            .snapshot()
+            .iter()
+            .any(|(name, _)| name == "tts:audio"),
+        "the collector must retain unexpected target media for the negative assertion"
+    );
+}
+
 async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &std::path::Path) {
     use crate::chat::application::{submit_chat, ChatPolicy};
     use crate::commands::conversation::{load_conversation, LoadConversationRequest};
@@ -1848,26 +1980,6 @@ async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &s
         app.state::<crate::llm::service::LlmService>()
             .replace_test_provider(llm.clone())
             .await;
-        let events = Arc::new(std::sync::Mutex::new(
-            Vec::<(String, serde_json::Value)>::new(),
-        ));
-        let finished = Arc::new(tokio::sync::Notify::new());
-        let listeners: Vec<_> = ["tts:start", "tts:audio", "tts:browser-delegate", "tts:end"]
-            .into_iter()
-            .map(|name| {
-                let events = events.clone();
-                let finished = finished.clone();
-                app.listen_any(name, move |event| {
-                    events
-                        .lock()
-                        .unwrap()
-                        .push((name.into(), serde_json::from_str(event.payload()).unwrap()));
-                    if name == "tts:end" {
-                        finished.notify_one();
-                    }
-                })
-            })
-            .collect();
         let request_id = format!("speech-selection-{index}");
         let worker = tokio::spawn(submit_chat(
             app.clone(),
@@ -1881,6 +1993,31 @@ async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &s
             ChatPolicy::Desktop,
         ));
         until_request_started(&llm).await;
+        // The model cannot complete until released below, so bind the collector
+        // from the production journal before any automatic speech can be emitted.
+        let turn_id = app
+            .state::<Arc<ChatRuntimeState>>()
+            .turn_scope(&request_id)
+            .unwrap()
+            .turn_id
+            .unwrap();
+        let events = Arc::new(SpeechObservation::new(format!("chat_{turn_id}")));
+        let listeners: Vec<_> = ["tts:start", "tts:audio", "tts:browser-delegate", "tts:end"]
+            .into_iter()
+            .map(|name| {
+                let events = events.clone();
+                app.listen_any(name, move |event| {
+                    events.record(name, serde_json::from_str(event.payload()).unwrap());
+                })
+            })
+            .collect();
+        app.emit(
+            "tts:end",
+            serde_json::json!({
+                "request_id": format!("unrelated-speech-{index}"), "status": "completed"
+            }),
+        )
+        .unwrap();
         if mode == "conversation" {
             load_conversation(LoadConversationRequest { id: other.clone() }, app.state())
                 .await
@@ -1926,20 +2063,34 @@ async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &s
             voice.release.notify_one();
         }
         if mode == "selected" || late {
-            tokio::time::timeout(Duration::from_secs(5), finished.notified())
+            let required: &[&str] = if late {
+                &["tts:start", "tts:end"]
+            } else {
+                &["tts:start", "tts:browser-delegate", "tts:end"]
+            };
+            let observed = tokio::time::timeout(Duration::from_secs(5), events.wait_for(required))
                 .await
-                .unwrap();
-            let events = events.lock().unwrap();
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{mode}: missing target speech events: {:?}",
+                        events.snapshot()
+                    )
+                });
+            let events = observed;
             let start = events.iter().find(|(name, _)| name == "tts:start").unwrap();
             assert_eq!(start.1["chat_scope"]["client_request_id"], request_id);
+            assert_eq!(start.1["chat_scope"]["turn_id"], turn_id);
             assert_eq!(start.1["chat_scope"]["character_id"], "retry-role-a");
             assert_eq!(start.1["chat_scope"]["conversation_id"], original);
             if late {
                 assert!(!events
                     .iter()
                     .any(|(name, _)| name == "tts:audio" || name == "tts:browser-delegate"));
-                assert_eq!(events.last().unwrap().1["status"], "cancelled");
+                let terminal = events.iter().find(|(name, _)| name == "tts:end").unwrap();
+                assert_eq!(terminal.1["status"], "cancelled");
             } else {
+                let terminal = events.iter().find(|(name, _)| name == "tts:end").unwrap();
+                assert_eq!(terminal.1["status"], "completed");
                 assert!(events
                     .iter()
                     .any(|(name, _)| name == "tts:browser-delegate"));
@@ -1953,7 +2104,7 @@ async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &s
                 "{mode}"
             );
             assert!(
-                events.lock().unwrap().is_empty(),
+                events.snapshot().is_empty(),
                 "{mode}: no automatic playback start"
             );
         }
