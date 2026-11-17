@@ -131,8 +131,8 @@ Rust 使用 `ORT_SKIP_DOWNLOAD=1` 与已有本地 ONNX DLL，以及 `CARGO_TARGE
 - `npm run check:ipc`：177 个命令通过；`rebase-ipc-1.log`。
 - `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1007/1007，bin/doc 0，无后台 panic；`rebase-rust-all-2.log`。
 - `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`rebase-clippy-1.log`。
-- 主代理重新运行上述 lifecycle 命令，从提交 `d7add80` 重建后 **39/39**，进程 exit 0；`master-rebase-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
-- 主代理对同一新二进制运行上述 `-Persistence -SkipBuild` 命令：**17/17**，恢复检查 `status=passed`，进程 exit 0；`master-rebase-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json`、同目录 `recovery-report.json`。
+- 主代理重新运行上述 lifecycle 命令，从提交 `d7add80` 重建后 **39/39**，进程 exit 0；`master-rebase-native-lifecycle.log`、`output/state-ownership/pre-round3-native/native-report.json`。
+- 主代理对同一新二进制运行上述 `-Persistence -SkipBuild` 命令：**17/17**，恢复检查 `status=passed`，进程 exit 0；`master-rebase-native-persistence.log`、`output/state-ownership/pre-round3-native/persistence-persistence-report.json`、同目录 `persistence-recovery-report.json`。
 - 两个套件的二进制 SHA-256 均为 `DA322CBFD54B3387CCE7FE168EBB780F1DF57D36396DF7572CEEA57207FEFF8E`；`output/state-ownership/source-manifest-rebase.json` 中 47 个源文件最终复算 changed=0。端口 1420/19333/19334/19335/19336 无监听残留。
 
 本次 rebase 后的全量测试、严格检查和原生验收全部通过，表中 12 项本地行为保证在新基线继续成立。仅提交本任务源码和文档，`git diff --check` 通过；运行产物、依赖、数据库和本机配置未纳入提交。
@@ -178,3 +178,27 @@ App 的图片完成与背景生成监听现在使用 `image-events.ts` 的实际
 - `npm test`：90 文件、970/970，包含 10 个图片处理回归；`pr4-round2-npm-test.log`。
 - `npm run build` 与 `npm run check:ipc`：通过，IPC 177；`pr4-round2-build.log`、`pr4-round2-ipc.log`。仅保留已有构建 bundle/import 提示。
 - 变更 Rust 文件 `rustfmt --check --edition 2021`、`git diff --check`：通过。未纳入日志、数据根、依赖或本机配置。
+
+
+## PR #4 第三轮修复：快照等待纳入准备取消和时限（2026-11-17）
+
+原先取得执行许可后、登记取消信号前读取 prompt、LLM Provider、已提交角色配置和 TTS 快照；若其中资源被占用，Stop 只能留下待取消标记，准备超时也尚未开始。现在先登记取消并确认 acknowledged，再将整个一致性快照块放进现有 `prep_fut`，和后续上下文/消息准备共用一次 `select!`、一次准备时限。快照阶段内的 activation guard 在快照完成或 future 被取消/超时时释放；已完成的快照通过既有 `PreparedChatTurn` 传给工具和结果交付，不改变角色视图、身份和保存恢复约束。
+
+`verify_snapshot_preparation_cancellation` 持有真实 prompt Mutex，通过实际 `chat-turn-acknowledged` 信号确认登记完成，分别走 `commands::chat::stream_chat` 与 Stop/准备 deadline。两例均在不释放 Mutex 时等待 worker 终结，断言取消命令结果、实际 terminal 事件身份/状态、journal 终态、busy 释放、模型零调用及预留会话没有 SQL 行；随后释放 Mutex 并验证下一次聊天成功。短准备时限仅通过 `#[cfg(test)]`、crate 内可见且 `serde(skip)` 的请求覆盖值注入，不影响生产 IPC、指纹或全局并发测试配置。
+
+本轮原生 runner 为每次运行生成独立 `KOKORO_TEST_DATA_ROOT` 和 WebView profile；旧报告及 executable/run-info 已复制至 `output/state-ownership/pre-round3-native/`，保留其原基线证据。
+
+
+第三轮检查（日志在 `output/state-ownership/`）：
+
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml chat::channels_test::desktop_webhook_and_telegram_execute_the_same_bound_chat -- --nocapture`：通过，包含两条快照等待回归；`pr4-round3-channels-3.log`。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1007/1007，bin/doc 0，无后台 panic；`pr4-round3-rust-all.log`。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`pr4-round3-clippy.log`。
+- `npm exec -- vitest run src/lib/chat/application.test.ts src/ui/widgets/chat/chat-edit-session-switch.test.tsx`：108/108；`pr4-round3-frontend.log`。本轮未修改前端。
+- 变更 Rust 文件 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
+
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从本轮源码重建，lifecycle **39/39**，exit 0；`pr4-round3-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
+
+- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round3-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json` 和同目录 `recovery-report.json`。
+
+本轮两个原生套件二进制 SHA-256 一致：`84ECF8FE175644FC125C876F8B42E2AF7DC64782FC147D44CC2F56D3AE0583C0`。`output/state-ownership/source-manifest-pr4-round3.json` 的 49 个 PR 源文件及主代理 `master-round3-source-manifest.json` 的三个本轮源文件复算 changed=0；端口 1420/19333/19334/19335/19336 无监听残留。源码检查、全量 Rust、相关前端回归和新原生验收均通过；真实远程平台/云服务及非 Windows 平台仍未验证。

@@ -1147,6 +1147,9 @@ pub(crate) fn channel_id(namespace: &str, owner: &str, id: &str) -> String {
 
 #[derive(Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct ChatRequest {
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) preparation_timeout: Option<std::time::Duration>,
     /// Resolved once by the trusted entry boundary; never accepted over IPC.
     #[serde(skip)]
     pub(crate) resolved_target: Option<ConversationTarget>,
@@ -2202,6 +2205,9 @@ async fn validate_conversation_character_id(
 }
 
 struct PreparedChatTurn {
+    prompt_snapshot: crate::chat::ownership::PromptSnapshot,
+    speech: Option<crate::characters::activation::ResolvedTts>,
+    speech_snapshot: Option<Arc<crate::tts::manager::TtsExecutionSnapshot>>,
     char_id: String,
     conversation_id: Option<String>,
     user_message_id: Option<i64>,
@@ -2740,65 +2746,6 @@ async fn execute_chat_with_pending(
         .try_acquire_chat_turn(&client_request_id)
         .await
         .map_err(KokoroError::Chat)?;
-    // Activation protects only the snapshot. No activation lock is held across
-    // model, tool, media or memory I/O.
-    let (prompt_snapshot, llm_snapshot, speech, speech_snapshot) = {
-        let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-        let mut prompt = state
-            .prompt_snapshot(&char_id)
-            .await
-            .map_err(|error| KokoroError::Chat(error.to_string()))?;
-        prompt.vision_context_history_mode = vision_watcher
-            .config
-            .read()
-            .await
-            .vision_context_history_mode
-            .clone();
-        let providers = llm_state.execution_snapshot().await;
-        let committed = app
-            .state::<crate::characters::activation::ActivationCoordinator>()
-            .get_committed(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .filter(|committed| committed.runtime.character_id == char_id);
-        if let Some(cues) = committed
-            .as_ref()
-            .and_then(|committed| crate::live2d::committed_cue_map(&committed.runtime))
-        {
-            prompt.cue_map = Some(cues);
-        }
-        let speech = committed.map(|committed| committed.runtime.tts);
-        let profile = if !desktop && speech.is_none() {
-            let profile: Option<String> =
-                sqlx::query_scalar("SELECT runtime_profile_json FROM characters WHERE id=?")
-                    .bind(&char_id)
-                    .fetch_optional(&state.db)
-                    .await?;
-            profile
-                .and_then(|profile| {
-                    serde_json::from_str::<crate::characters::manifest::CharacterRuntimeProfile>(
-                        &profile,
-                    )
-                    .ok()
-                })
-                .and_then(|profile| profile.tts)
-        } else {
-            None
-        };
-        let speech_snapshot = if let Some(tts) = app.try_state::<crate::tts::TtsService>() {
-            tts.execution_snapshot(speech.as_ref(), profile.as_ref())
-                .await
-        } else {
-            None
-        };
-        (prompt, providers, speech, speech_snapshot)
-    };
-
-    let cue_names = prompt_snapshot
-        .cue_map
-        .as_ref()
-        .map(|cues| Arc::new(cues.keys().cloned().collect::<HashSet<_>>()));
     let assistant_turn_id = pending_user_save.as_ref().map_or_else(
         || Uuid::new_v4().to_string(),
         |pending| pending.turn_id.clone(),
@@ -2848,7 +2795,66 @@ async fn execute_chat_with_pending(
     let active_conv_id_for_prep = std::sync::Arc::clone(&active_conversation_id_holder);
     let hook_runtime = desktop.then(|| app.try_state::<HookRuntime>()).flatten();
 
+    let preparation_timeout = chat_turn_preparation_timeout();
+    #[cfg(test)]
+    let preparation_timeout = request.preparation_timeout.unwrap_or(preparation_timeout);
+
     let prep_fut = async {
+        // Activation protects only the snapshot. No activation lock is held across
+        // model, tool, media or memory I/O.
+        let (prompt_snapshot, llm_snapshot, speech, speech_snapshot) = {
+            let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+            let mut prompt = state
+                .prompt_snapshot(&char_id)
+                .await
+                .map_err(|error| KokoroError::Chat(error.to_string()))?;
+            prompt.vision_context_history_mode = vision_watcher
+                .config
+                .read()
+                .await
+                .vision_context_history_mode
+                .clone();
+            let providers = llm_state.execution_snapshot().await;
+            let committed = app
+                .state::<crate::characters::activation::ActivationCoordinator>()
+                .get_committed(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .filter(|committed| committed.runtime.character_id == char_id);
+            if let Some(cues) = committed
+                .as_ref()
+                .and_then(|committed| crate::live2d::committed_cue_map(&committed.runtime))
+            {
+                prompt.cue_map = Some(cues);
+            }
+            let speech = committed.map(|committed| committed.runtime.tts);
+            let profile = if !desktop && speech.is_none() {
+                let profile: Option<String> =
+                    sqlx::query_scalar("SELECT runtime_profile_json FROM characters WHERE id=?")
+                        .bind(&char_id)
+                        .fetch_optional(&state.db)
+                        .await?;
+                profile
+                    .and_then(|profile| {
+                        serde_json::from_str::<crate::characters::manifest::CharacterRuntimeProfile>(
+                            &profile,
+                        )
+                        .ok()
+                    })
+                    .and_then(|profile| profile.tts)
+            } else {
+                None
+            };
+            let speech_snapshot = if let Some(tts) = app.try_state::<crate::tts::TtsService>() {
+                tts.execution_snapshot(speech.as_ref(), profile.as_ref())
+                    .await
+            } else {
+                None
+            };
+            (prompt, providers, speech, speech_snapshot)
+        };
+
         // 0. Resolve character ID for this request (not stored in shared state)
         let char_id = identity.character_id.clone();
         let requested_conversation_id = Some(identity.conversation_id.clone());
@@ -3433,6 +3439,9 @@ async fn execute_chat_with_pending(
         }
 
         Ok(PreparedChatTurn {
+            prompt_snapshot,
+            speech,
+            speech_snapshot,
             char_id,
             conversation_id,
             user_message_id,
@@ -3452,6 +3461,7 @@ async fn execute_chat_with_pending(
         })
     };
 
+    // One budget covers snapshot acquisition and the rest of preparation.
     let prepared_turn = tokio::select! {
         biased;
         _ = wait_for_cancel_event(&mut cancel_rx) => {
@@ -3477,13 +3487,13 @@ async fn execute_chat_with_pending(
             ).await;
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
         }
-        _ = tokio::time::sleep(chat_turn_preparation_timeout()) => {
+        _ = tokio::time::sleep(preparation_timeout) => {
             tracing::error!(
                 target: "chat",
                 "[stream_chat] Turn {} (request {}) timed out during preparation phase after {}s",
                 assistant_turn_id,
                 client_request_id,
-                chat_turn_preparation_timeout().as_secs()
+                preparation_timeout.as_secs()
             );
             let recorded_conv_id = active_conversation_id_holder
                 .lock()
@@ -3502,7 +3512,7 @@ async fn execute_chat_with_pending(
             ).await;
             return Err(KokoroError::Chat(format!(
                 "Turn preparation timed out after {}s",
-                chat_turn_preparation_timeout().as_secs()
+                preparation_timeout.as_secs()
             )));
         }
         res = prep_fut => {
@@ -3517,6 +3527,9 @@ async fn execute_chat_with_pending(
     };
 
     let PreparedChatTurn {
+        prompt_snapshot,
+        speech,
+        speech_snapshot,
         char_id,
         mut conversation_id,
         user_message_id,
@@ -3534,6 +3547,11 @@ async fn execute_chat_with_pending(
         memory_target_language,
         external_turn,
     } = prepared_turn;
+
+    let cue_names = prompt_snapshot
+        .cue_map
+        .as_ref()
+        .map(|cues| Arc::new(cues.keys().cloned().collect::<HashSet<_>>()));
 
     if let Some(turn) = external_turn.as_ref() {
         if let Some((text, translation)) = &turn.previous_reply {

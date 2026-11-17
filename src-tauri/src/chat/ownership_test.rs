@@ -1275,3 +1275,165 @@ pub(super) async fn verify_reserved_memory_tools(
     .await
     .unwrap();
 }
+
+pub(super) async fn verify_snapshot_preparation_cancellation(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+) {
+    use crate::commands::chat::{cancel_chat_turn, stream_chat};
+    use crate::commands::conversation::{
+        create_conversation, load_conversation, LoadConversationRequest,
+    };
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let observed = events.clone();
+    let listener = app.listen("chat-turn-finish", move |event| {
+        observed
+            .lock()
+            .unwrap()
+            .push(serde_json::from_str(event.payload()).unwrap());
+    });
+    for cancel in [true, false] {
+        create_conversation(app.state()).await.unwrap();
+        let request_id = format!("blocked-snapshot-{cancel}");
+        let calls_before = provider.prompts.lock().unwrap().len();
+        let acknowledged = Arc::new(tokio::sync::Notify::new());
+        let observed_ack = acknowledged.clone();
+        let acknowledged_request = request_id.clone();
+        let ack_listener = app.listen("chat-turn-acknowledged", move |event| {
+            let payload: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+            if payload["client_request_id"] == acknowledged_request {
+                observed_ack.notify_one();
+            }
+        });
+        let prompt_guard = state.system_prompt.lock().await;
+        let mut worker = tokio::spawn(stream_chat(
+            app.clone(),
+            ChatRequest {
+                message: "snapshot must be interruptible".into(),
+                hidden: true,
+                client_request_id: Some(request_id.clone()),
+                character_id: Some("test-character".into()),
+                preparation_timeout: Some(if cancel {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_secs(1)
+                }),
+                ..Default::default()
+            },
+        ));
+        // Acknowledgement proves registration happened before Stop. The held
+        // mutex prevents snapshot completion; Notify also retains a fast ack.
+        tokio::time::timeout(Duration::from_secs(5), acknowledged.notified())
+            .await
+            .unwrap();
+        app.unlisten(ack_listener);
+        if cancel {
+            let accepted = runtime.turn_scope(&request_id).unwrap();
+            assert!(accepted.turn_id.is_some());
+            assert_eq!(accepted.status, "accepted");
+        }
+        let reserved = runtime
+            .turn_scope(&request_id)
+            .unwrap()
+            .conversation_id
+            .unwrap();
+        let cancel_result = if cancel {
+            Some(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    cancel_chat_turn(
+                        request_id.clone(),
+                        None,
+                        app.state(),
+                        app.state(),
+                        app.state(),
+                    ),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let completion = tokio::time::timeout(Duration::from_secs(3), &mut worker).await;
+        let completed_while_locked = completion.is_ok();
+        let busy_while_locked = state.is_chat_busy();
+        let terminal = runtime.turn_scope(&request_id).unwrap();
+        let emitted = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|event| event["client_request_id"] == request_id)
+            .cloned();
+        // Always release a failed regression's worker before asserting, so the
+        // test does not leave an executor task stuck behind a fixture-owned lock.
+        drop(prompt_guard);
+        if !completed_while_locked {
+            let _ = tokio::time::timeout(Duration::from_secs(3), worker).await;
+        }
+        assert!(
+            completed_while_locked,
+            "snapshot ignored cancellation/deadline: cancel={cancel}"
+        );
+        assert!(
+            !busy_while_locked,
+            "execution permit remained held after terminal"
+        );
+        assert_eq!(
+            provider.prompts.lock().unwrap().len(),
+            calls_before,
+            "model ran despite blocked preparation"
+        );
+        let result = completion.unwrap().unwrap();
+        let expected = if cancel { "cancelled" } else { "error" };
+        if cancel {
+            assert!(
+                cancel_result.unwrap().unwrap().is_ok(),
+                "Stop did not acknowledge cleanup"
+            );
+            assert_eq!(result.unwrap().status.as_deref(), Some("cancelled"));
+        } else {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("preparation timed out"));
+        }
+        assert_eq!(terminal.status, expected);
+        let emitted = emitted.expect("missing actual terminal event");
+        assert_eq!(emitted["status"], expected);
+        assert_eq!(emitted["character_id"], "test-character");
+        assert_eq!(emitted["conversation_id"], reserved);
+        if !cancel {
+            assert_eq!(emitted["stage"], "preparation_timeout");
+        }
+        let materialized: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id=?")
+            .bind(&reserved)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(materialized, 0);
+        let next = stream_chat(
+            app.clone(),
+            ChatRequest {
+                message: "chat after snapshot cleanup".into(),
+                client_request_id: Some(format!("after-blocked-snapshot-{cancel}")),
+                character_id: Some("test-character".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.status.as_deref(), Some("completed"));
+        assert!(!state.is_chat_busy());
+    }
+    app.unlisten(listener);
+    load_conversation(
+        LoadConversationRequest {
+            id: "desktop".into(),
+        },
+        app.state(),
+    )
+    .await
+    .unwrap();
+}

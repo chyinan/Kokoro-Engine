@@ -958,6 +958,7 @@ async fn verify_persisted_external_contracts(
         sqlx::query("INSERT INTO characters (id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,?, '', '', 'test',1,1)")
             .bind(character).bind(character).execute(&state.db).await.unwrap();
     }
+    super::ownership_test::verify_snapshot_preparation_cancellation(app, provider).await;
     super::ownership_test::verify_reserved_memory_tools(app, provider).await;
     super::ownership_test::verify_admission_selection_generation(app, provider).await;
     verify_legacy_metadata_and_retired_media(app, provider, tools).await;
