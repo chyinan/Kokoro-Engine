@@ -684,16 +684,21 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(remaining, 1, "A stale retry must not delete the remaining history");
+        assert_eq!(
+            remaining, 1,
+            "A stale retry must not delete the remaining history"
+        );
     }
 
     #[tokio::test]
     async fn test_versioned_history_deletion_checks_generation_and_same_tail_writes() {
         let pool = setup_test_context_db().await;
-        sqlx::raw_sql(include_str!("../../migrations/0014_conversation_message_revision.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0014_conversation_message_revision.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(
             "INSERT INTO conversations (id, character_id, title, created_at, updated_at)
                 VALUES ('conv', 'char-1', 'Test', 'now', 'now');
@@ -890,8 +895,8 @@ pub async fn set_persona(
     prompt: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_system_prompt(prompt).await;
-    Ok(())
+    let _ = (prompt, state);
+    Err(KokoroError::Validation("Deprecated partial character update; use prepare_character_activation/apply/commit or character runtime overrides".into()))
 }
 
 #[tauri::command]
@@ -899,8 +904,8 @@ pub async fn set_character_name(
     name: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_character_name(name).await;
-    Ok(())
+    let _ = (name, state);
+    Err(KokoroError::Validation("Deprecated partial character update; use prepare_character_activation/apply/commit or character runtime overrides".into()))
 }
 
 #[tauri::command]
@@ -908,9 +913,8 @@ pub async fn set_active_character_id(
     id: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_character_id(id.clone()).await;
-    crate::ai::context::AIOrchestrator::persist_active_character_id(&id);
-    Ok(())
+    let _ = (id, state);
+    Err(KokoroError::Validation("Deprecated partial character update; use prepare_character_activation/apply/commit or character runtime overrides".into()))
 }
 
 #[tauri::command]
@@ -927,10 +931,11 @@ pub async fn set_user_name(
     app: AppHandle,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_user_name(name.clone()).await;
+    let _activation = state.acquire_activation_lock().await;
     update_user_profile_settings(&app, |settings| {
         settings.user_name = name.clone();
     })?;
+    state.set_user_name(name).await;
     Ok(())
 }
 
@@ -947,8 +952,8 @@ pub async fn set_response_language(
     language: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
-    state.set_response_language(language).await;
-    Ok(())
+    let _ = (language, state);
+    Err(KokoroError::Validation("Deprecated partial character update; use prepare_character_activation/apply/commit or character runtime overrides".into()))
 }
 
 #[tauri::command]
@@ -956,6 +961,7 @@ pub async fn set_user_language(
     language: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _activation = state.acquire_activation_lock().await;
     state.set_user_language(language).await;
     Ok(())
 }
@@ -972,6 +978,7 @@ pub async fn set_jailbreak_prompt(
     prompt: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _activation = state.acquire_activation_lock().await;
     // Persist to disk first to avoid split-brain if disk write fails
     let path = jailbreak_prompt_path();
     crate::config::save_json_config(
@@ -988,6 +995,7 @@ pub async fn set_jailbreak_prompt(
 
 #[tauri::command]
 pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
+    let _activation = state.acquire_activation_lock().await;
     if let Some(memory_prompt) = state.get_jailbreak_prompt().await {
         return Ok(memory_prompt);
     }
@@ -1048,11 +1056,6 @@ pub async fn get_memory_enabled(state: State<'_, AIOrchestrator>) -> Result<bool
 #[tauri::command]
 pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
-
     state.clear_history().await;
     Ok(())
 }
@@ -1121,11 +1124,14 @@ async fn delete_last_messages_inner_with_expected_tail(
     let _switch_guard = conversation_switch_lock.lock().await;
 
     let conv_id = current_conversation_id.lock().await.clone();
-    if expected_history.as_ref().is_some_and(|(generation, expected)| {
-        expected_conversation_id.is_none()
-            || conv_id.as_deref() != expected_conversation_id
-            || generation.load(Ordering::SeqCst) != expected.generation
-    }) {
+    if expected_history
+        .as_ref()
+        .is_some_and(|(generation, expected)| {
+            expected_conversation_id.is_none()
+                || conv_id.as_deref() != expected_conversation_id
+                || generation.load(Ordering::SeqCst) != expected.generation
+        })
+    {
         return Err(changed_history_before_deletion());
     }
     // 竞态防护：调用方声明了发起删除时所属的会话。若后端当前会话已在删除 IPC 在途期间
@@ -1280,14 +1286,15 @@ pub async fn delete_last_messages(
     delete_last_messages_inner_with_expected_tail(
         count,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
+        &state.selection.history,
+        &state.selection.current_conversation_id,
         max_chars,
-        Some(&state.memory_history_boundary),
+        Some(&state.selection.memory_history_boundary),
         expected_conversation_id.as_deref(),
-        &state.conversation_switch_lock,
+        &state.selection.conversation_switch_lock,
         expected_tail_message_id,
-        expected_history.map(|expected| (state.conversation_generation.as_ref(), expected)),
+        expected_history
+            .map(|expected| (state.selection.conversation_generation.as_ref(), expected)),
     )
     .await
 }

@@ -1,13 +1,12 @@
 // pattern: Mixed (needs refactoring)
 
-use crate::ai::curiosity::CuriosityModule;
 use crate::ai::database_migrations;
-use crate::ai::idle_behaviors::IdleBehaviorSystem;
-use crate::ai::initiative::InitiativeSystem;
 use crate::ai::memory::{MemoryManager, MemoryRetrievalMode, MemorySearchResult};
 use crate::ai::router::{ModelRouter, ModelType};
 use crate::chat::external_memory::ExternalMemory;
-use crate::chat::persistence::{self, ConversationTarget, ExternalReplies, MessageWrite, SavedMessage};
+use crate::chat::persistence::{
+    self, ConversationTarget, ExternalReplies, MessageWrite, SavedMessage,
+};
 use crate::error::KokoroError;
 use crate::llm::messages::user_text_message;
 use crate::llm::provider::LlmProvider;
@@ -89,14 +88,6 @@ enum ChatMessageOrigin {
     External,
 }
 
-#[derive(Clone)]
-struct DesktopMemoryBoundary {
-    target: ConversationTarget,
-    conversation_generation: u64,
-    database_generation: u64,
-    first_message_id: i64,
-}
-
 fn is_external_chat_message(message: &Message) -> bool {
     // Keep the in-memory and SQL predicates aligned: main's legacy user save
     // IDs, original PR2 source tags, and the shared owner's fingerprint all
@@ -132,8 +123,13 @@ pub fn is_vision_context_message(message: &Message) -> bool {
 }
 
 pub fn is_memory_candidate_message(message: &Message) -> bool {
-    !is_vision_context_message(message) && !is_unfinished_draft(message)
-        && message.metadata.as_ref().and_then(|meta| meta.get("type")).and_then(|kind| kind.as_str())
+    !is_vision_context_message(message)
+        && !is_unfinished_draft(message)
+        && message
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("type"))
+            .and_then(|kind| kind.as_str())
             != Some("invalid_failure_event")
 }
 
@@ -146,7 +142,10 @@ fn latest_vision_context_index(messages: &[Message]) -> Option<usize> {
 }
 
 fn is_unfinished_draft(message: &Message) -> bool {
-    message.metadata.as_ref().is_some_and(|value| value["streaming_draft"] == true)
+    message
+        .metadata
+        .as_ref()
+        .is_some_and(|value| value["streaming_draft"] == true)
 }
 
 fn should_include_message_for_llm_history(
@@ -161,7 +160,12 @@ fn should_include_message_for_llm_history(
         .and_then(|meta| meta.get("type"))
         .and_then(|value| value.as_str());
 
-    if is_unfinished_draft(message) || matches!(technical_type, Some("translation_instruction") | Some("invalid_failure_event")) {
+    if is_unfinished_draft(message)
+        || matches!(
+            technical_type,
+            Some("translation_instruction") | Some("invalid_failure_event")
+        )
+    {
         return false;
     }
 
@@ -472,32 +476,47 @@ impl ActivationGate {
     }
 }
 
+/// Desktop projection only. Execution reads SQLite with an explicit owner.
+/// Replacing this view never resets a conversation's runtime progress.
+pub struct DesktopSelection {
+    pub history: Arc<Mutex<VecDeque<Message>>>,
+    pub(crate) memory_history_boundary: Arc<Mutex<usize>>,
+    pub current_conversation_id: Arc<Mutex<Option<String>>>,
+    pub conversation_generation: Arc<AtomicU64>,
+    pub conversation_switch_lock: Arc<Mutex<()>>,
+    pub(crate) persist_conversation_selection: bool,
+}
+
+impl Default for DesktopSelection {
+    fn default() -> Self {
+        Self {
+            history: Arc::default(),
+            memory_history_boundary: Arc::default(),
+            current_conversation_id: Arc::default(),
+            conversation_generation: Arc::default(),
+            conversation_switch_lock: Arc::default(),
+            persist_conversation_selection: true,
+        }
+    }
+}
+
+#[cfg_attr(test, derive(Clone))]
 pub struct AIOrchestrator {
+    pub selection: Arc<DesktopSelection>,
+    pub(crate) owners: Arc<crate::chat::ownership::RuntimeOwners>,
     pub db: SqlitePool,
     pub(crate) external_replies: Arc<ExternalReplies>,
     pub(crate) external_memory: Arc<ExternalMemory>,
     pub system_prompt: Arc<Mutex<String>>,
-    pub history: Arc<Mutex<VecDeque<Message>>>,
     pub max_history_tokens: usize, // Soft limit for history
     pub memory_manager: Arc<MemoryManager>,
     pub router: Arc<ModelRouter>,
-    /// Counts user messages for periodic memory extraction triggers.
-    message_count: Arc<Mutex<u64>>,
-    /// Counts user messages that occurred while the memory system was enabled.
-    pub(crate) memory_trigger_count: Arc<Mutex<u64>>,
-    /// History index boundary used to prevent extracting conversations from disabled periods.
-    pub(crate) memory_history_boundary: Arc<Mutex<usize>>,
-    desktop_memory_boundary: Arc<Mutex<Option<DesktopMemoryBoundary>>>,
-    /// Current character ID for memory isolation.
+    /// Selected, committed character ID; execution snapshots resolve it only at admission.
     pub(crate) character_id: Arc<Mutex<String>>,
     /// In-memory cooldown map for memory event trigger throttling.
     memory_event_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
     /// Global toggle for all automatic memory reads/writes/injection.
     memory_enabled: Arc<AtomicBool>,
-    /// Timestamp of last user activity (for idle detection).
-    pub last_activity: Arc<Mutex<Instant>>,
-    /// Total message count across sessions (for relationship depth).
-    pub conversation_count: Arc<Mutex<u64>>,
     /// Preferred response language (e.g. "日本語", "English"). Empty = auto.
     pub response_language: Arc<Mutex<String>>,
     /// User's display language for inline translation (e.g. "中文"). Empty = disabled.
@@ -510,22 +529,8 @@ pub struct AIOrchestrator {
     user_name: Arc<Mutex<String>>,
 
     // Autonomous Behavior Modules
-    pub curiosity: Arc<Mutex<CuriosityModule>>,
-    pub initiative: Arc<Mutex<InitiativeSystem>>,
-    pub idle_behaviors: Arc<Mutex<IdleBehaviorSystem>>,
     /// Whether proactive (idle auto-talk) messages are enabled.
     pub proactive_enabled: Arc<std::sync::atomic::AtomicBool>,
-    /// 当前活跃对话 ID
-    pub current_conversation_id: Arc<Mutex<Option<String>>>,
-    /// Monotonically increasing epoch counter for conversation mutations (switch/create/clear/delete/activate).
-    /// Used to detect conversation state divergence during in-flight turns.
-    pub conversation_generation: Arc<std::sync::atomic::AtomicU64>,
-    /// Serializes conversation history/pointer rewrites (delete/edit/clear/switch/activation)
-    /// so a stale operation can never clobber the active conversation's in-memory context.
-    /// Must be the OUTERMOST lock wherever it is taken.
-    pub conversation_switch_lock: Arc<Mutex<()>>,
-    /// Whether this orchestrator should update the desktop hot-reload conversation pointer.
-    pub(crate) persist_conversation_selection: bool,
     /// Context management strategy: "window" | "summary"
     pub context_strategy: Arc<Mutex<String>>,
     /// Max characters per message before truncation
@@ -540,7 +545,7 @@ pub struct AIOrchestrator {
     /// Global lock ensuring only one chat turn (stream_chat) executes on this orchestrator at a time.
     chat_turn_lock: Arc<Mutex<Option<ActiveChatTurnContext>>>,
     /// Serializes chat admission with the instant an interrupt opens the mic.
-    chat_admission: Mutex<()>,
+    chat_admission: Arc<Mutex<()>>,
 }
 
 impl AIOrchestrator {
@@ -588,86 +593,32 @@ impl AIOrchestrator {
         }
 
         Ok(Self {
+            selection: Arc::default(),
+            owners: Arc::default(),
             db: pool,
             external_replies: Arc::new(ExternalReplies::default()),
             external_memory: Arc::new(ExternalMemory::default()),
             system_prompt: Arc::new(Mutex::new("You are a helpful assistant.".to_string())),
-            history: Arc::new(Mutex::new(VecDeque::new())),
             max_history_tokens: 4000,
             memory_manager,
             router: Arc::new(ModelRouter::new()),
-            message_count: Arc::new(Mutex::new(0)),
-            memory_trigger_count: Arc::new(Mutex::new(0)),
-            memory_history_boundary: Arc::new(Mutex::new(0)),
-            desktop_memory_boundary: Arc::new(Mutex::new(None)),
             character_id: Arc::new(Mutex::new("default".to_string())),
             memory_event_cooldowns: Arc::new(Mutex::new(HashMap::new())),
             memory_enabled: Arc::new(AtomicBool::new(true)),
-            last_activity: Arc::new(Mutex::new(Instant::now())),
-            conversation_count: Arc::new(Mutex::new(0)),
             response_language: Arc::new(Mutex::new(String::new())),
             user_language: Arc::new(Mutex::new(String::new())),
             jailbreak_prompt: Arc::new(Mutex::new(None)),
             character_name: Arc::new(Mutex::new("Kokoro".to_string())),
             user_name: Arc::new(Mutex::new("User".to_string())),
-            curiosity: Arc::new(Mutex::new(CuriosityModule::new())),
-            initiative: Arc::new(Mutex::new(InitiativeSystem::new())),
-            idle_behaviors: Arc::new(Mutex::new(IdleBehaviorSystem::new())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            current_conversation_id: Arc::new(Mutex::new(None)),
-            conversation_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            conversation_switch_lock: Arc::new(Mutex::new(())),
-            persist_conversation_selection: true,
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
             vision_context_history_mode: Arc::new(Mutex::new("latest".to_string())),
             runtime_degraded: Arc::new(Mutex::new(None)),
             activation_gate: Arc::new(ActivationGate::default()),
             chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
-            chat_admission: Mutex::new(()),
+            chat_admission: Arc::new(Mutex::new(())),
         })
-    }
-
-    pub async fn fork_with_isolated_history(&self) -> Self {
-        Self {
-            db: self.db.clone(),
-            external_replies: self.external_replies.clone(),
-            external_memory: self.external_memory.clone(),
-            system_prompt: Arc::new(Mutex::new(self.system_prompt.lock().await.clone())),
-            history: Arc::new(Mutex::new(VecDeque::new())),
-            max_history_tokens: self.max_history_tokens,
-            memory_manager: self.memory_manager.clone(),
-            router: self.router.clone(),
-            message_count: Arc::new(Mutex::new(0)),
-            memory_trigger_count: Arc::new(Mutex::new(0)),
-            memory_history_boundary: Arc::new(Mutex::new(0)),
-            desktop_memory_boundary: Arc::new(Mutex::new(None)),
-            character_id: Arc::new(Mutex::new(self.character_id.lock().await.clone())),
-            memory_event_cooldowns: self.memory_event_cooldowns.clone(),
-            memory_enabled: self.memory_enabled.clone(),
-            last_activity: Arc::new(Mutex::new(Instant::now())),
-            conversation_count: Arc::new(Mutex::new(0)),
-            response_language: Arc::new(Mutex::new(self.response_language.lock().await.clone())),
-            user_language: Arc::new(Mutex::new(self.user_language.lock().await.clone())),
-            jailbreak_prompt: Arc::new(Mutex::new(self.jailbreak_prompt.lock().await.clone())),
-            character_name: Arc::new(Mutex::new(self.character_name.lock().await.clone())),
-            user_name: Arc::new(Mutex::new(self.user_name.lock().await.clone())),
-            curiosity: self.curiosity.clone(),
-            initiative: self.initiative.clone(),
-            idle_behaviors: self.idle_behaviors.clone(),
-            proactive_enabled: self.proactive_enabled.clone(),
-            current_conversation_id: Arc::new(Mutex::new(None)),
-            conversation_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            conversation_switch_lock: Arc::new(Mutex::new(())),
-            persist_conversation_selection: false,
-            context_strategy: self.context_strategy.clone(),
-            max_message_chars: self.max_message_chars.clone(),
-            vision_context_history_mode: self.vision_context_history_mode.clone(),
-            runtime_degraded: self.runtime_degraded.clone(),
-            activation_gate: self.activation_gate.clone(),
-            chat_turn_lock: Arc::new(tokio::sync::Mutex::new(None)),
-            chat_admission: Mutex::new(()),
-        }
     }
 
     pub async fn acquire_activation_lock(&self) -> ActivationLockGuard {
@@ -677,20 +628,22 @@ impl AIOrchestrator {
     }
 
     pub fn bump_conversation_generation(&self) -> u64 {
-        self.conversation_generation
+        self.selection
+            .conversation_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1
     }
 
     pub fn current_conversation_generation(&self) -> u64 {
-        self.conversation_generation
+        self.selection
+            .conversation_generation
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn conversation_state_snapshot(&self) -> (Option<String>, u64) {
-        let _switch_guard = self.conversation_switch_lock.lock().await;
+        let _switch_guard = self.selection.conversation_switch_lock.lock().await;
         (
-            self.current_conversation_id.lock().await.clone(),
+            self.selection.current_conversation_id.lock().await.clone(),
             self.current_conversation_generation(),
         )
     }
@@ -827,21 +780,34 @@ impl AIOrchestrator {
 
     /// Record user activity (resets idle timer).
     pub async fn touch_activity(&self) {
-        let mut ts = self.last_activity.lock().await;
-        *ts = Instant::now();
-        let mut count = self.conversation_count.lock().await;
-        *count += 1;
+        self.touch_character_activity(&self.get_character_id().await)
+            .await;
+    }
+
+    pub(crate) async fn touch_character_activity(&self, character: &str) {
+        let behavior = self.owners.character(character);
+        let mut behavior = behavior.lock().await;
+        behavior.last_activity = Instant::now();
     }
 
     /// Get seconds since last user activity.
     pub async fn idle_seconds(&self) -> u64 {
-        let ts = self.last_activity.lock().await;
-        ts.elapsed().as_secs()
+        self.owners
+            .character(&self.get_character_id().await)
+            .lock()
+            .await
+            .last_activity
+            .elapsed()
+            .as_secs()
     }
 
     /// Get total conversation message count (approximate relationship depth).
     pub async fn get_conversation_count(&self) -> u64 {
-        *self.conversation_count.lock().await
+        self.owners
+            .character(&self.get_character_id().await)
+            .lock()
+            .await
+            .conversation_count
     }
 
     pub async fn set_character_id(&self, id: String) {
@@ -849,8 +815,152 @@ impl AIOrchestrator {
         *cid = id;
     }
 
+    pub(crate) async fn desktop_admission_scope(&self) -> Result<(String, Option<String>, u64)> {
+        let _activation = self.enter_chat_turn().map_err(anyhow::Error::msg)?;
+        let _selection = self.selection.conversation_switch_lock.lock().await;
+        Ok((
+            self.get_character_id().await,
+            self.selection.current_conversation_id.lock().await.clone(),
+            self.current_conversation_generation(),
+        ))
+    }
+
     pub async fn get_character_id(&self) -> String {
         self.character_id.lock().await.clone()
+    }
+
+    /// Called while the activation reader is held. The returned values are
+    /// owned by this turn and never observe a later UI selection or apply.
+    pub(crate) async fn prompt_snapshot(
+        &self,
+        character: &str,
+    ) -> Result<crate::chat::ownership::PromptSnapshot> {
+        self.prompt_snapshot_with_runtime(character, None).await
+    }
+
+    pub(crate) async fn prompt_snapshot_with_runtime(
+        &self,
+        character: &str,
+        runtime: Option<&crate::characters::activation::BackendRuntimeSnapshot>,
+    ) -> Result<crate::chat::ownership::PromptSnapshot> {
+        let mut snapshot = crate::chat::ownership::PromptSnapshot {
+            cue_map: None,
+            system_prompt: self.system_prompt.lock().await.clone(),
+            character_name: self.character_name.lock().await.clone(),
+            user_name: self.user_name.lock().await.clone(),
+            response_language: self.response_language.lock().await.clone(),
+            user_language: self.user_language.lock().await.clone(),
+            jailbreak_prompt: self
+                .jailbreak_prompt
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_default(),
+            vision_context_history_mode: self.vision_context_history_mode.lock().await.clone(),
+        };
+        if self.get_character_id().await == character {
+            // Compatibility boundary for models chosen outside a character package.
+            snapshot.cue_map =
+                crate::live2d::load_active_live2d_profile().map(|profile| profile.cue_map);
+        } else if let Some(runtime) = runtime {
+            snapshot.character_name = runtime.character_name.clone();
+            snapshot.user_name = runtime.user_name.clone();
+            snapshot.system_prompt = runtime.system_prompt.clone();
+            snapshot.response_language = runtime.response_language.clone();
+        } else {
+            let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+                "SELECT name,persona,user_nickname,example_dialogue,runtime_profile_json FROM characters WHERE id=?"
+            ).bind(character).fetch_optional(&self.db).await?;
+            let (name, persona, nickname, example, runtime) =
+                row.ok_or_else(|| anyhow::anyhow!("Unknown character: {character}"))?;
+            let runtime: crate::characters::manifest::CharacterRuntimeProfile =
+                serde_json::from_str(&runtime)?;
+            snapshot.character_name = name;
+            snapshot.user_name = if nickname.trim().is_empty() {
+                "User".into()
+            } else {
+                nickname
+            };
+            snapshot.system_prompt =
+                crate::characters::activation::compose_system_prompt(&persona, &example);
+            snapshot.response_language = runtime.response_language.unwrap_or_default();
+        }
+        Ok(snapshot)
+    }
+
+    pub(crate) fn memory_write_scope(
+        &self,
+        character: &str,
+        conversation: &str,
+        request: &str,
+        epoch: u64,
+    ) -> Arc<crate::chat::ownership::MemoryWriteScope> {
+        Arc::new(crate::chat::ownership::MemoryWriteScope {
+            lifetime: self.owners.lifetime(character, Some(conversation)),
+            character_id: character.into(),
+            conversation_id: Some(conversation.into()),
+            allow_reserved_conversation: false,
+            request_id: request.into(),
+            epoch,
+            database_generation: database_operation_generation(),
+            enabled: self.memory_enabled.clone(),
+            cadence: self.external_memory.clone(),
+            owners: self.owners.clone(),
+            db: self.db.clone(),
+        })
+    }
+
+    pub(crate) fn role_memory_write_scope(
+        &self,
+        character: &str,
+        request: &str,
+    ) -> Arc<crate::chat::ownership::MemoryWriteScope> {
+        Arc::new(crate::chat::ownership::MemoryWriteScope {
+            lifetime: self.owners.lifetime(character, None),
+            character_id: character.into(),
+            conversation_id: None,
+            allow_reserved_conversation: false,
+            request_id: request.into(),
+            epoch: self.external_memory.epoch(),
+            database_generation: database_operation_generation(),
+            enabled: self.memory_enabled.clone(),
+            cadence: self.external_memory.clone(),
+            owners: self.owners.clone(),
+            db: self.db.clone(),
+        })
+    }
+
+    pub(crate) async fn memory_progress_for(
+        &self,
+        target: &ConversationTarget,
+    ) -> (u64, Option<i64>) {
+        let progress = self
+            .owners
+            .conversation(&target.character_id, &target.conversation_id);
+        let progress = progress.lock().await;
+        if progress.memory_epoch == self.external_memory.epoch() {
+            (progress.memory_count, progress.first_memory_message)
+        } else {
+            (0, None)
+        }
+    }
+
+    pub(crate) async fn memory_history_for(
+        &self,
+        target: &ConversationTarget,
+        n: usize,
+    ) -> Vec<Message> {
+        let (_, first) = self.memory_progress_for(target).await;
+        let Some(first) = first else {
+            return Vec::new();
+        };
+        let mut history = self
+            .saved_history_range(target, first, i64::MAX, Some(ChatMessageOrigin::Desktop))
+            .await
+            .unwrap_or_default();
+        history.retain(is_memory_candidate_message);
+        history.drain(..history.len().saturating_sub(n));
+        history
     }
 
     pub async fn add_message(
@@ -860,8 +970,14 @@ impl AIOrchestrator {
         character_id: &str,
     ) -> Result<(String, i64), KokoroError> {
         self.add_message_with_metadata_for_conversation(
-            role, content, None, character_id, None, None,
-        ).await
+            role,
+            content,
+            None,
+            character_id,
+            None,
+            None,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -874,8 +990,14 @@ impl AIOrchestrator {
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Result<(String, i64), KokoroError> {
         self.add_message_with_metadata_for_conversation(
-            role, content, metadata, character_id, None, summary_provider,
-        ).await
+            role,
+            content,
+            metadata,
+            character_id,
+            None,
+            summary_provider,
+        )
+        .await
     }
 
     pub async fn add_message_with_metadata_for_conversation(
@@ -887,16 +1009,21 @@ impl AIOrchestrator {
         target_conversation_id: Option<&str>,
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Result<(String, i64), KokoroError> {
-        let _selection = self.conversation_switch_lock.lock().await;
-        let selected = self.current_conversation_id.lock().await.clone();
+        let _selection = self.selection.conversation_switch_lock.lock().await;
+        let selected = self.selection.current_conversation_id.lock().await.clone();
         let existing = target_conversation_id.or(selected.as_deref());
         let target = ConversationTarget {
+            require_character: false,
             character_id: character_id.to_owned(),
-            conversation_id: existing.map(str::to_owned).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            conversation_id: existing
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             create: existing.is_none(),
         };
         let messages = [MessageWrite::new(role, content, metadata)];
-        let saved = self.save_messages_locked(&target, &messages, target.create, summary_provider).await?;
+        let saved = self
+            .save_messages_locked(&target, &messages, target.create, summary_provider)
+            .await?;
         Ok((target.conversation_id, saved[0].id))
     }
 
@@ -909,7 +1036,14 @@ impl AIOrchestrator {
         select_on_commit: bool,
         summary_provider: Option<Arc<dyn LlmProvider>>,
     ) -> Result<Vec<SavedMessage>, KokoroError> {
-        self.save_messages_expected_locked(target, messages, select_on_commit, summary_provider, None).await
+        self.save_messages_expected_locked(
+            target,
+            messages,
+            select_on_commit,
+            summary_provider,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn save_messages_expected_locked(
@@ -963,143 +1097,205 @@ impl AIOrchestrator {
         for message in messages.iter().filter(|message| message.role == "user") {
             persistence::validate_user_input(&message.content)?;
         }
-        let saved = persistence::save_expected(&self.db, target, messages, expected_revision).await?;
-        if select_on_commit {
-            *self.current_conversation_id.lock().await = Some(target.conversation_id.clone());
-            self.bump_conversation_generation();
-            if self.persist_conversation_selection {
-                Self::persist_conversation_id(Some(&target.conversation_id));
-            }
-        }
-
-        let selected = self.current_conversation_id.lock().await.as_deref() == Some(&target.conversation_id);
-        for (message, row) in messages.iter().zip(&saved).filter(|(_, saved)| saved.changed) {
-            if message.role == "user" && matches!(origin, ChatMessageOrigin::Desktop) {
-                *self.message_count.lock().await += 1;
-                if self.is_memory_enabled() {
-                    *self.memory_trigger_count.lock().await += 1;
-                    if selected {
-                        let generation = self.current_conversation_generation();
-                        let database_generation = database_operation_generation();
-                        let mut boundary = self.desktop_memory_boundary.lock().await;
-                        if !boundary.as_ref().is_some_and(|boundary| {
-                            boundary.target.conversation_id == target.conversation_id
-                                && boundary.target.character_id == target.character_id
-                                && boundary.conversation_generation == generation
-                                && boundary.database_generation == database_generation
-                        }) {
-                            *boundary = Some(DesktopMemoryBoundary {
-                                target: target.clone(),
-                                conversation_generation: generation,
-                                database_generation,
-                                first_message_id: row.id,
-                            });
+        let saved =
+            persistence::save_expected(&self.db, target, messages, expected_revision).await?;
+        // A committed message advances only its own conversation's cadence.
+        let progress = self
+            .owners
+            .conversation(&target.character_id, &target.conversation_id);
+        {
+            let mut progress = progress.lock().await;
+            for (message, row) in messages.iter().zip(&saved).filter(|(_, row)| row.changed) {
+                if message.role == "user" && matches!(origin, ChatMessageOrigin::Desktop) {
+                    progress.message_count += 1;
+                    if self.is_memory_enabled() {
+                        let epoch = self.external_memory.epoch();
+                        if progress.memory_epoch != epoch {
+                            progress.memory_epoch = epoch;
+                            progress.memory_count = 0;
+                            progress.first_memory_message = None;
                         }
+                        progress.memory_count += 1;
+                        progress.first_memory_message.get_or_insert(row.id);
                     }
                 }
             }
-            if selected {
+        }
+        let committed_users = messages
+            .iter()
+            .zip(&saved)
+            .filter(|(message, row)| message.role == "user" && row.changed)
+            .count() as u64;
+        if committed_users > 0 {
+            let owner = self.owners.character(&target.character_id);
+            let mut behavior = owner.lock().await;
+            behavior.conversation_count += committed_users;
+            behavior.last_activity = Instant::now();
+        }
+        if select_on_commit {
+            *self.selection.current_conversation_id.lock().await =
+                Some(target.conversation_id.clone());
+            self.bump_conversation_generation();
+            if self.selection.persist_conversation_selection {
+                Self::persist_conversation_id(Some(&target.conversation_id));
+            }
+        }
+        if self
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref()
+            == Some(&target.conversation_id)
+        {
+            for (message, _) in messages.iter().zip(&saved).filter(|(_, row)| row.changed) {
                 self.push_history_message(Message {
                     role: message.role.clone(),
                     content: message.content.clone(),
-                    metadata: message.stored_metadata().as_deref().and_then(|raw| serde_json::from_str(raw).ok()),
-                }).await;
+                    metadata: message
+                        .stored_metadata()
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str(raw).ok()),
+                })
+                .await;
             }
         }
 
-        let strategy = self.context_strategy.lock().await.clone();
-        if strategy == "summary" && self.is_memory_enabled() {
-            if let Some(provider) = summary_provider.filter(|_| saved.iter().any(|message| message.changed)) {
-                let conversation_id = target.conversation_id.clone();
-                let memory_manager = self.memory_manager.clone();
-                let cid = target.character_id.clone();
-                let summary_language = self.response_language.lock().await.clone();
-                tauri::async_runtime::spawn(async move {
-                    let database_operation_guard = acquire_database_operation_read_guard().await;
-                    if !database_operation_guard.is_current() {
-                        tracing::info!(
-                            target: "context",
-                            "discarding conversation summary started before a database restore"
-                        );
-                        return;
-                    }
-                    let task = match memory_manager
-                        .get_conversation_summary_task(&conversation_id, &cid)
-                        .await
-                    {
-                        Ok(Some(task)) => task,
-                        Ok(None) => return,
-                        Err(e) => {
-                            tracing::error!(
-                                target: "context",
-                                "[Context] Failed to prepare conversation summary task for '{}': {}",
-                                conversation_id, e
-                            );
-                            return;
-                        }
-                    };
+        if let Some(provider) =
+            summary_provider.filter(|_| saved.iter().any(|message| message.changed))
+        {
+            self.schedule_conversation_summary(
+                target,
+                "legacy-summary",
+                provider,
+                self.response_language.lock().await.clone(),
+                None,
+            )
+            .await;
+        }
 
+        Ok(saved)
+    }
+
+    pub(crate) async fn schedule_conversation_summary(
+        &self,
+        target: &ConversationTarget,
+        request_id: &str,
+        provider: Arc<dyn LlmProvider>,
+        summary_language: String,
+        scope: Option<Arc<crate::chat::ownership::MemoryWriteScope>>,
+    ) {
+        if *self.context_strategy.lock().await != "summary" || !self.is_memory_enabled() {
+            return;
+        }
+        let scope = scope.unwrap_or_else(|| {
+            self.memory_write_scope(
+                &target.character_id,
+                &target.conversation_id,
+                request_id,
+                self.external_memory.epoch(),
+            )
+        });
+        let conversation_id = target.conversation_id.clone();
+        let memory_manager = self.memory_manager.clone();
+        let summary_db = self.db.clone();
+        let cid = target.character_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let database_operation_guard = acquire_database_operation_read_guard().await;
+            if !database_operation_guard.is_current() {
+                tracing::info!(
+                    target: "context",
+                    "discarding conversation summary started before a database restore"
+                );
+                return;
+            }
+            let Some(commit_guard) = scope.admit().await else {
+                return;
+            };
+            let task = match memory_manager
+                .get_conversation_summary_task(&conversation_id, &cid)
+                .await
+            {
+                Ok(Some(task)) => task,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::error!(
+                        target: "context",
+                        "[Context] Failed to prepare conversation summary task for '{}': {}",
+                        conversation_id, e
+                    );
+                    return;
+                }
+            };
+
+            if let Err(e) = memory_manager
+                .mark_conversation_summary_running(task.record_id)
+                .await
+            {
+                tracing::error!(
+                    target: "context",
+                    "[Context] Failed to mark summary task running for '{}': {}",
+                    conversation_id, e
+                );
+                return;
+            }
+
+            drop(commit_guard);
+            let prompt = build_conversation_summary_prompt(&task.transcript, &summary_language);
+
+            let summary_result = tokio::time::timeout(
+                std::time::Duration::from_secs(CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS),
+                provider.chat(vec![user_text_message(prompt)], None),
+            )
+            .await;
+            let Some(_commit_guard) = scope.admit().await else {
+                // Technical task cleanup only: revocation must not leave a running
+                // row blocking the next authorized summary after memory is re-enabled.
+                let _ = sqlx::query(
+                    "DELETE FROM conversation_summaries WHERE id=? AND status='running'",
+                )
+                .bind(task.record_id)
+                .execute(&summary_db)
+                .await;
+                return;
+            };
+            match summary_result {
+                Ok(Ok(text)) if !text.trim().is_empty() => {
+                    let summary = text.trim().to_string();
                     if let Err(e) = memory_manager
-                        .mark_conversation_summary_running(task.record_id)
+                        .complete_conversation_summary(task.record_id, &summary)
                         .await
                     {
                         tracing::error!(
                             target: "context",
-                            "[Context] Failed to mark summary task running for '{}': {}",
+                            "[Context] Failed to persist conversation summary for '{}': {}",
                             conversation_id, e
                         );
-                        return;
                     }
-
-                    let prompt =
-                        build_conversation_summary_prompt(&task.transcript, &summary_language);
-
-                    let summary_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS),
-                        provider.chat(vec![user_text_message(prompt)], None),
-                    )
-                    .await;
-                    match summary_result {
-                        Ok(Ok(text)) if !text.trim().is_empty() => {
-                            let summary = text.trim().to_string();
-                            if let Err(e) = memory_manager
-                                .complete_conversation_summary(task.record_id, &summary)
-                                .await
-                            {
-                                tracing::error!(
-                                    target: "context",
-                                    "[Context] Failed to persist conversation summary for '{}': {}",
-                                    conversation_id, e
-                                );
-                            }
-                        }
-                        Ok(Ok(_)) => {
-                            let _ = memory_manager
-                                .fail_conversation_summary(
-                                    task.record_id,
-                                    "summary provider returned empty output",
-                                )
-                                .await;
-                        }
-                        Ok(Err(e)) => {
-                            let _ = memory_manager
-                                .fail_conversation_summary(task.record_id, &e.to_string())
-                                .await;
-                        }
-                        Err(_) => {
-                            let _ = memory_manager
-                                .fail_conversation_summary(
-                                    task.record_id,
-                                    "conversation summary provider timed out",
-                                )
-                                .await;
-                        }
-                    }
-                });
+                }
+                Ok(Ok(_)) => {
+                    let _ = memory_manager
+                        .fail_conversation_summary(
+                            task.record_id,
+                            "summary provider returned empty output",
+                        )
+                        .await;
+                }
+                Ok(Err(e)) => {
+                    let _ = memory_manager
+                        .fail_conversation_summary(task.record_id, &e.to_string())
+                        .await;
+                }
+                Err(_) => {
+                    let _ = memory_manager
+                        .fail_conversation_summary(
+                            task.record_id,
+                            "conversation summary provider timed out",
+                        )
+                        .await;
+                }
             }
-        }
-
-        Ok(saved)
+        });
     }
 
     /// Load the context window for an explicit owner. Used when a producer
@@ -1295,7 +1491,7 @@ impl AIOrchestrator {
     ) -> Result<usize> {
         // 会话切换锁：与 load_conversation / delete_last_messages / edit 等历史重写路径互斥，
         // 防止清理期间发生会话切换时把旧会话历史覆盖到新会话的内存上下文
-        let _switch_guard = self.conversation_switch_lock.lock().await;
+        let _switch_guard = self.selection.conversation_switch_lock.lock().await;
         let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
             "SELECT id, metadata FROM conversation_messages WHERE conversation_id = ? AND metadata IS NOT NULL",
         )
@@ -1370,7 +1566,14 @@ impl AIOrchestrator {
         // active one (mirrors delete_last_messages_inner). The whole method runs under
         // conversation_switch_lock, so no conversation switch can interleave with this
         // check-then-resync sequence.
-        if self.current_conversation_id.lock().await.as_deref() == Some(conversation_id) {
+        if self
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref()
+            == Some(conversation_id)
+        {
             let remaining_rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
                 "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
             )
@@ -1379,9 +1582,9 @@ impl AIOrchestrator {
             .await?;
 
             let max_chars = *self.max_message_chars.lock().await;
-            let mut history = self.history.lock().await;
+            let mut history = self.selection.history.lock().await;
             let new_len = sync_history_window(&mut history, remaining_rows, max_chars);
-            let mut boundary = self.memory_history_boundary.lock().await;
+            let mut boundary = self.selection.memory_history_boundary.lock().await;
             *boundary = (*boundary).min(new_len);
         }
 
@@ -1397,16 +1600,33 @@ impl AIOrchestrator {
 
     /// Returns the total count of user messages in this session.
     pub async fn get_message_count(&self) -> u64 {
-        *self.message_count.lock().await
+        let Some(conversation) = self.selection.current_conversation_id.lock().await.clone() else {
+            return 0;
+        };
+        self.owners
+            .conversation(&self.get_character_id().await, &conversation)
+            .lock()
+            .await
+            .message_count
     }
 
     pub async fn get_memory_trigger_count(&self) -> u64 {
-        *self.memory_trigger_count.lock().await
+        let Some(conversation) = self.selection.current_conversation_id.lock().await.clone() else {
+            return 0;
+        };
+        self.memory_progress_for(&ConversationTarget {
+            require_character: false,
+            character_id: self.get_character_id().await,
+            conversation_id: conversation,
+            create: false,
+        })
+        .await
+        .0
     }
 
     /// Returns the last `n` messages from history for memory extraction.
     pub async fn get_recent_history(&self, n: usize) -> Vec<Message> {
-        let history = self.history.lock().await;
+        let history = self.selection.history.lock().await;
         let filtered = history
             .iter()
             .filter(|message| is_summary_candidate_message(message))
@@ -1420,39 +1640,26 @@ impl AIOrchestrator {
     /// Filtering SQLite before LIMIT prevents a busy shared Telegram conversation
     /// from evicting desktop turns before their own cadence reaches extraction.
     pub async fn get_recent_memory_history(&self, n: usize) -> Vec<Message> {
-        let boundary = self.desktop_memory_boundary.lock().await.clone();
-        if let Some(boundary) = boundary.filter(|boundary| {
-            boundary.conversation_generation == self.current_conversation_generation()
-                && boundary.database_generation == database_operation_generation()
-        }) {
-            if self.current_conversation_id.lock().await.as_deref()
-                == Some(&boundary.target.conversation_id)
-            {
-                match self
-                    .saved_history_range(
-                        &boundary.target,
-                        boundary.first_message_id,
-                        i64::MAX,
-                        Some(ChatMessageOrigin::Desktop),
-                    )
-                    .await
-                {
-                    Ok(mut history) => {
-                        history.retain(is_memory_candidate_message);
-                        history.drain(..history.len().saturating_sub(n));
-                        return history;
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: "memory", "Failed to load committed desktop memory history: {error}")
-                    }
+        if let Some(conversation) = self.selection.current_conversation_id.lock().await.clone() {
+            let target = ConversationTarget {
+                require_character: false,
+                character_id: self.get_character_id().await,
+                conversation_id: conversation,
+                create: false,
+            };
+            if self.memory_progress_for(&target).await.1.is_some() {
+                let history = self.memory_history_for(&target, n).await;
+                if !history.is_empty() {
+                    return history;
                 }
             }
         }
         // Keep the existing bounded fallback for legacy/manually supplied history
         // and an unavailable database; memory must not block ordinary chat.
         let history = {
-            let history = self.history.lock().await;
-            let boundary = (*self.memory_history_boundary.lock().await).min(history.len());
+            let history = self.selection.history.lock().await;
+            let boundary =
+                (*self.selection.memory_history_boundary.lock().await).min(history.len());
             history.iter().skip(boundary).cloned().collect::<Vec<_>>()
         };
         // Old native rows carry only user_message_id, and their user can already
@@ -1463,7 +1670,7 @@ impl AIOrchestrator {
             .filter(|message| !is_external_chat_message(message))
             .filter_map(linked_user_message_id)
             .collect::<Vec<_>>();
-        let selected_conversation = self.current_conversation_id.lock().await.clone();
+        let selected_conversation = self.selection.current_conversation_id.lock().await.clone();
         let linked_external = if linked_ids.is_empty() {
             Some(HashSet::new())
         } else if let Some(conversation) = selected_conversation {
@@ -1515,15 +1722,12 @@ impl AIOrchestrator {
     }
 
     pub async fn set_memory_enabled(&self, enabled: bool) {
-        self.external_memory.set_enabled(&self.memory_enabled, enabled);
+        let _commit = self.owners.memory_commit.write().await;
+        self.external_memory
+            .set_enabled(&self.memory_enabled, enabled);
         {
-            let mut trigger_count = self.memory_trigger_count.lock().await;
-            *trigger_count = 0;
-        }
-        *self.desktop_memory_boundary.lock().await = None;
-        {
-            let history_len = self.history.lock().await.len();
-            let mut boundary = self.memory_history_boundary.lock().await;
+            let history_len = self.selection.history.lock().await.len();
+            let mut boundary = self.selection.memory_history_boundary.lock().await;
             *boundary = history_len;
         }
     }
@@ -1538,14 +1742,14 @@ impl AIOrchestrator {
     }
 
     async fn push_history_messages(&self, messages: impl IntoIterator<Item = Message>) {
-        let mut history = self.history.lock().await;
+        let mut history = self.selection.history.lock().await;
         history.extend(messages);
         let evicted = history.len().saturating_sub(MAX_IN_MEMORY_HISTORY_MESSAGES);
         history.drain(..evicted);
         drop(history);
 
         if evicted > 0 {
-            let mut boundary = self.memory_history_boundary.lock().await;
+            let mut boundary = self.selection.memory_history_boundary.lock().await;
             *boundary = boundary.saturating_sub(evicted);
         }
     }
@@ -1563,15 +1767,20 @@ impl AIOrchestrator {
         let _turn_guard = self
             .enter_chat_turn()
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        if let Some(reason) = self.get_runtime_degraded().await {
+            return Err(anyhow::anyhow!("Character runtime is degraded: {reason}"));
+        }
+        let conversation = self.selection.current_conversation_id.lock().await.clone();
         self.compose_prompt_inner(
             query,
             allow_image_gen,
             tool_prompt,
             native_tools_enabled,
             character_id,
-            None,
+            conversation.as_deref(),
             None,
             true,
+            &self.prompt_snapshot(character_id).await?,
         )
         .await
     }
@@ -1616,9 +1825,17 @@ impl AIOrchestrator {
         _guard: &ChatTurnGuard,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         self.compose_chat_prompt(
-            query, allow_image_gen, tool_prompt, native_tools_enabled, character_id,
-            target_conversation_id, history_snapshot, true, _guard,
-        ).await
+            query,
+            allow_image_gen,
+            tool_prompt,
+            native_tools_enabled,
+            character_id,
+            target_conversation_id,
+            history_snapshot,
+            true,
+            &self.prompt_snapshot(character_id).await?,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1632,7 +1849,7 @@ impl AIOrchestrator {
         target_conversation_id: Option<&str>,
         history_snapshot: Option<Vec<Message>>,
         desktop_context: bool,
-        _guard: &ChatTurnGuard,
+        snapshot: &crate::chat::ownership::PromptSnapshot,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         self.compose_prompt_inner(
             query,
@@ -1643,6 +1860,7 @@ impl AIOrchestrator {
             target_conversation_id,
             history_snapshot,
             desktop_context,
+            snapshot,
         )
         .await
     }
@@ -1658,6 +1876,7 @@ impl AIOrchestrator {
         target_conversation_id: Option<&str>,
         history_snapshot: Option<Vec<Message>>,
         desktop_context: bool,
+        snapshot: &crate::chat::ownership::PromptSnapshot,
     ) -> Result<(Vec<Message>, Vec<String>)> {
         if let Some(reason) = self.get_runtime_degraded().await {
             anyhow::bail!(
@@ -1677,10 +1896,7 @@ impl AIOrchestrator {
         // Only if query looks like it needs context or every N turns
         // For now, always try to fetch relevant memories (scoped to current character)
         let cid = character_id;
-        let resolved_conversation_id = match target_conversation_id {
-            Some(id) => Some(id.to_string()),
-            None => self.current_conversation_id.lock().await.clone(),
-        };
+        let resolved_conversation_id = target_conversation_id.map(str::to_owned);
         let mut warnings: Vec<String> = Vec::new();
         let memories = if self.is_memory_enabled() {
             match self
@@ -1735,30 +1951,38 @@ impl AIOrchestrator {
 
         // Read all lock-guarded values upfront and drop locks immediately.
         // This prevents holding multiple mutexes across .await points.
-        let sp = self.system_prompt.lock().await.clone();
-        let vision_context_history_mode = self.vision_context_history_mode.lock().await.clone();
+        let sp = snapshot.system_prompt.clone();
+        let vision_context_history_mode = snapshot.vision_context_history_mode.clone();
         let history_snapshot: Vec<Message> = match history_snapshot {
             Some(snapshot) => snapshot,
-            None => self.history.lock().await.iter().cloned().collect(),
+            None => self
+                .selection
+                .history
+                .lock()
+                .await
+                .iter()
+                .cloned()
+                .collect(),
         };
         let latest_vision_index = latest_vision_context_index(&history_snapshot);
         let recent_history_snapshot: Vec<Message> = history_snapshot
             .iter()
             .enumerate()
             .filter(|(index, msg)| {
-                (desktop_context || !is_vision_context_message(msg)) && should_include_message_for_llm_history(
-                    msg,
-                    *index,
-                    latest_vision_index,
-                    &vision_context_history_mode,
-                )
+                (desktop_context || !is_vision_context_message(msg))
+                    && should_include_message_for_llm_history(
+                        msg,
+                        *index,
+                        latest_vision_index,
+                        &vision_context_history_mode,
+                    )
             })
             .map(|(_, msg)| msg)
             .cloned()
             .collect();
 
         // -- Read response language early so all sections can reference it --
-        let resp_lang = self.response_language.lock().await.clone();
+        let resp_lang = snapshot.response_language.clone();
 
         let mut final_messages = Vec::new();
 
@@ -1774,15 +1998,10 @@ impl AIOrchestrator {
         ));
 
         // Section 2: Character persona (jailbreak + system prompt)
-        let jailbreak = self
-            .jailbreak_prompt
-            .lock()
-            .await
-            .clone()
-            .unwrap_or_default();
+        let jailbreak = snapshot.jailbreak_prompt.clone();
         let character_block = if !jailbreak.is_empty() {
-            let char_name = self.character_name.lock().await.clone();
-            let user_name = self.user_name.lock().await.clone();
+            let char_name = snapshot.character_name.clone();
+            let user_name = snapshot.user_name.clone();
             // Preserve base system prompt alongside jailbreak
             let processed_jailbreak = jailbreak
                 .replace("{{char}}", &char_name)
@@ -1876,10 +2095,9 @@ impl AIOrchestrator {
         }
 
         // Section 5: Live2D cues
-        if let Some(profile) = desktop_context.then(crate::live2d::load_active_live2d_profile).flatten() {
-            if !profile.cue_map.is_empty() {
-                let cue_lines = profile
-                    .cue_map
+        if let Some(cue_map) = snapshot.cue_map.as_ref().filter(|_| desktop_context) {
+            if !cue_map.is_empty() {
+                let cue_lines = cue_map
                     .iter()
                     .filter_map(|(cue, binding)| {
                         (!binding.exclude_from_prompt).then_some(cue.clone())
@@ -1931,7 +2149,7 @@ impl AIOrchestrator {
 
         // -- Translation Instruction (kept separate at end for instruction clarity) --
         {
-            let user_lang = self.user_language.lock().await;
+            let user_lang = &snapshot.user_language;
             if !user_lang.is_empty() && !resp_lang.is_empty() && *user_lang != resp_lang {
                 final_messages.push(Message {
                     role: "system".to_string(),
@@ -2018,27 +2236,23 @@ impl AIOrchestrator {
     pub async fn clear_history(&self) {
         // 会话切换锁：清空历史+重置会话指针必须与删除/加载/编辑等路径互斥，
         // 防止清空期间在途的删除操作把旧历史写回新会话
-        let _switch_guard = self.conversation_switch_lock.lock().await;
-        let mut history = self.history.lock().await;
+        let _switch_guard = self.selection.conversation_switch_lock.lock().await;
+        let mut history = self.selection.history.lock().await;
         history.clear();
         drop(history);
-        *self.memory_history_boundary.lock().await = 0;
-        *self.memory_trigger_count.lock().await = 0;
-        *self.desktop_memory_boundary.lock().await = None;
+        *self.selection.memory_history_boundary.lock().await = 0;
         // 清空当前对话 ID，下次发消息时会创建新对话
-        let mut conv_id = self.current_conversation_id.lock().await;
+        let mut conv_id = self.selection.current_conversation_id.lock().await;
         *conv_id = None;
         self.bump_conversation_generation();
-        if self.persist_conversation_selection {
+        if self.selection.persist_conversation_selection {
             Self::persist_conversation_id(None);
         }
     }
 
     pub async fn reset_history_and_boundary(&self) {
-        self.history.lock().await.clear();
-        *self.memory_history_boundary.lock().await = 0;
-        *self.memory_trigger_count.lock().await = 0;
-        *self.desktop_memory_boundary.lock().await = None;
+        self.selection.history.lock().await.clear();
+        *self.selection.memory_history_boundary.lock().await = 0;
     }
 
     /// Resets and populates in-memory history from raw database rows or messages,
@@ -2049,20 +2263,45 @@ impl AIOrchestrator {
         T: IntoHistoryMessage,
     {
         let max_chars = *self.max_message_chars.lock().await;
-        let mut history = self.history.lock().await;
+        let mut history = self.selection.history.lock().await;
         let count = sync_history_window(&mut history, items, max_chars);
-        *self.memory_history_boundary.lock().await = count;
-        *self.desktop_memory_boundary.lock().await = None;
+        *self.selection.memory_history_boundary.lock().await = count;
         count
     }
 
     pub async fn set_memory_history_boundary(&self, boundary: usize) {
-        *self.memory_history_boundary.lock().await = boundary;
-        *self.desktop_memory_boundary.lock().await = None;
+        *self.selection.memory_history_boundary.lock().await = boundary;
     }
 
     pub async fn memory_history_boundary(&self) -> usize {
-        *self.memory_history_boundary.lock().await
+        *self.selection.memory_history_boundary.lock().await
+    }
+
+    pub(crate) async fn reset_runtime_owners(&self) {
+        self.external_replies.clear();
+        self.owners.clear();
+        self.memory_event_cooldowns.lock().await.clear();
+        self.external_memory
+            .set_enabled(&self.memory_enabled, self.is_memory_enabled());
+    }
+
+    pub(crate) async fn forget_conversation(&self, id: &str) {
+        self.external_replies.forget_conversation(id);
+        self.owners.remove_conversation(id);
+        self.external_memory.remove_conversation(id);
+        self.memory_event_cooldowns
+            .lock()
+            .await
+            .retain(|key, _| !key.contains(&format!(":{id}:")));
+    }
+    pub(crate) async fn forget_character(&self, id: &str) {
+        self.external_replies.forget_character(id);
+        self.owners.remove_character(id);
+        self.external_memory.remove_character(id);
+        self.memory_event_cooldowns
+            .lock()
+            .await
+            .retain(|key, _| !key.starts_with(&format!("{id}:")));
     }
 
     pub async fn should_trigger_memory_event(
@@ -2072,6 +2311,16 @@ impl AIOrchestrator {
     ) -> bool {
         let now = Instant::now();
         let mut cooldowns = self.memory_event_cooldowns.lock().await;
+        cooldowns.retain(|_, last| now.duration_since(*last).as_secs() <= cooldown_secs.max(3600));
+        if cooldowns.len() >= 2048 {
+            if let Some(oldest) = cooldowns
+                .iter()
+                .min_by_key(|(_, time)| **time)
+                .map(|(key, _)| key.clone())
+            {
+                cooldowns.remove(&oldest);
+            }
+        }
 
         if let Some(last_triggered_at) = cooldowns.get(cooldown_key) {
             if now.duration_since(*last_triggered_at).as_secs() < cooldown_secs {
@@ -2091,29 +2340,45 @@ mod tests {
     #[tokio::test]
     async fn invalid_imported_failures_never_enter_model_or_memory_context() {
         let message = Message {
-            role: "system".into(), content: "foreign diagnostic".into(),
+            role: "system".into(),
+            content: "foreign diagnostic".into(),
             metadata: Some(serde_json::json!({ "type": "invalid_failure_event" })),
         };
         assert!(!is_memory_candidate_message(&message));
         assert!(!is_summary_candidate_message(&message));
-        assert!(!should_include_message_for_llm_history(&message, 0, None, "full"));
-        let ordinary = Message { role: "user".into(), content: "saved prompt".into(), metadata: None };
+        assert!(!should_include_message_for_llm_history(
+            &message, 0, None, "full"
+        ));
+        let ordinary = Message {
+            role: "user".into(),
+            content: "saved prompt".into(),
+            metadata: None,
+        };
         assert!(is_memory_candidate_message(&ordinary));
         assert!(is_summary_candidate_message(&ordinary));
-        assert!(should_include_message_for_llm_history(&ordinary, 0, None, "full"));
+        assert!(should_include_message_for_llm_history(
+            &ordinary, 0, None, "full"
+        ));
         let orchestrator = setup_test_orchestrator().await;
         orchestrator.set_memory_enabled(false).await;
         orchestrator.push_history_message(ordinary).await;
         orchestrator.push_history_message(message).await;
-        let (prompt, _) = orchestrator.compose_prompt("hello", false, None, true, "default").await.unwrap();
-        assert!(prompt.iter().any(|message| message.content == "saved prompt"));
-        assert!(prompt.iter().all(|message| message.content != "foreign diagnostic"));
+        let (prompt, _) = orchestrator
+            .compose_prompt("hello", false, None, true, "default")
+            .await
+            .unwrap();
+        assert!(prompt
+            .iter()
+            .any(|message| message.content == "saved prompt"));
+        assert!(prompt
+            .iter()
+            .all(|message| message.content != "foreign diagnostic"));
     }
 
     #[tokio::test]
     async fn legacy_native_memory_fallback_does_not_guess_origin_when_database_is_unavailable() {
         let state = setup_test_orchestrator().await;
-        *state.current_conversation_id.lock().await = Some("offline-conversation".into());
+        *state.selection.current_conversation_id.lock().await = Some("offline-conversation".into());
         for (content, metadata) in [
             ("desktop text", None),
             (
@@ -2213,8 +2478,8 @@ mod tests {
     async fn delete_turn_artifacts_removes_only_turn_technical_rows_and_unfinalized_extras() {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-1").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
-        *orchestrator.memory_history_boundary.lock().await = 100;
+        *orchestrator.selection.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.selection.memory_history_boundary.lock().await = 100;
 
         let user_id = insert_conversation_row(&orchestrator, "conv-1", "user", "hello", None).await;
         let draft_id =
@@ -2303,7 +2568,7 @@ mod tests {
         }
 
         // In-memory history is resynced from DB and the boundary clamps down to it.
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         let roles: Vec<&str> = history.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(
             roles,
@@ -2317,7 +2582,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            *orchestrator.memory_history_boundary.lock().await,
+            *orchestrator.selection.memory_history_boundary.lock().await,
             history.len()
         );
     }
@@ -2326,7 +2591,7 @@ mod tests {
     async fn delete_turn_artifacts_skips_finalized_extras_and_noop_cleanup() {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-1").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await = Some("conv-1".to_string());
         let finalized_id = insert_conversation_row(
             &orchestrator,
             "conv-1",
@@ -2366,13 +2631,16 @@ mod tests {
                 metadata: None,
             })
             .await;
-        let history_len_before = orchestrator.history.lock().await.len();
+        let history_len_before = orchestrator.selection.history.lock().await.len();
         let deleted = orchestrator
             .delete_turn_artifacts("conv-1", "turn-unknown", &[])
             .await
             .expect("cleanup should succeed");
         assert_eq!(deleted, 0);
-        assert_eq!(orchestrator.history.lock().await.len(), history_len_before);
+        assert_eq!(
+            orchestrator.selection.history.lock().await.len(),
+            history_len_before
+        );
     }
 
     #[tokio::test]
@@ -2380,7 +2648,8 @@ mod tests {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-1").await;
         // The turn's conversation is no longer the active one (user switched away).
-        *orchestrator.current_conversation_id.lock().await = Some("other-conv".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await =
+            Some("other-conv".to_string());
         insert_conversation_row(
             &orchestrator,
             "conv-1",
@@ -2414,7 +2683,7 @@ mod tests {
             .await
             .is_empty());
         // History must not be resynced for a conversation that is no longer active.
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert_eq!(history.len(), 1);
         assert_eq!(
             history.front().unwrap().content,
@@ -2427,7 +2696,7 @@ mod tests {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-1").await;
         insert_test_conversation(&orchestrator, "conv-2").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await = Some("conv-1".to_string());
 
         // An unfinalized draft in conv-2 (metadata is NULL).
         let conv_2_draft_id = insert_conversation_row(
@@ -2457,14 +2726,18 @@ mod tests {
     async fn delete_turn_artifacts_atomic_skips_finalized_extras() {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-1").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await = Some("conv-1".to_string());
 
         let finalized_row_id = orchestrator
             .persist_streaming_draft("conv-1", "partial answer", "turn-a")
             .await
             .unwrap();
         orchestrator
-            .update_streaming_draft(finalized_row_id, "final answer", Some(r#"{"turn_id":"turn-a"}"#))
+            .update_streaming_draft(
+                finalized_row_id,
+                "final answer",
+                Some(r#"{"turn_id":"turn-a"}"#),
+            )
             .await
             .unwrap();
 
@@ -2484,7 +2757,7 @@ mod tests {
     async fn delete_turn_artifacts_handles_duplicate_and_overlapping_extras() {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-1").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-1".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await = Some("conv-1".to_string());
 
         let draft_id = orchestrator
             .persist_streaming_draft("conv-1", "draft message", "turn-a")
@@ -2513,70 +2786,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_keeps_history_and_conversation_state_isolated() {
-        let orchestrator = setup_test_orchestrator().await;
-        orchestrator
-            .push_history_message(Message {
-                role: "user".to_string(),
-                content: "desktop history".to_string(),
-                metadata: None,
-            })
-            .await;
-        *orchestrator.current_conversation_id.lock().await = Some("desktop".to_string());
-
-        let fork = orchestrator.fork_with_isolated_history().await;
-        fork.push_history_message(Message {
-            role: "user".to_string(),
-            content: "qq history".to_string(),
-            metadata: None,
-        })
-        .await;
-
-        assert_eq!(orchestrator.history.lock().await.len(), 1);
-        assert_eq!(fork.history.lock().await.len(), 1);
+    async fn explicit_conversation_history_and_progress_are_isolated_without_forks() {
+        let state = setup_test_orchestrator().await;
+        let a = ConversationTarget {
+            require_character: false,
+            character_id: "default".into(),
+            conversation_id: "a".into(),
+            create: true,
+        };
+        let b = ConversationTarget {
+            conversation_id: "b".into(),
+            ..a.clone()
+        };
+        for target in [&a, &b] {
+            state
+                .save_messages_locked(
+                    target,
+                    &[MessageWrite::new("user", &target.conversation_id, None)],
+                    false,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
         assert_eq!(
-            orchestrator.history.lock().await.front().unwrap().content,
-            "desktop history"
+            state.saved_history_for(&a, None).await.unwrap()[0].content,
+            "a"
         );
         assert_eq!(
-            fork.history.lock().await.front().unwrap().content,
-            "qq history"
+            state.saved_history_for(&b, None).await.unwrap()[0].content,
+            "b"
         );
-        assert_eq!(
-            orchestrator.current_conversation_id.lock().await.as_deref(),
-            Some("desktop")
-        );
-        assert_eq!(*fork.current_conversation_id.lock().await, None);
-        assert!(!fork.persist_conversation_selection);
+        assert_eq!(state.memory_progress_for(&a).await.0, 1);
+        assert_eq!(state.memory_progress_for(&b).await.0, 1);
+        assert!(state.selection.history.lock().await.is_empty());
     }
 
     #[tokio::test]
-    async fn character_profile_updates_isolated_persona() {
-        let orchestrator = setup_test_orchestrator().await;
-        sqlx::query(
-            "INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind("qq-character")
-        .bind("QQ Character")
-        .bind("QQ Persona")
-        .bind("QQ User")
-        .bind("test")
-        .bind(1_i64)
-        .bind(1_i64)
-        .execute(&orchestrator.db)
-        .await
-        .expect("character insert should succeed");
-
-        let fork = orchestrator.fork_with_isolated_history().await;
-        assert!(fork
-            .apply_character_profile("qq-character")
-            .await
-            .expect("profile should load"));
-
-        assert_eq!(*fork.system_prompt.lock().await, "QQ Persona");
-        assert_eq!(*fork.character_name.lock().await, "QQ Character");
-        assert_eq!(*fork.user_name.lock().await, "QQ User");
-        assert_ne!(*orchestrator.system_prompt.lock().await, "QQ Persona");
+    async fn nonselected_character_snapshot_does_not_mutate_committed_persona() {
+        let state = setup_test_orchestrator().await;
+        sqlx::query("INSERT INTO characters(id,name,persona,user_nickname) VALUES ('other','Other','Other Persona','Other User')").execute(&state.db).await.unwrap();
+        let original = state.system_prompt.lock().await.clone();
+        let snapshot = state.prompt_snapshot("other").await.unwrap();
+        assert!(snapshot.system_prompt.contains("Other Persona"));
+        assert_eq!(snapshot.character_name, "Other");
+        assert_eq!(snapshot.user_name, "Other User");
+        assert_eq!(*state.system_prompt.lock().await, original);
+        assert_eq!(state.get_character_id().await, "default");
     }
 
     #[test]
@@ -2598,6 +2854,7 @@ mod tests {
     #[tokio::test]
     async fn compose_prompt_places_dynamic_context_after_stable_system() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("char-cache".into()).await;
         orchestrator.set_memory_enabled(false).await;
         orchestrator
             .set_system_prompt("Character persona".to_string())
@@ -2628,7 +2885,8 @@ mod tests {
         .execute(&orchestrator.db)
         .await
         .expect("conversation insert should succeed");
-        *orchestrator.current_conversation_id.lock().await = Some(conversation_id.to_string());
+        *orchestrator.selection.current_conversation_id.lock().await =
+            Some(conversation_id.to_string());
 
         let (messages, warnings) = orchestrator
             .compose_prompt(
@@ -2678,6 +2936,7 @@ mod tests {
     #[tokio::test]
     async fn compose_prompt_for_conversation_uses_snapshot_and_target_conversation() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("char-test".into()).await;
         orchestrator.set_memory_enabled(false).await;
         orchestrator
             .set_response_language("English".to_string())
@@ -2722,12 +2981,17 @@ mod tests {
         .expect("insert conv B should succeed");
 
         // Global orchestrator state is switched to conversation B
-        *orchestrator.current_conversation_id.lock().await = Some(conv_b_id.to_string());
-        orchestrator.history.lock().await.push_back(Message {
-            role: "user".to_string(),
-            content: "Message strictly in Conversation B".to_string(),
-            metadata: None,
-        });
+        *orchestrator.selection.current_conversation_id.lock().await = Some(conv_b_id.to_string());
+        orchestrator
+            .selection
+            .history
+            .lock()
+            .await
+            .push_back(Message {
+                role: "user".to_string(),
+                content: "Message strictly in Conversation B".to_string(),
+                metadata: None,
+            });
 
         // Snapshot belonging strictly to conversation A
         let snapshot_a = vec![Message {
@@ -2790,6 +3054,7 @@ mod tests {
     #[tokio::test]
     async fn compose_prompt_skips_dynamic_context_message_when_empty() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("char-cache".into()).await;
         orchestrator.set_memory_enabled(false).await;
 
         let (messages, warnings) = orchestrator
@@ -2867,6 +3132,7 @@ mod tests {
     #[tokio::test]
     async fn compose_prompt_defaults_to_latest_vision_context_history() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("char-cache".into()).await;
         orchestrator.set_memory_enabled(false).await;
         orchestrator
             .push_history_message(Message {
@@ -2910,6 +3176,7 @@ mod tests {
     #[tokio::test]
     async fn compose_prompt_can_include_full_vision_context_history() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("char-cache".into()).await;
         orchestrator.set_memory_enabled(false).await;
         orchestrator
             .set_vision_context_history_mode("full".to_string())
@@ -3006,15 +3273,17 @@ mod tests {
             "This is a very long message that exceeds the maximum character limit".to_string();
         let (_, message_id) = orchestrator
             .add_message("user".to_string(), long_message.clone(), "test_char")
-            .await.unwrap();
-        let saved: String = sqlx::query_scalar("SELECT content FROM conversation_messages WHERE id = ?")
-            .bind(message_id)
-            .fetch_one(&orchestrator.db)
             .await
             .unwrap();
+        let saved: String =
+            sqlx::query_scalar("SELECT content FROM conversation_messages WHERE id = ?")
+                .bind(message_id)
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
         assert_eq!(saved, long_message);
 
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert_eq!(history.len(), 1, "History should contain one message");
 
         let msg = &history[0];
@@ -3039,10 +3308,11 @@ mod tests {
         for i in 0..35 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert!(
             history.len() <= 20,
             "History should not exceed 20 messages, got {}",
@@ -3058,7 +3328,8 @@ mod tests {
         for i in 0..5 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         // Request 10 messages (more than available)
@@ -3078,7 +3349,8 @@ mod tests {
         for i in 0..10 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         // Request exactly 5 messages
@@ -3102,12 +3374,13 @@ mod tests {
         for i in 0..5 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         // Verify messages were added
         {
-            let history = orchestrator.history.lock().await;
+            let history = orchestrator.selection.history.lock().await;
             assert_eq!(history.len(), 5, "Should have 5 messages before clear");
         }
 
@@ -3116,17 +3389,17 @@ mod tests {
 
         // Verify all state is reset
         {
-            let history = orchestrator.history.lock().await;
+            let history = orchestrator.selection.history.lock().await;
             assert_eq!(history.len(), 0, "History should be empty after clear");
         }
 
         {
-            let boundary = *orchestrator.memory_history_boundary.lock().await;
+            let boundary = *orchestrator.selection.memory_history_boundary.lock().await;
             assert_eq!(boundary, 0, "Memory boundary should be 0 after clear");
         }
 
         {
-            let trigger_count = *orchestrator.memory_trigger_count.lock().await;
+            let trigger_count = orchestrator.get_memory_trigger_count().await;
             assert_eq!(
                 trigger_count, 0,
                 "Memory trigger count should be 0 after clear"
@@ -3134,7 +3407,7 @@ mod tests {
         }
 
         {
-            let conv_id = orchestrator.current_conversation_id.lock().await;
+            let conv_id = orchestrator.selection.current_conversation_id.lock().await;
             assert_eq!(
                 *conv_id, None,
                 "Current conversation ID should be None after clear"
@@ -3145,17 +3418,19 @@ mod tests {
     #[tokio::test]
     async fn test_set_memory_enabled_false_resets_trigger_count() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("test_char".into()).await;
 
         // Add some user messages to increment trigger count
         for i in 0..3 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         // Verify trigger count was incremented
         {
-            let trigger_count = *orchestrator.memory_trigger_count.lock().await;
+            let trigger_count = orchestrator.get_memory_trigger_count().await;
             assert_eq!(
                 trigger_count, 3,
                 "Trigger count should be 3 after 3 user messages"
@@ -3167,7 +3442,7 @@ mod tests {
 
         // Verify trigger count was reset
         {
-            let trigger_count = *orchestrator.memory_trigger_count.lock().await;
+            let trigger_count = orchestrator.get_memory_trigger_count().await;
             assert_eq!(
                 trigger_count, 0,
                 "Trigger count should be 0 after disabling memory"
@@ -3189,13 +3464,14 @@ mod tests {
         for i in 0..5 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
         // Disable memory (should set boundary to current history length)
         orchestrator.set_memory_enabled(false).await;
 
-        let boundary = *orchestrator.memory_history_boundary.lock().await;
+        let boundary = *orchestrator.selection.memory_history_boundary.lock().await;
         assert_eq!(
             boundary, 5,
             "Boundary should be set to history length (5) when disabling memory"
@@ -3217,7 +3493,7 @@ mod tests {
                 .await;
         }
 
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert!(
             history.len() <= 20,
             "History should not exceed 20 messages after push_history_message"
@@ -3240,7 +3516,7 @@ mod tests {
             })
             .await;
 
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert_eq!(history.len(), 1, "History should contain one message");
 
         let msg = &history[0];
@@ -3257,15 +3533,17 @@ mod tests {
     #[tokio::test]
     async fn test_message_count_increments_on_user_message() {
         let orchestrator = setup_test_orchestrator().await;
+        orchestrator.set_character_id("test_char".into()).await;
 
         // Add user messages
         for i in 0..3 {
             orchestrator
                 .add_message("user".to_string(), format!("Message {}", i), "test_char")
-                .await.unwrap();
+                .await
+                .unwrap();
         }
 
-        let count = *orchestrator.message_count.lock().await;
+        let count = orchestrator.get_message_count().await;
         assert_eq!(count, 3, "Message count should be 3 after 3 user messages");
     }
 
@@ -3276,9 +3554,10 @@ mod tests {
         // Add assistant message
         orchestrator
             .add_message("assistant".to_string(), "Response".to_string(), "test_char")
-            .await.unwrap();
+            .await
+            .unwrap();
 
-        let count = *orchestrator.message_count.lock().await;
+        let count = orchestrator.get_message_count().await;
         assert_eq!(
             count, 0,
             "Message count should remain 0 for non-user messages"
@@ -3389,12 +3668,11 @@ mod tests {
             orphan_count, 0,
             "failed transaction must roll back the message row"
         );
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT message_revision FROM conversations WHERE id = 'conv-err'",
-        )
-        .fetch_one(&orchestrator.db)
-        .await
-        .unwrap();
+        let revision: i64 =
+            sqlx::query_scalar("SELECT message_revision FROM conversations WHERE id = 'conv-err'")
+                .fetch_one(&orchestrator.db)
+                .await
+                .unwrap();
         assert_eq!(revision, 0, "the history revision must roll back too");
     }
 
@@ -3412,7 +3690,12 @@ mod tests {
 
         let error = orchestrator
             .add_message_with_metadata_for_conversation(
-                "user".to_string(), "hello".to_string(), None, "test_char", Some("conv-gone"), None,
+                "user".to_string(),
+                "hello".to_string(),
+                None,
+                "test_char",
+                Some("conv-gone"),
+                None,
             )
             .await
             .unwrap_err();
@@ -3527,7 +3810,7 @@ mod tests {
         let orchestrator = setup_test_orchestrator().await;
 
         // Ensure current_conversation_id is None
-        *orchestrator.current_conversation_id.lock().await = None;
+        *orchestrator.selection.current_conversation_id.lock().await = None;
 
         // Insert conversation A
         let now = chrono::Utc::now().to_rfc3339();
@@ -3545,7 +3828,10 @@ mod tests {
         assert!(row_id > 0);
 
         // Global current_conversation_id must remain None!
-        assert_eq!(*orchestrator.current_conversation_id.lock().await, None);
+        assert_eq!(
+            *orchestrator.selection.current_conversation_id.lock().await,
+            None
+        );
 
         orchestrator
             .update_streaming_draft(row_id, "draft chunk 2", None)
@@ -3572,7 +3858,7 @@ mod tests {
         let orchestrator = setup_test_orchestrator().await;
 
         // Active conversation is conv-B
-        *orchestrator.current_conversation_id.lock().await = Some("conv-B".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await = Some("conv-B".to_string());
 
         // Insert conversation A
         let now = chrono::Utc::now().to_rfc3339();
@@ -3600,14 +3886,15 @@ mod tests {
         assert!(mid > 0);
 
         // In-memory history for active conversation (conv-B) must NOT be contaminated!
-        assert_eq!(orchestrator.history.lock().await.len(), 0);
+        assert_eq!(orchestrator.selection.history.lock().await.len(), 0);
     }
 
     #[tokio::test]
     async fn add_message_with_implicit_target_pushes_to_history_and_persists() {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-active").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await =
+            Some("conv-active".to_string());
 
         let (cid, mid) = orchestrator
             .add_message_with_metadata(
@@ -3624,7 +3911,7 @@ mod tests {
         assert!(mid > 0);
 
         // Memory history should contain the user message
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, "user");
         assert_eq!(history[0].content, "Hello world");
@@ -3634,9 +3921,10 @@ mod tests {
     async fn add_message_waits_for_conversation_switch_lock() {
         let orchestrator = Arc::new(setup_test_orchestrator().await);
         insert_test_conversation(&orchestrator, "conv-active").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await =
+            Some("conv-active".to_string());
 
-        let guard = orchestrator.conversation_switch_lock.lock().await;
+        let guard = orchestrator.selection.conversation_switch_lock.lock().await;
         let task = {
             let orchestrator = orchestrator.clone();
             tokio::spawn(async move {
@@ -3665,7 +3953,7 @@ mod tests {
         let (cid, _) = res.unwrap();
         assert_eq!(cid, "conv-active");
 
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content, "Blocked message");
     }
@@ -3717,20 +4005,30 @@ mod tests {
     async fn test_add_message_with_metadata_for_conversation_locked_avoids_deadlock() {
         let orchestrator = setup_test_orchestrator().await;
         insert_test_conversation(&orchestrator, "conv-locked-test").await;
-        *orchestrator.current_conversation_id.lock().await = Some("conv-locked-test".to_string());
+        *orchestrator.selection.current_conversation_id.lock().await =
+            Some("conv-locked-test".to_string());
 
         // Caller acquires switch lock upfront
-        let _guard = orchestrator.conversation_switch_lock.lock().await;
+        let _guard = orchestrator.selection.conversation_switch_lock.lock().await;
 
         let target = ConversationTarget {
-            character_id: "test_char".into(), conversation_id: "conv-locked-test".into(), create: false,
+            require_character: false,
+            character_id: "test_char".into(),
+            conversation_id: "conv-locked-test".into(),
+            create: false,
         };
-        let rows = orchestrator.save_messages_locked(
-            &target, &[MessageWrite::new("user", "test locked message", None)], false, None,
-        ).await.unwrap();
+        let rows = orchestrator
+            .save_messages_locked(
+                &target,
+                &[MessageWrite::new("user", "test locked message", None)],
+                false,
+                None,
+            )
+            .await
+            .unwrap();
         assert!(rows[0].id > 0);
 
-        let history = orchestrator.history.lock().await;
+        let history = orchestrator.selection.history.lock().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content, "test locked message");
     }

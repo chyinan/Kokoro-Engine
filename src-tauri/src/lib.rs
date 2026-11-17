@@ -403,7 +403,7 @@ pub fn run() {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(id) = val.get("conversation_id").and_then(|v| v.as_str()) {
                                     {
-                                        let mut conv_id = orchestrator.current_conversation_id.lock().await;
+                                        let mut conv_id = orchestrator.selection.current_conversation_id.lock().await;
                                         *conv_id = Some(id.to_string());
                                     }
                                     // Reload messages into in-memory history so LLM has conversation context
@@ -415,7 +415,7 @@ pub fn run() {
                                     .await {
                                         let total = rows.len();
                                         orchestrator.sync_history_from_rows(rows).await;
-                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages, windowed to {})", id, total, orchestrator.history.lock().await.len());
+                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages, windowed to {})", id, total, orchestrator.selection.history.lock().await.len());
                                     }
                                 }
                             }

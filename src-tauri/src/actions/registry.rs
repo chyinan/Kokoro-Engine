@@ -68,11 +68,31 @@ impl std::fmt::Display for ActionError {
 impl std::error::Error for ActionError {}
 
 /// Context passed to action handlers at execution time.
+#[derive(Clone)]
 pub struct ActionContext {
+    pub(crate) memory_scope: Option<Arc<crate::chat::ownership::MemoryWriteScope>>,
+    pub cue_names: Option<Arc<HashSet<String>>>,
+    pub request_id: Option<String>,
+    pub turn_id: Option<String>,
     pub app: AppHandle,
     pub character_id: String,
     pub conversation_id: Option<String>,
     pub source: Option<String>,
+}
+
+/// Final dispatch boundary shared by direct, normal-chat and approved tools.
+/// Owner revocation is independent of the optional memory feature.
+pub(crate) async fn dispatch_handler(
+    handler: &dyn ActionHandler,
+    args: HashMap<String, String>,
+    ctx: ActionContext,
+) -> Result<ActionResult, ActionError> {
+    if let Some(scope) = &ctx.memory_scope {
+        scope
+            .ensure_owner_current()
+            .map_err(|error| ActionError(error.to_string()))?;
+    }
+    handler.execute(args, ctx).await
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,7 +396,7 @@ impl ActionRegistry {
         ctx: ActionContext,
     ) -> Result<ActionResult, ActionError> {
         let entry = self.resolve_entry(name_or_id)?;
-        entry.handler.execute(args, ctx).await
+        dispatch_handler(entry.handler.as_ref(), args, ctx).await
     }
 
     /// Check if a named action needs its result fed back to the LLM.
@@ -530,21 +550,21 @@ impl ActionRegistry {
 
     pub(crate) fn tool_definitions(actions: Vec<ActionInfo>) -> Vec<LlmToolDefinition> {
         actions
-        .into_iter()
-        .map(|action| LlmToolDefinition {
-            name: action.id,
-            description: action.description,
-            parameters: action
-                .parameters
-                .into_iter()
-                .map(|param| LlmToolParam {
-                    name: param.name,
-                    description: param.description,
-                    required: param.required,
-                })
-                .collect(),
-        })
-        .collect()
+            .into_iter()
+            .map(|action| LlmToolDefinition {
+                name: action.id,
+                description: action.description,
+                parameters: action
+                    .parameters
+                    .into_iter()
+                    .map(|param| LlmToolParam {
+                        name: param.name,
+                        description: param.description,
+                        required: param.required,
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Generate the prompt instruction block describing available tools.

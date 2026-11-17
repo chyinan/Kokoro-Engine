@@ -1148,7 +1148,7 @@ async fn production_activation_backend_applies_and_persists_complete_selection()
         snapshot.system_prompt
     );
     assert_eq!(
-        *orchestrator.current_conversation_id.lock().await,
+        *orchestrator.selection.current_conversation_id.lock().await,
         Some("persistent-conversation".into())
     );
     let active: serde_json::Value =
@@ -1196,7 +1196,7 @@ async fn orchestrator_activation_backend_restore_restores_history_and_memory_bou
     backend.restore(&snapshot).await.unwrap();
 
     assert_eq!(orchestrator.get_character_id().await, "restored-char");
-    let history = orchestrator.history.lock().await;
+    let history = orchestrator.selection.history.lock().await;
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].content, "Hi there");
     assert_eq!(history[1].content, "Hello!");
@@ -1349,7 +1349,7 @@ async fn non_startup_activation_recovery_failure_sets_degraded_and_blocks_chat()
         "orchestrator runtime_degraded MUST be set when recovery fails"
     );
     assert!(
-        orchestrator.history.lock().await.is_empty(),
+        orchestrator.selection.history.lock().await.is_empty(),
         "history must be cleared when sync fails during recovery"
     );
 
@@ -1507,7 +1507,7 @@ async fn concurrent_chat_during_activation_is_blocked_and_prevents_context_leak_
         .await;
 
     assert_eq!(orchestrator.get_character_id().await, "char-1");
-    assert!(!orchestrator.history.lock().await.is_empty());
+    assert!(!orchestrator.selection.history.lock().await.is_empty());
     assert!(!orchestrator.is_activating());
 
     // 3. Prepare activation for char-2
@@ -1671,7 +1671,8 @@ async fn test_active_stream_chat_turn_completes_when_activation_starts_concurren
             "User message during active turn".into(),
             "char-1",
         )
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // 3. Concurrently, activation for char-2 begins in background
     let token2 = coordinator
@@ -1722,7 +1723,8 @@ async fn test_active_stream_chat_turn_completes_when_activation_starts_concurren
             "Assistant reply completing the turn".into(),
             "char-1",
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     drop(chat_turn_guard);
 
     // 6. Activation completes
@@ -1861,7 +1863,7 @@ async fn test_non_webhook_bot_turn_during_activation_is_blocked_at_entry_without
         count, 0,
         "no messages should be written when bot turn is blocked at entry"
     );
-    assert!(orchestrator.history.lock().await.is_empty());
+    assert!(orchestrator.selection.history.lock().await.is_empty());
 
     // 4. Await activation completion
     let commit_res = activation_task.await.unwrap();
@@ -1877,7 +1879,8 @@ async fn test_non_webhook_bot_turn_during_activation_is_blocked_at_entry_without
     let guard = bot_turn_retry.unwrap();
     orchestrator
         .add_message("user".into(), "Hello to char 2".into(), "char-2")
-        .await.unwrap();
+        .await
+        .unwrap();
     let (messages, _) = orchestrator
         .compose_prompt_with_guard("Hello to char 2", false, None, false, "char-2", &guard)
         .await
@@ -2114,7 +2117,8 @@ async fn test_cancellation_after_apply_blocks_chat_until_recovered_consistently(
     // Add a message to char-1
     orchestrator
         .add_message("user".into(), "Hello to char 1".into(), "char-1")
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Prepare activation for char-2
     let token2 = coordinator
@@ -2179,12 +2183,12 @@ async fn test_cancellation_after_apply_blocks_chat_until_recovered_consistently(
     assert_eq!(recovered.runtime.character_id, "char-1");
     assert_eq!(*orchestrator.character_id.lock().await, "char-1");
     assert_eq!(
-        orchestrator.history.lock().await.len(),
+        orchestrator.selection.history.lock().await.len(),
         1,
         "history must retain char-1's message"
     );
     assert_eq!(
-        orchestrator.history.lock().await[0].content,
+        orchestrator.selection.history.lock().await[0].content,
         "Hello to char 1"
     );
 

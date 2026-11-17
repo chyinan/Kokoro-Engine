@@ -4276,8 +4276,13 @@ pub async fn import_data(
 
         // Still under the exclusive database gate: no chat worker or view read
         // can associate the replacement rows with the old process journal.
-        if let Some(runtime) = app.try_state::<std::sync::Arc<crate::chat::runtime::ChatRuntimeState>>() {
+        if let Some(runtime) =
+            app.try_state::<std::sync::Arc<crate::chat::runtime::ChatRuntimeState>>()
+        {
             runtime.invalidate_imported_history();
+        }
+        if let Some(orchestrator) = app.try_state::<crate::ai::context::AIOrchestrator>() {
+            orchestrator.reset_runtime_owners().await;
         }
 
         // Database rows now reference the imported files. Do not let a later
@@ -4772,23 +4777,73 @@ mod tests {
                 .execute(&mut *connection).await.unwrap();
             sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (50, 'local', 'user', 'local prompt', '1')")
                 .execute(&mut *connection).await.unwrap();
-            sqlx::query("ATTACH DATABASE ':memory:' AS import_db").execute(&mut *connection).await.unwrap();
+            sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
             create_import_conversation_tables(&mut connection).await;
-            sqlx::query("CREATE TABLE import_db.characters (id TEXT PRIMARY KEY)").execute(&mut *connection).await.unwrap();
-            sqlx::query("INSERT INTO import_db.characters VALUES ('remote'), ('bridge')").execute(&mut *connection).await.unwrap();
+            sqlx::query("CREATE TABLE import_db.characters (id TEXT PRIMARY KEY)")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO import_db.characters VALUES ('remote'), ('bridge')")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
             let cases = [
                 ("valid", "remote", "remote", "valid", "turn-valid", true),
-                ("target-alias", "remote", "default", "target-alias", "turn-target", false),
-                ("chain-alias", "remote", "bridge", "chain-alias", "turn-chain", false),
-                ("foreign-character", "remote", "other", "foreign-character", "turn-foreign", false),
-                ("foreign-conversation", "remote", "remote", "valid", "turn-conversation", false),
+                (
+                    "target-alias",
+                    "remote",
+                    "default",
+                    "target-alias",
+                    "turn-target",
+                    false,
+                ),
+                (
+                    "chain-alias",
+                    "remote",
+                    "bridge",
+                    "chain-alias",
+                    "turn-chain",
+                    false,
+                ),
+                (
+                    "foreign-character",
+                    "remote",
+                    "other",
+                    "foreign-character",
+                    "turn-foreign",
+                    false,
+                ),
+                (
+                    "foreign-conversation",
+                    "remote",
+                    "remote",
+                    "valid",
+                    "turn-conversation",
+                    false,
+                ),
                 ("empty-turn", "remote", "remote", "empty-turn", "", false),
-                ("valid-bridge", "bridge", "bridge", "valid-bridge", "turn-bridge", true),
+                (
+                    "valid-bridge",
+                    "bridge",
+                    "bridge",
+                    "valid-bridge",
+                    "turn-bridge",
+                    true,
+                ),
             ];
-            for (index, (conversation, owner, event_owner, event_conversation, turn, _)) in cases.iter().enumerate() {
+            for (index, (conversation, owner, event_owner, event_conversation, turn, _)) in
+                cases.iter().enumerate()
+            {
                 let prompt = (index * 2 + 1) as i64;
                 sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES (?, ?)")
-                    .bind(conversation).bind(owner).execute(&mut *connection).await.unwrap();
+                    .bind(conversation)
+                    .bind(owner)
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
                 sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, 'user', 'failed prompt', NULL, '1')")
                     .bind(prompt).bind(conversation).execute(&mut *connection).await.unwrap();
                 let metadata = serde_json::json!({ "type": "failure_event", "user_message_id": prompt, "keep_through_message_id": prompt,
@@ -4802,18 +4857,36 @@ mod tests {
                 .bind(serde_json::json!({ "type": "failure_event", "user_message_id": 1, "keep_through_message_id": 2,
                     "event": { "character_id": "default", "conversation_id": "valid", "turn_id": "foreign-tail" } }).to_string())
                 .execute(&mut *connection).await.unwrap();
-            let mut merges = vec![CharacterMerge { imported_id: "remote".into(), target_id: if chain.is_some() { "bridge" } else { "default" }.into() }];
+            let mut merges = vec![CharacterMerge {
+                imported_id: "remote".into(),
+                target_id: if chain.is_some() { "bridge" } else { "default" }.into(),
+            }];
             if let Some(reverse) = chain {
-                merges.push(CharacterMerge { imported_id: "bridge".into(), target_id: "default".into() });
-                if reverse { merges.reverse(); }
+                merges.push(CharacterMerge {
+                    imported_id: "bridge".into(),
+                    target_id: "default".into(),
+                });
+                if reverse {
+                    merges.reverse();
+                }
             }
             // Chained mappings are accepted production inputs, in either order.
-            validate_character_selection(&mut connection, true, &merges, &[]).await.unwrap();
+            validate_character_selection(&mut connection, true, &merges, &[])
+                .await
+                .unwrap();
             let mut tx = connection.begin().await.unwrap();
-            apply_import_character_merges(&mut tx, &merges).await.unwrap();
+            apply_import_character_merges(&mut tx, &merges)
+                .await
+                .unwrap();
             if overwrite {
-                sqlx::query("DELETE FROM conversation_messages").execute(&mut *tx).await.unwrap();
-                sqlx::query("DELETE FROM conversations").execute(&mut *tx).await.unwrap();
+                sqlx::query("DELETE FROM conversation_messages")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM conversations")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
             } else {
                 prepare_skip_conversation_scope(&mut tx).await.unwrap();
             }
@@ -4827,44 +4900,112 @@ mod tests {
             }
             tx.commit().await.unwrap();
             drop(connection);
-            for (index, (conversation, original_owner, event_owner, event_conversation, turn, valid)) in cases.iter().enumerate() {
+            for (
+                index,
+                (conversation, original_owner, event_owner, event_conversation, turn, valid),
+            ) in cases.iter().enumerate()
+            {
                 let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
                     "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id")
                     .bind(conversation).fetch_all(&state.db).await.unwrap();
-                assert_eq!(rows.len(), if *conversation == "valid" { 3 } else { 2 }, "keep every original row");
+                assert_eq!(
+                    rows.len(),
+                    if *conversation == "valid" { 3 } else { 2 },
+                    "keep every original row"
+                );
                 assert_eq!(rows[1].2, "original diagnostic");
-                assert_eq!(rows[0].0, (index * 2 + 1) as i64 + if overwrite { 0 } else { 50 });
-                let owner: String = sqlx::query_scalar("SELECT character_id FROM conversations WHERE id = ?")
-                    .bind(conversation).fetch_one(&state.db).await.unwrap();
-                let revision = crate::chat::retry::conversation_message_revision(&mut *state.db.acquire().await.unwrap(), conversation).await.unwrap();
-                let tail = rows.iter().rev().find(|(_, role, _, meta)| is_visible_message_raw(role, meta.as_deref())).unwrap().0;
-                let retry = FailureRetry { diagnostic_message_id: rows[1].0, expected_tail_message_id: tail, expected_history_revision: revision };
+                assert_eq!(
+                    rows[0].0,
+                    (index * 2 + 1) as i64 + if overwrite { 0 } else { 50 }
+                );
+                let owner: String =
+                    sqlx::query_scalar("SELECT character_id FROM conversations WHERE id = ?")
+                        .bind(conversation)
+                        .fetch_one(&state.db)
+                        .await
+                        .unwrap();
+                let revision = crate::chat::retry::conversation_message_revision(
+                    &mut *state.db.acquire().await.unwrap(),
+                    conversation,
+                )
+                .await
+                .unwrap();
+                let tail = rows
+                    .iter()
+                    .rev()
+                    .find(|(_, role, _, meta)| is_visible_message_raw(role, meta.as_deref()))
+                    .unwrap()
+                    .0;
+                let retry = FailureRetry {
+                    diagnostic_message_id: rows[1].0,
+                    expected_tail_message_id: tail,
+                    expected_history_revision: revision,
+                };
                 let runtime = ChatRuntimeState::default();
-                let plan = RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), &owner, conversation, "failed prompt").await;
+                let plan = RegenerationPlan::prepare(
+                    &state,
+                    &runtime,
+                    Regeneration::Failure(&retry),
+                    &owner,
+                    conversation,
+                    "failed prompt",
+                )
+                .await;
                 if *valid {
                     assert_eq!(plan.unwrap().user_message_id, rows[0].0);
                 } else {
                     assert!(plan.is_err(), "foreign diagnostic gained retry authority: {conversation}, overwrite={overwrite}, chain={chain:?}");
-                    assert_eq!(tail, rows[0].0, "invalid diagnostics must not become visible tail rows");
-                    assert_eq!(crate::chat::application::resolve_trailing_visible_user_message(&state.db, conversation).await.unwrap(),
-                        Some((rows[0].0, "failed prompt".into())));
+                    assert_eq!(
+                        tail, rows[0].0,
+                        "invalid diagnostics must not become visible tail rows"
+                    );
+                    assert_eq!(
+                        crate::chat::application::resolve_trailing_visible_user_message(
+                            &state.db,
+                            conversation
+                        )
+                        .await
+                        .unwrap(),
+                        Some((rows[0].0, "failed prompt".into()))
+                    );
                 }
-                let metadata: serde_json::Value = serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
-                assert_eq!(metadata["type"], if *valid { "failure_event" } else { "invalid_failure_event" });
-                assert_eq!(metadata["event"]["character_id"], if *valid { owner.as_str() } else { *event_owner });
+                let metadata: serde_json::Value =
+                    serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
+                assert_eq!(
+                    metadata["type"],
+                    if *valid {
+                        "failure_event"
+                    } else {
+                        "invalid_failure_event"
+                    }
+                );
+                assert_eq!(
+                    metadata["event"]["character_id"],
+                    if *valid { owner.as_str() } else { *event_owner }
+                );
                 assert_eq!(metadata["event"]["conversation_id"], *event_conversation);
                 assert_eq!(metadata["event"]["turn_id"], *turn);
                 assert_eq!(metadata["user_message_id"], rows[0].0);
                 assert_eq!(metadata["keep_through_message_id"], rows[0].0);
                 if *conversation == "valid" {
-                    let trailing: serde_json::Value = serde_json::from_str(rows[2].3.as_deref().unwrap()).unwrap();
+                    let trailing: serde_json::Value =
+                        serde_json::from_str(rows[2].3.as_deref().unwrap()).unwrap();
                     assert_eq!(trailing["type"], "invalid_failure_event");
                     assert_eq!(trailing["user_message_id"], rows[0].0);
                     assert_eq!(trailing["keep_through_message_id"], rows[1].0);
                     assert_eq!(tail, rows[1].0);
                 }
                 if *valid && owner != *original_owner {
-                    assert!(RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), original_owner, conversation, "failed prompt").await.is_err());
+                    assert!(RegenerationPlan::prepare(
+                        &state,
+                        &runtime,
+                        Regeneration::Failure(&retry),
+                        original_owner,
+                        conversation,
+                        "failed prompt"
+                    )
+                    .await
+                    .is_err());
                 }
             }
         }
@@ -4896,7 +5037,10 @@ mod tests {
                 .execute(&mut *connection).await.unwrap();
             sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (50, 'local', 'user', 'local prompt', '1')")
                 .execute(&mut *connection).await.unwrap();
-            sqlx::query("ATTACH DATABASE ':memory:' AS import_db").execute(&mut *connection).await.unwrap();
+            sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
             create_import_conversation_tables(&mut connection).await;
             sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES ('imported', 'remote'), ('foreign', 'other')")
                 .execute(&mut *connection).await.unwrap();
@@ -4910,34 +5054,76 @@ mod tests {
                 (4, "system", "imported", "invalid json".into()),
                 (5, "system", "foreign", valid.to_string()),
                 (6, "system", "imported", {
-                    let mut foreign = valid.clone(); foreign["event"]["character_id"] = "other".into(); foreign.to_string()
+                    let mut foreign = valid.clone();
+                    foreign["event"]["character_id"] = "other".into();
+                    foreign.to_string()
                 }),
                 (7, "system", "imported", {
-                    let mut foreign = valid.clone(); foreign["event"]["conversation_id"] = "foreign".into(); foreign.to_string()
+                    let mut foreign = valid.clone();
+                    foreign["event"]["conversation_id"] = "foreign".into();
+                    foreign.to_string()
                 }),
             ] {
                 sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, ?, 'model failed', ?, '1')")
                     .bind(id).bind(conversation).bind(role).bind(metadata).execute(&mut *connection).await.unwrap();
             }
             let mut tx = connection.begin().await.unwrap();
-            apply_import_character_merges(&mut tx, &[CharacterMerge { imported_id: "remote".into(), target_id: "default".into() }]).await.unwrap();
-            let mapped: String = sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages WHERE id = 2")
-                .fetch_one(&mut *tx).await.unwrap();
-            let mut expected = valid.clone(); expected["event"]["character_id"] = "default".into();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&mapped).unwrap(), expected);
+            apply_import_character_merges(
+                &mut tx,
+                &[CharacterMerge {
+                    imported_id: "remote".into(),
+                    target_id: "default".into(),
+                }],
+            )
+            .await
+            .unwrap();
+            let mapped: String = sqlx::query_scalar(
+                "SELECT metadata FROM import_db.conversation_messages WHERE id = 2",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            let mut expected = valid.clone();
+            expected["event"]["character_id"] = "default".into();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&mapped).unwrap(),
+                expected
+            );
             for id in [3, 5, 7] {
-                let metadata: String = sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages WHERE id = ?")
-                    .bind(id).fetch_one(&mut *tx).await.unwrap();
-                assert_eq!(serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["event"]["character_id"], "remote");
+                let metadata: String = sqlx::query_scalar(
+                    "SELECT metadata FROM import_db.conversation_messages WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["event"]
+                        ["character_id"],
+                    "remote"
+                );
             }
-            let malformed: String = sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages WHERE id = 4")
-                .fetch_one(&mut *tx).await.unwrap();
+            let malformed: String = sqlx::query_scalar(
+                "SELECT metadata FROM import_db.conversation_messages WHERE id = 4",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
             assert_eq!(malformed, "invalid json");
             // Keep the valid failed turn for the actual copy/retry contract.
-            sqlx::query("DELETE FROM import_db.conversation_messages WHERE id > 2").execute(&mut *tx).await.unwrap();
+            sqlx::query("DELETE FROM import_db.conversation_messages WHERE id > 2")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             if overwrite {
-                sqlx::query("DELETE FROM conversation_messages").execute(&mut *tx).await.unwrap();
-                sqlx::query("DELETE FROM conversations").execute(&mut *tx).await.unwrap();
+                sqlx::query("DELETE FROM conversation_messages")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM conversations")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
             } else {
                 prepare_skip_conversation_scope(&mut tx).await.unwrap();
             }
@@ -4953,12 +5139,39 @@ mod tests {
             drop(connection);
             let diagnostic: i64 = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id = 'imported' AND role = 'system'")
                 .fetch_one(&state.db).await.unwrap();
-            let revision = crate::chat::retry::conversation_message_revision(&mut *state.db.acquire().await.unwrap(), "imported").await.unwrap();
-            let retry = FailureRetry { diagnostic_message_id: diagnostic, expected_tail_message_id: diagnostic, expected_history_revision: revision };
+            let revision = crate::chat::retry::conversation_message_revision(
+                &mut *state.db.acquire().await.unwrap(),
+                "imported",
+            )
+            .await
+            .unwrap();
+            let retry = FailureRetry {
+                diagnostic_message_id: diagnostic,
+                expected_tail_message_id: diagnostic,
+                expected_history_revision: revision,
+            };
             let runtime = ChatRuntimeState::default();
-            let plan = RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), "default", "imported", "failed prompt").await.unwrap();
+            let plan = RegenerationPlan::prepare(
+                &state,
+                &runtime,
+                Regeneration::Failure(&retry),
+                "default",
+                "imported",
+                "failed prompt",
+            )
+            .await
+            .unwrap();
             assert_eq!(plan.user_message_id, if overwrite { 1 } else { 51 });
-            assert!(RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), "remote", "imported", "failed prompt").await.is_err());
+            assert!(RegenerationPlan::prepare(
+                &state,
+                &runtime,
+                Regeneration::Failure(&retry),
+                "remote",
+                "imported",
+                "failed prompt"
+            )
+            .await
+            .is_err());
         }
     }
 
@@ -6015,7 +6228,12 @@ mod tests {
             .execute(&mut *connection)
             .await
             .unwrap();
-        for (id, prompt, boundary) in [(5_i64, 3_i64, Some(4)), (6, 3, Some(91)), (7, 3, None), (8, 2, None)] {
+        for (id, prompt, boundary) in [
+            (5_i64, 3_i64, Some(4)),
+            (6, 3, Some(91)),
+            (7, 3, None),
+            (8, 2, None),
+        ] {
             let mut metadata = serde_json::json!({ "type": "failure_event", "user_message_id": prompt,
                 "event": { "conversation_id": "new-conversation", "character_id": "bob", "turn_id": "turn" } });
             if let Some(boundary) = boundary {
@@ -6029,7 +6247,12 @@ mod tests {
                 .unwrap();
         }
         for (id, role, kind, prompt) in [
-            (9_i64, "assistant", "assistant_tool_calls", serde_json::json!(3)),
+            (
+                9_i64,
+                "assistant",
+                "assistant_tool_calls",
+                serde_json::json!(3),
+            ),
             (10, "tool", "tool_result", serde_json::json!(3)),
             (11, "tool", "tool_result", serde_json::json!(2)),
             (12, "tool", "tool_result", serde_json::json!(4)),
@@ -6117,12 +6340,48 @@ mod tests {
         assert_eq!(
             tools,
             vec![
-                (11, "assistant".into(), "tool-turn".into(), Some("integer".into()), Some(5)),
-                (12, "tool".into(), "tool-turn".into(), Some("integer".into()), Some(5)),
-                (13, "tool".into(), "tool-turn".into(), Some("null".into()), None),
-                (14, "tool".into(), "tool-turn".into(), Some("null".into()), None),
-                (15, "tool".into(), "tool-turn".into(), Some("null".into()), None),
-                (17, "tool".into(), "tool-turn".into(), Some("null".into()), None),
+                (
+                    11,
+                    "assistant".into(),
+                    "tool-turn".into(),
+                    Some("integer".into()),
+                    Some(5)
+                ),
+                (
+                    12,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("integer".into()),
+                    Some(5)
+                ),
+                (
+                    13,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
+                (
+                    14,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
+                (
+                    15,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
+                (
+                    17,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
                 (18, "tool".into(), "legacy".into(), None, None),
             ],
             "tool rows must point to their remapped earlier user or explicitly have no owner"

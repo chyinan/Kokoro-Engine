@@ -33,9 +33,15 @@ it("shows a transient backend warning without replacing the completed text reply
     try {
         await act(async () => root.render(<ChatPanel />));
         expect(onWarning).toBeDefined();
-        await act(async () => onWarning!({ event: "chat-warning", id: 1, payload: "Speech provider unavailable" }));
+        await act(async () => onWarning!({ event: "chat-warning", id: 1, payload: { message:"Speech provider unavailable",character_id:"char-1",conversation_id:"conv-1",client_request_id:"warning",turn_id:"turn_warning",conversation_generation:1 } }));
         expect(container.querySelector('[role="alert"]')?.textContent).toBe("Speech provider unavailable");
         expect(container.textContent).toContain("Completed answer");
+        await act(async () => chat.set({ conversation_id:"conv-2",generation:2,messages:[] }));
+        await act(async () => onWarning!({ event:"chat-warning",id:2,payload:{ message:"Old conversation warning",character_id:"char-1",conversation_id:"conv-1",client_request_id:"old-warning",turn_id:"turn_old",conversation_generation:1 } }));
+        expect(container.textContent).not.toContain("Old conversation warning");
+        await act(async () => chat.set({ conversation_id:"conv-1",generation:3 }));
+        await act(async () => onWarning!({ event:"chat-warning",id:3,payload:{ message:"Owned warning after return",character_id:"char-1",conversation_id:"conv-1",client_request_id:"old-warning",turn_id:"turn_old",conversation_generation:1 } }));
+        expect(container.textContent).toContain("Owned warning after return");
     } finally {
         await act(async () => root.unmount());
         mockListen.mockImplementation(async () => () => {});
@@ -120,7 +126,7 @@ it("restores an unfinished reply and offers its storage retry without a saved di
 it.each([null, "conv-1"])("recovers a hidden reply through the save button in %s", async conversationId => {
     chat.reset();
     const failed = {
-        ...turn("hidden-save", 3, "error"), character_id: "char-1", conversation_id: conversationId,
+        ...turn("hidden-save", 3, "error"), character_id: "char-1", conversation_id: conversationId ?? "created-after-save",
         conversation_generation: 1, hidden: true, message: "Private interaction instruction",
         user_message_id: null, assistant_message_id: null, error: "Could not save chat messages",
         error_code: "CHAT_PERSISTENCE_ERROR", persistence_retryable: true, text: "Visible hidden-turn answer",
@@ -161,8 +167,8 @@ it.each([null, "conv-1"])("recovers a hidden reply through the save button in %s
         expect(container.textContent).not.toContain(failed.message);
         expect(container.textContent?.split(failed.text)).toHaveLength(2);
         expect(retry()).toBeUndefined();
-        // A delayed old failed snapshot must not restore a discarded reply.
-        await act(async () => chat.set({ generation: savedGeneration + 1, messages: [], turns: [failed] }));
+        // A failed snapshot from another conversation must not surface a save action here.
+        await act(async () => chat.set({ conversation_id: "different-conversation", generation: savedGeneration + 1, messages: [], turns: [failed] }));
         expect(container.textContent).not.toContain(failed.text);
         expect(container.querySelector('[role="alert"]')).toBeNull();
         expect(retry()).toBeUndefined();
@@ -453,7 +459,7 @@ it("keeps approved tool details expanded when the first hidden turn creates its 
         approval_status: "requested" as const, deny_kind: "pending_approval" as const, error: "Waiting for approval",
     };
     const pending = {
-        ...turn("hidden", 2), character_id: "char-1", conversation_id: null, hidden: true,
+        ...turn("hidden", 2), character_id: "char-1", conversation_id: "new-conversation", conversation_generation: 1, hidden: true,
         user_message_id: null, text: "", tools: [request],
     };
     chat.set({ conversation_id: null, revision: 2, busy: true, turns: [pending] });
@@ -477,7 +483,7 @@ it("keeps approved tool details expanded when the first hidden turn creates its 
             id: 7, role: "tool", content: "Approved tool result", created_at: "now",
             metadata: JSON.stringify({ turn_id: pending.turn_id, tool_name: "lookup", tool_trace_id: "0:0" }),
         };
-        // SQLite publishes the new selection while the streaming turn is still unbound in the journal.
+        // SQLite publishes the reserved ID; the journal identity remains unchanged.
         await act(async () => chat.set({
             conversation_id: "new-conversation", generation: 2, revision: 3, messages: [savedTool],
         }));

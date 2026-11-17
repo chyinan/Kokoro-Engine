@@ -189,12 +189,11 @@ export class ChatApplication {
   approveTool(id: string) { return bridge.approveToolApproval(id); }
   rejectTool(id: string) { return bridge.rejectToolApproval(id, null); }
   async prepareCharacterSwitch(characterId: string) {
-    const view = await this.refresh();
-    if (view.character_id !== characterId) await this.cancel(undefined, "character_switched");
+    void characterId;
+    await this.refresh();
   }
   async selectConversation(id: string | null) {
     return this.mutate(async () => {
-      await this.cancel(undefined, "conversation_switched");
       if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
     });
   }

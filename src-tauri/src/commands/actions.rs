@@ -681,6 +681,10 @@ pub async fn execute_action(
         modify_direct_action_args(&app, &character_id, &invocation, &action, args).await?;
 
     let ctx = ActionContext {
+        memory_scope: None,
+        cue_names: None,
+        request_id: None,
+        turn_id: None,
         app: app.clone(),
         character_id: character_id.clone(),
         conversation_id: None,

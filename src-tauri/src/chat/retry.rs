@@ -1,6 +1,6 @@
 use crate::ai::context::{sync_history_window, AIOrchestrator, Message};
-use crate::chat::runtime::ChatRuntimeState;
 use crate::chat::application::TURN_CANCELLED_BY_USER_MESSAGE;
+use crate::chat::runtime::ChatRuntimeState;
 use crate::chat::tags::is_visible_message_raw;
 use crate::error::KokoroError;
 use serde_json::Value;
@@ -175,7 +175,8 @@ impl RegenerationPlan {
             return Ok((prompt, prompt));
         };
         let keep = boundary.as_i64().ok_or_else(changed_history)?;
-        if keep < prompt || keep >= retry.diagnostic_message_id
+        if keep < prompt
+            || keep >= retry.diagnostic_message_id
             || !rows.iter().any(|(id, role, _, metadata)| {
                 *id == keep && is_visible_message_raw(role, metadata.as_deref())
             })
@@ -204,17 +205,19 @@ impl RegenerationPlan {
         self,
         state: &AIOrchestrator,
         conversation_id: &str,
-        generation: u64,
+        _generation: u64,
         cancellation: Option<&watch::Receiver<bool>>,
     ) -> Result<(), KokoroError> {
-        let _selection = state.conversation_switch_lock.lock().await;
-        if state.current_conversation_generation() != generation
-            || state.current_conversation_id.lock().await.as_deref() != Some(conversation_id)
-        {
-            return Err(changed_history());
-        }
-        let mut history = state.history.lock().await;
-        let mut boundary = state.memory_history_boundary.lock().await;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let selected = state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref()
+            == Some(conversation_id);
+        let mut history = state.selection.history.lock().await;
+        let mut boundary = state.selection.memory_history_boundary.lock().await;
         // Reserve the writer before the version read so a simultaneous write
         // elsewhere can't invalidate a deferred read-to-write transaction.
         let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
@@ -230,8 +233,10 @@ impl RegenerationPlan {
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.into()));
         }
         tx.commit().await?;
-        *boundary = self.history.len();
-        *history = self.history;
+        if selected {
+            *boundary = self.history.len();
+            *history = self.history;
+        }
         Ok(())
     }
 }
@@ -251,7 +256,7 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
-        *state.current_conversation_id.lock().await = Some("target".into());
+        *state.selection.current_conversation_id.lock().await = Some("target".into());
         let generation = state.bump_conversation_generation();
         sqlx::query(
             r#"INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at)
@@ -299,9 +304,9 @@ mod tests {
         };
         let plan = prepare(&updated).await.unwrap();
         assert_eq!(plan.prompt_history("question").len(), 1);
-        // Webhook chat uses an isolated execution guard with a shared database.
-        let external = state.fork_with_isolated_history().await;
-        let _external_turn = external.try_acquire_chat_turn("webhook").await.unwrap();
+        // Channels share admission; independent database writes still cannot invalidate another conversation.
+        let external = state.clone();
+        assert!(external.try_acquire_chat_turn("webhook").await.is_err());
         let (_, external_id) = external
             .add_message_with_metadata_for_conversation(
                 "user".into(),

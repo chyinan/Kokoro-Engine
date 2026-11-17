@@ -148,11 +148,29 @@ try {
 
   await invoke('clear_history');
   const switchedBefore=count('memory'), switchedBackgroundBefore=count('background');
-  await failedTurn('audit-switch','I like jasmine tea.',true);
+  const switchedCalls=calls.length;
+  await failedTurn('audit-switch','I like jasmine tea. audit-switch-owner',true);
+  const bound = (await invoke('get_chat_runtime_snapshot')).find(turn=>turn.client_request_id===runId+'-audit-switch');
   await invoke('clear_history');
-  assert.equal((await retry('audit-switch')).status,'completed'); await wait(500);
-  assert.equal(count('memory'),switchedBefore); report.oldSelectionSkipped=true;
-  assert.equal(count('background'),switchedBackgroundBefore);
+  const recoveredSwitch=await retry('audit-switch');
+  assert.equal(recoveredSwitch.status,'completed');
+  assert.equal(recoveredSwitch.conversation_id,bound.conversation_id);
+  for(let attempts=0;attempts<100 && (count('memory')===switchedBefore || count('background')===switchedBackgroundBefore);attempts++) await wait(50);
+  assert.equal(count('memory')-switchedBefore,1);
+  assert.equal(count('background')-switchedBackgroundBefore,1);
+  assert.equal((await invoke('get_chat_view')).conversation_id,null);
+  const switchedRows=rows("SELECT m.id,m.role,m.content,m.metadata,c.character_id,m.conversation_id FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.conversation_id="+JSON.stringify(bound.conversation_id));
+  assert(switchedRows.some(row=>row.id===recoveredSwitch.assistant_message_id && row.content==='audit reply'));
+  assert(switchedRows.some(row=>row.role==='user' && row.content==='I like jasmine tea. audit-switch-owner'));
+  assert(switchedRows.every(row=>row.character_id===character));
+  const extraction=calls.slice(switchedCalls).filter(call=>call.kind==='memory');
+  assert.equal(extraction.length,1);
+  assert(JSON.stringify(extraction[0].messages).includes('audit-switch-owner'));
+  assert.deepEqual(await retry('audit-switch'),recoveredSwitch);
+  await wait(200);
+  assert.equal(count('memory')-switchedBefore,1);
+  assert.equal(count('background')-switchedBackgroundBefore,1);
+  report.originalOwnerCompletedAfterSwitch={conversation:bound.conversation_id,extractions:1,backgroundAnalyses:1,rows:switchedRows};
 
   // Background analysis shares recovery, but has an independent task from memory.
   const otherBefore=count('background');
@@ -161,7 +179,7 @@ try {
   assert.equal(count('background')-otherBefore,1); report.backgroundAnalyses=1;
   report.status='passed';
   console.log('PASS recovered media bypasses preparation, rejects changed text, and preserves first-failure retry');
-  console.log('PASS desktop recovery dispatches fifth/twentieth/event memory once, fences toggle/selection, and restores background analysis');
+  console.log('PASS desktop recovery dispatches fifth/twentieth/event memory once, fences revoked memory epochs, preserves switched owners, and restores background analysis');
 
 } catch(error) {
   report.status='failed'; report.error=error.stack ?? String(error); throw error;

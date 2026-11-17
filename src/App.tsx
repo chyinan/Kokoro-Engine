@@ -1,5 +1,6 @@
 import { OnboardingChat } from "./features/onboarding/onboarding-chat";
 import { chatApplication, submitChat } from "./lib/chat/application";
+import { createImageEventHandlers } from "./lib/chat/image-events";
 // pattern: Imperative Shell
 
 import { useState, useEffect, useMemo, useSyncExternalStore, useCallback, useRef } from "react";
@@ -331,7 +332,6 @@ import {
   // New: Context
   setUserLanguage,
   // Types
-  type ImageGenResult,
   type ModThemeJson,
   type Live2dModelInfo,
   type TtsSystemConfig,
@@ -1325,22 +1325,15 @@ function App() {
       }
     });
 
-    // Listen for generated images
-    const unlistenImageGen = onImageGenDone((result: ImageGenResult) => {
-      const assetUrl = convertFileSrc(result.image_url);
-      console.log("[App] Received generated image:", assetUrl);
-      setGeneratedImage(assetUrl);
+    const imageEvents = createImageEventHandlers({
+      getView: () => chatApplication.getSnapshot(),
+      generate: generateImage,
+      showImage: result => setGeneratedImage(convertFileSrc(result.image_url)),
+      selectGeneratedBackground: () => bgSlideshow.setConfig({ mode: "generated" }),
+      onError: error => console.error("[App] chat-imagegen generation failed:", error),
     });
-
-    // Listen for chat-triggered image generation requests
-    const unlistenChatImageGen = onChatImageGen(({ prompt }) => {
-      console.log("[App] chat-imagegen triggered, prompt:", prompt);
-      generateImage(prompt).then(result => {
-        const assetUrl = convertFileSrc(result.image_url);
-        setGeneratedImage(assetUrl);
-        bgSlideshow.setConfig({ mode: "generated" });
-      }).catch(err => console.error("[App] chat-imagegen generation failed:", err));
-    });
+    const unlistenImageGen = onImageGenDone(imageEvents.onImageDone);
+    const unlistenChatImageGen = onChatImageGen(imageEvents.onBackgroundRequested);
 
     // ── MOD System: Theme override ──
     const unlistenModTheme = onModThemeOverride((modTheme: ModThemeJson) => {
@@ -1385,10 +1378,10 @@ function App() {
     });
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
-    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
+    const unlistenModChatDelta = onChatTurnDelta((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-delta', delta, turn_id },
+        payload: { name: 'chat-delta', ...data },
       });
     });
 
@@ -1399,10 +1392,10 @@ function App() {
       });
     });
 
-    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
+    const unlistenModChatDone = onChatTurnFinish((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-done', turn_id, status },
+        payload: { name: 'chat-done', ...data },
       });
     });
 

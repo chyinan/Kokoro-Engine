@@ -93,10 +93,12 @@ export async function sendMessage(message: string): Promise<ChatResponse> {
 
 // ── Context Management ─────────────────────────────
 
+/** @deprecated Use character runtime overrides and serialized activation. */
 export async function setPersona(prompt: string): Promise<void> {
     return invoke("set_persona", { prompt });
 }
 
+/** @deprecated Partial character updates are rejected by the backend. */
 export async function setCharacterName(name: string): Promise<void> {
     return invoke("set_character_name", { name });
 }
@@ -109,6 +111,7 @@ export async function setUserPersona(persona: string): Promise<void> {
     return invoke("set_user_persona", { persona });
 }
 
+/** @deprecated Partial character updates are rejected by the backend. */
 export async function setResponseLanguage(language: string): Promise<void> {
     return invoke("set_response_language", { language });
 }
@@ -398,8 +401,16 @@ export async function onChatError(callback: (error: string) => void): Promise<Un
     return listen<unknown>("chat-error", (event) => callback(parseLegacyChatError(event.payload)));
 }
 
-export async function onChatWarning(callback: (warning: string) => void): Promise<UnlistenFn> {
-    return listen<string>("chat-warning", (event) => callback(event.payload));
+export interface ChatWarningEvent {
+    message: string;
+    character_id: string;
+    conversation_id: string;
+    client_request_id: string;
+    turn_id: string;
+    conversation_generation?: number;
+}
+export async function onChatWarning(callback: (warning: ChatWarningEvent) => void): Promise<UnlistenFn> {
+    return listen<ChatWarningEvent>("chat-warning", (event) => callback(event.payload));
 }
 
 export interface FailureEventContext {
@@ -635,6 +646,11 @@ export async function onChatTurnTranslation(callback: (event: ChatTurnTranslatio
 // ── Cue Events ─────────────────────────────────────
 
 export interface CueEvent {
+    character_id?: string | null;
+    conversation_id?: string | null;
+    conversation_generation?: number | null;
+    client_request_id?: string | null;
+    turn_id?: string | null;
     cue: string;
     source?: string;
 }
@@ -861,6 +877,15 @@ export async function cancelTts(requestId?: string | null): Promise<void> {
     return invoke("cancel_tts", { requestId: requestId ?? null });
 }
 
+/** Automatic speech follows this view until selection changes. Turn identity stays immutable. */
+export interface ChatPlaybackScope {
+  client_request_id: string;
+  turn_id: string;
+  character_id: string;
+  conversation_id: string;
+  selection_generation: number;
+}
+
 export interface TtsPlaybackErrorEvent {
     request_id: string;
     error: string;
@@ -914,9 +939,14 @@ export async function listGptSovitsModels(installPath: string): Promise<GptSovit
 // ── Image Generation ───────────────────────────────
 
 export interface ImageGenResult {
+    conversation_generation?: number;
     image_url: string;
     prompt: string;
     provider_id: string;
+    character_id?: string;
+    conversation_id?: string;
+    client_request_id?: string;
+    turn_id?: string;
 }
 
 export interface ImageGenProviderConfig {
@@ -960,6 +990,11 @@ export async function testSdConnection(baseUrl: string): Promise<string[]> {
 // ── Image Gen Events ──────────────────────────────
 
 export interface ChatImageGenEvent {
+    conversation_generation?: number;
+    character_id?: string;
+    conversation_id?: string;
+    client_request_id?: string;
+    turn_id?: string;
     prompt: string;
 }
 
@@ -969,6 +1004,11 @@ export async function onChatImageGen(callback: (event: ChatImageGenEvent) => voi
 
 export async function onImageGenDone(callback: (event: ImageGenResult) => void): Promise<UnlistenFn> {
     return listen<ImageGenResult>("imagegen:done", (e) => callback(e.payload));
+}
+
+export interface ChatImageGenError extends Omit<ChatImageGenEvent, "prompt"> { message: string }
+export async function onChatImageGenError(callback: (event: ChatImageGenError) => void): Promise<UnlistenFn> {
+    return listen<ChatImageGenError>("chat-imagegen-error", event => callback(event.payload));
 }
 
 export async function onImageGenError(callback: (error: string) => void): Promise<UnlistenFn> {
@@ -1762,6 +1802,7 @@ export interface TelegramStatus {
     has_token: boolean;
 }
 
+/** @deprecated Partial character updates are rejected by the backend. */
 export async function setActiveCharacterId(id: string): Promise<void> {
     return invoke("set_active_character_id", { id });
 }

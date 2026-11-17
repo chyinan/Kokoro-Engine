@@ -6,7 +6,8 @@ use crate::ai::memory_event_ingress::{
 use crate::ai::memory_extractor;
 use crate::chat::external_memory::MemoryWork;
 use crate::chat::persistence::ExternalTurn;
-use crate::llm::service::LlmService;
+use crate::llm::provider::LlmProvider;
+use std::sync::Arc;
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn schedule_external_memory_tasks(
     platform: &str,
@@ -14,14 +15,18 @@ pub(super) async fn schedule_external_memory_tasks(
     char_id: &str,
     turn: &ExternalTurn,
     orchestrator: &AIOrchestrator,
-    llm_service: &LlmService,
+    provider: Arc<dyn LlmProvider>,
     memory_target_language: &str,
     memory_work: Option<MemoryWork>,
+    scope: Arc<super::ownership::MemoryWriteScope>,
 ) {
     let Some(work) = memory_work.filter(|work| orchestrator.external_memory.is_current(*work))
     else {
         return;
     };
+    if !scope.owner_is_current() {
+        return;
+    }
     let msg_count = work.count;
     let memory_msg_count = work.count;
     let upgrade_config =
@@ -55,7 +60,7 @@ pub(super) async fn schedule_external_memory_tasks(
             {
                 let history = turn.recent_committed_history(orchestrator, work, 10).await;
                 let memory_mgr = orchestrator.memory_manager.clone();
-                let provider_for_mem = llm_service.provider().await;
+                let provider_for_mem = provider.clone();
                 let char_id_for_mem = char_id.to_string();
                 let source = platform.to_string();
                 let memory_enabled = orchestrator.memory_enabled_flag();
@@ -63,6 +68,7 @@ pub(super) async fn schedule_external_memory_tasks(
                 let observation_started_at = std::time::Instant::now();
                 let trigger = decision.trigger_label.to_string();
                 let extraction_options = memory_extractor::MemoryExtractionOptions {
+                    scope: Some(scope.clone()),
                     structured_memory_enabled: should_use_structured_extraction(
                         upgrade_config.structured_memory_enabled,
                         &ingress_options,
@@ -99,13 +105,14 @@ pub(super) async fn schedule_external_memory_tasks(
     if orchestrator.is_memory_enabled() && work.extract() {
         let history = turn.recent_committed_history(orchestrator, work, 10).await;
         let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
+        let provider_for_mem = provider.clone();
         let char_id_for_mem = char_id.to_string();
         let source = platform.to_string();
         let memory_enabled = orchestrator.memory_enabled_flag();
         let external_memory = orchestrator.external_memory.clone();
         let observation_started_at = std::time::Instant::now();
         let extraction_options = memory_extractor::MemoryExtractionOptions {
+            scope: Some(scope.clone()),
             structured_memory_enabled: false,
             target_language: Some(memory_target_language.clone()),
         };
@@ -137,10 +144,11 @@ pub(super) async fn schedule_external_memory_tasks(
     if orchestrator.is_memory_enabled() && work.consolidate() {
         let memory_mgr = orchestrator.memory_manager.clone();
         let char_id_for_consolidation = char_id.to_string();
-        let provider_for_consolidation = llm_service.provider().await;
+        let provider_for_consolidation = provider.clone();
         let memory_enabled = orchestrator.memory_enabled_flag();
         let external_memory = orchestrator.external_memory.clone();
         let observation_started_at = std::time::Instant::now();
+        let scope = scope.clone();
         let source = platform.to_string();
         let target_language_for_consolidation = memory_target_language.clone();
         tauri::async_runtime::spawn(async move {
@@ -157,10 +165,11 @@ pub(super) async fn schedule_external_memory_tasks(
                 )
                 .await;
             match memory_mgr
-                .consolidate_memories_with_language(
+                .consolidate_chat_memories(
                     &char_id_for_consolidation,
                     provider_for_consolidation,
                     Some(target_language_for_consolidation),
+                    &scope,
                 )
                 .await
             {
