@@ -930,6 +930,7 @@ export async function listGptSovitsModels(installPath: string): Promise<GptSovit
 // ── Image Generation ───────────────────────────────
 
 export interface ImageGenResult {
+    conversation_generation?: number;
     image_url: string;
     prompt: string;
     provider_id: string;
@@ -980,6 +981,7 @@ export async function testSdConnection(baseUrl: string): Promise<string[]> {
 // ── Image Gen Events ──────────────────────────────
 
 export interface ChatImageGenEvent {
+    conversation_generation?: number;
     character_id?: string;
     conversation_id?: string;
     client_request_id?: string;

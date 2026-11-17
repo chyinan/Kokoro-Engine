@@ -22,10 +22,19 @@ pub use crate::ai::memory_embedding_model::{
     MemoryEmbeddingModelStatus,
 };
 
+#[cfg(test)]
+struct EmbeddingPause {
+    text: String,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
 pub struct MemoryManager {
     #[cfg(not(test))]
     embedder: tokio::sync::OnceCell<Mutex<TextEmbedding>>,
     db: SqlitePool,
+    #[cfg(test)]
+    embedding_pause: std::sync::Mutex<Option<EmbeddingPause>>,
 }
 
 /// Half-life in days for memory decay (memories lose 50% relevance every N days).
@@ -1594,6 +1603,8 @@ impl MemoryManager {
         Self {
             #[cfg(not(test))]
             embedder: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            embedding_pause: std::sync::Mutex::new(None),
             db,
         }
     }
@@ -1690,7 +1701,40 @@ impl MemoryManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn pause_embedding_for(
+        &self,
+        text: &str,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.embedding_pause.lock().unwrap() = Some(EmbeddingPause {
+            text: text.into(),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        (entered, release)
+    }
+
+    #[cfg(test)]
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let pause = {
+            let mut pause = self.embedding_pause.lock().unwrap();
+            if pause
+                .as_ref()
+                .is_some_and(|pause| text.contains(&pause.text))
+            {
+                pause.take()
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
         Ok(test_embedding(text))
     }
 
@@ -2783,7 +2827,9 @@ impl MemoryManager {
         // with respect to those ownership changes.
         let _scope_guard = if let Some(scope) = scope {
             let Some(guard) = scope.admit().await else {
-                return Err(anyhow::anyhow!("Chat memory task was revoked before commit"));
+                return Err(anyhow::anyhow!(
+                    "Chat memory task was revoked before commit"
+                ));
             };
             Some(guard)
         } else {

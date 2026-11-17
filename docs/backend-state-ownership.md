@@ -157,3 +157,24 @@ Rust 使用 `ORT_SKIP_DOWNLOAD=1` 与已有本地 ONNX DLL，以及 `CARGO_TARGE
 - 三个变更 Rust 文件的 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
 
 本轮未重跑原生 WebView 套件；上文 rebase 原生结果仍绑定原实现提交和二进制，不作为本轮补丁的原生验证。
+
+
+## PR #4 第二轮修复：预留会话工具与图片事件（2026-11-17）
+
+`MemoryWriteScope` 新增默认关闭的预留会话许可。只有 `resolve_request_scope` 在 selection 短锁内校验角色存在、确认目标会话尚不存在且允许创建后，才为该次 scope 开启许可。这允许隐藏轮次在首次消息提交前执行角色级 `store_memory`；不会提前创建空 SQL 会话。许可与原 scope 一同传递及释放，不重新取得 owner token。最终提交仍检查原角色/会话 lifetime、memory epoch、启用状态和数据库代次；SQL 仍要求角色存在，同会话 ID 已存在但属于其他角色时拒绝。删除或同 ID 重建撤销旧 lifetime，许可不能让迟到工作写入新对象。其他 scope 构造入口默认继续要求会话已提交。
+
+App 的图片完成与背景生成监听现在使用 `image-events.ts` 的实际处理函数和统一 `chatEventMatchesView`。工具事件通过现有 `emit_chat_event` 补充准入代次，bridge 类型同步增加 `conversation_generation`：预留 ID 在原空白代次可见，后续空白视图与其他角色/会话拒绝；已提交会话按稳定身份匹配，切走再返回仍可显示。没有 request/turn 的手动动作保留角色作用域语义。背景生成始终继续执行，只有完成后的界面应用受到当前视图筛选。
+
+`verify_reserved_memory_tools` 运行真实 hidden 聊天、原生工具调用与 builtin `store_memory`，使用仅测试构建的 embedding Notify 暂停点。覆盖正常存入、切角色仍写原 owner、关闭再开启记忆、预留会话删除/同 ID 重建、角色同 ID 重建、同会话 ID 异角色碰撞；断言实际 memory/candidate SQL 行、工具结果及原会话物化时机。另监听真实 builtin 背景事件，检查 reserved 代次和无请求的 manual 事件。`image-events.test.ts` 直接测试 App 使用的处理函数，包括 journal 尚未收到 turn、生成中切 New、收到事件时已在其他视图，以及返回原会话。
+
+本轮继续使用隔离 `KOKORO_TEST_DATA_ROOT` 和上述共享 Rust target；真实模型/embedding 下载、图片 Provider 网络与原生 WebView 本轮未运行。
+
+
+第二轮最终检查（日志在 `output/state-ownership/`）：
+
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml chat::channels_test::desktop_webhook_and_telegram_execute_the_same_bound_chat -- --nocapture`：通过，新增 7 个记忆场景均通过；`pr4-round2-channels.log`。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1007/1007，bin/doc 0，无后台 panic；`pr4-round2-rust-all.log`。这一轮包含随后加入的实际背景事件 payload 断言。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`pr4-round2-clippy.log`。
+- `npm test`：90 文件、970/970，包含 10 个图片处理回归；`pr4-round2-npm-test.log`。
+- `npm run build` 与 `npm run check:ipc`：通过，IPC 177；`pr4-round2-build.log`、`pr4-round2-ipc.log`。仅保留已有构建 bundle/import 提示。
+- 变更 Rust 文件 `rustfmt --check --edition 2021`、`git diff --check`：通过。未纳入日志、数据根、依赖或本机配置。

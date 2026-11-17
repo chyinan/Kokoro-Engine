@@ -135,6 +135,9 @@ pub(crate) struct MemoryWriteScope {
     pub lifetime: OwnerLifetime,
     pub character_id: String,
     pub conversation_id: Option<String>,
+    /// Granted only while admitting a validated, not-yet-materialized target.
+    /// The captured lifetime still revokes this permission on deletion/reset.
+    pub allow_reserved_conversation: bool,
     pub request_id: String,
     pub epoch: u64,
     pub database_generation: u64,
@@ -180,8 +183,10 @@ impl MemoryWriteScope {
             return None;
         }
         let exists = if let Some(conversation) = &self.conversation_id {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM conversations c JOIN characters ch ON ch.id=c.character_id WHERE c.id=? AND c.character_id=?)")
-                .bind(conversation).bind(&self.character_id).fetch_one(&self.db).await.unwrap_or(false)
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM characters WHERE id=?) AND (EXISTS(SELECT 1 FROM conversations WHERE id=? AND character_id=?) OR (? AND NOT EXISTS(SELECT 1 FROM conversations WHERE id=?)))")
+                .bind(&self.character_id).bind(conversation).bind(&self.character_id)
+                .bind(self.allow_reserved_conversation).bind(conversation)
+                .fetch_one(&self.db).await.unwrap_or(false)
         } else {
             sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM characters WHERE id=?)")
                 .bind(&self.character_id)

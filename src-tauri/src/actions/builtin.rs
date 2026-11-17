@@ -247,9 +247,11 @@ impl ActionHandler for SetBackgroundAction {
             .ok_or_else(|| ActionError("Missing 'prompt' parameter".into()))?;
 
         // Emit image gen event (reuses existing infrastructure)
-        let _ = ctx
-            .app
-            .emit("chat-imagegen", serde_json::json!({ "prompt": prompt, "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }));
+        let _ = crate::chat::runtime::emit_chat_event(
+            &ctx.app,
+            "chat-imagegen",
+            serde_json::json!({ "prompt": prompt, "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }),
+        ).await;
 
         Ok(ActionResult::ok(format!(
             "Background generation triggered: {}",
@@ -334,7 +336,7 @@ impl ActionHandler for GenerateImageAction {
         event["conversation_id"] = ctx.conversation_id.into();
         event["client_request_id"] = ctx.request_id.into();
         event["turn_id"] = ctx.turn_id.into();
-        let _ = ctx.app.emit("imagegen:done", event);
+        let _ = crate::chat::runtime::emit_chat_event(&ctx.app, "imagegen:done", event).await;
 
         Ok(ActionResult::ok_with_data(
             "Image generated in Kokoro Engine. If the user is chatting from an external bot platform that cannot display local images, tell them to open the Kokoro Engine client to view it.",

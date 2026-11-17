@@ -1069,3 +1069,209 @@ pub(super) async fn verify_admission_selection_generation(
     .await
     .unwrap();
 }
+
+pub(super) async fn verify_reserved_memory_tools(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+) {
+    use crate::chat::application::{submit_chat, ChatPolicy};
+    use crate::commands::conversation::{
+        create_conversation, delete_conversation, load_conversation, DeleteConversationRequest,
+        LoadConversationRequest,
+    };
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    for mutation in [
+        "none",
+        "selection",
+        "memory-toggle",
+        "conversation-deleted",
+        "conversation-recreated",
+        "character-recreated",
+        "foreign-conversation",
+    ] {
+        let owner = format!("reserved-memory-{mutation}");
+        sqlx::query("INSERT INTO characters(id,name) VALUES (?,?)")
+            .bind(&owner)
+            .bind(&owner)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        state.set_character_id(owner.clone()).await;
+        state.set_memory_enabled(true).await;
+        create_conversation(app.state()).await.unwrap();
+        let (embedding_entered, embedding_release) =
+            state.memory_manager.pause_embedding_for("model trains");
+        let request_id = format!("reserved-memory-request-{mutation}");
+        let worker = tokio::spawn(submit_chat(
+            app.clone(),
+            ChatRequest {
+                message: "[reserved-memory] remember a fact".into(),
+                hidden: true,
+                character_id: Some(owner.clone()),
+                client_request_id: Some(request_id.clone()),
+                ..Default::default()
+            },
+            ChatPolicy::Desktop,
+        ));
+        until_request_started(provider).await;
+        let scope = runtime.turn_scope(&request_id).unwrap();
+        let conversation = scope.conversation_id.clone().unwrap();
+        let background_events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        if mutation == "none" {
+            use crate::actions::registry::ActionHandler;
+            let captured = background_events.clone();
+            let listener = app.listen("chat-imagegen", move |event| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(event.payload()).unwrap());
+            });
+            let context = crate::actions::ActionContext {
+                memory_scope: None,
+                cue_names: None,
+                request_id: Some(request_id.clone()),
+                turn_id: scope.turn_id.clone(),
+                app: app.clone(),
+                character_id: owner.clone(),
+                conversation_id: Some(conversation.clone()),
+                source: Some("chat".into()),
+            };
+            crate::actions::builtin::SetBackgroundAction
+                .execute(
+                    std::collections::HashMap::from([("prompt".into(), "garden".into())]),
+                    context.clone(),
+                )
+                .await
+                .unwrap();
+            crate::actions::builtin::SetBackgroundAction
+                .execute(
+                    std::collections::HashMap::from([("prompt".into(), "manual garden".into())]),
+                    crate::actions::ActionContext {
+                        request_id: None,
+                        turn_id: None,
+                        conversation_id: None,
+                        ..context
+                    },
+                )
+                .await
+                .unwrap();
+            app.unlisten(listener);
+        }
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id=?")
+            .bind(&conversation)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        provider.finish_pending.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), embedding_entered.notified())
+            .await
+            .unwrap();
+        match mutation {
+            "selection" => {
+                state.set_character_id("other-character".into()).await;
+                create_conversation(app.state()).await.unwrap();
+            }
+            "memory-toggle" => {
+                state.set_memory_enabled(false).await;
+                state.set_memory_enabled(true).await;
+            }
+            "conversation-deleted" | "conversation-recreated" => {
+                delete_conversation(
+                    DeleteConversationRequest {
+                        id: conversation.clone(),
+                    },
+                    app.state(),
+                )
+                .await
+                .unwrap();
+                if mutation == "conversation-recreated" {
+                    sqlx::query("INSERT INTO conversations(id,character_id,created_at,updated_at) VALUES (?,?,'now','now')").bind(&conversation).bind(&owner).execute(&state.db).await.unwrap();
+                }
+            }
+            "character-recreated" => {
+                crate::commands::characters::delete_character(
+                    owner.clone(),
+                    app.state(),
+                    app.clone(),
+                )
+                .await
+                .unwrap();
+                sqlx::query("INSERT INTO characters(id,name) VALUES (?,?)")
+                    .bind(&owner)
+                    .bind(&owner)
+                    .execute(&state.db)
+                    .await
+                    .unwrap();
+            }
+            "foreign-conversation" => {
+                sqlx::query("INSERT INTO conversations(id,character_id,created_at,updated_at) VALUES (?,'other-character','now','now')").bind(&conversation).execute(&state.db).await.unwrap();
+            }
+            _ => {}
+        }
+        embedding_release.notify_one();
+        let result = worker.await.unwrap();
+        if mutation == "none" {
+            let events = background_events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0]["conversation_id"], conversation);
+            assert_eq!(events[0]["client_request_id"], request_id);
+            assert_eq!(
+                events[0]["conversation_generation"].as_u64(),
+                scope.conversation_generation
+            );
+            assert!(events[1]["client_request_id"].is_null());
+            assert!(events[1]["conversation_generation"].is_null());
+        }
+        assert_eq!(
+            before, 0,
+            "hidden admission must not materialize an empty conversation"
+        );
+        let memories: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE character_id=?")
+                .bind(&owner)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        let candidates: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memory_candidates WHERE character_id=?")
+                .bind(&owner)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        if matches!(mutation, "none" | "selection") {
+            assert!(result.is_ok(), "{mutation}: {result:?}");
+            assert_eq!(memories, 1, "reserved role memory failed: {mutation}");
+            assert_eq!(candidates, 1);
+            let (saved_owner, content): (String, String) =
+                sqlx::query_as("SELECT character_id,content FROM memories WHERE character_id=?")
+                    .bind(&owner)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(saved_owner, owner);
+            assert_eq!(content, "User collects model trains.");
+            let tool_result: String = sqlx::query_scalar(
+                "SELECT content FROM conversation_messages WHERE conversation_id=? AND role='tool'",
+            )
+            .bind(&conversation)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert!(!tool_result.contains("revoked"), "{tool_result}");
+        } else {
+            assert_eq!(memories, 0, "revoked scope wrote memory: {mutation}");
+            assert_eq!(candidates, 0, "revoked scope wrote candidate: {mutation}");
+        }
+    }
+    state.set_memory_enabled(false).await;
+    state.set_character_id("test-character".into()).await;
+    load_conversation(
+        LoadConversationRequest {
+            id: "desktop".into(),
+        },
+        app.state(),
+    )
+    .await
+    .unwrap();
+}

@@ -1,5 +1,6 @@
 import { OnboardingChat } from "./features/onboarding/onboarding-chat";
 import { chatApplication, submitChat } from "./lib/chat/application";
+import { createImageEventHandlers } from "./lib/chat/image-events";
 // pattern: Imperative Shell
 
 import { useState, useEffect, useMemo, useSyncExternalStore, useCallback, useRef } from "react";
@@ -331,7 +332,6 @@ import {
   // New: Context
   setUserLanguage,
   // Types
-  type ImageGenResult,
   type ModThemeJson,
   type Live2dModelInfo,
   type TtsSystemConfig,
@@ -1325,28 +1325,15 @@ function App() {
       }
     });
 
-    // Listen for generated images
-    const unlistenImageGen = onImageGenDone((result: ImageGenResult) => {
-      const view = chatApplication.getSnapshot();
-      if (result.character_id && (result.character_id !== view.character_id
-        || result.conversation_id !== view.conversation_id)) return;
-      const assetUrl = convertFileSrc(result.image_url);
-      console.log("[App] Received generated image:", assetUrl);
-      setGeneratedImage(assetUrl);
+    const imageEvents = createImageEventHandlers({
+      getView: () => chatApplication.getSnapshot(),
+      generate: generateImage,
+      showImage: result => setGeneratedImage(convertFileSrc(result.image_url)),
+      selectGeneratedBackground: () => bgSlideshow.setConfig({ mode: "generated" }),
+      onError: error => console.error("[App] chat-imagegen generation failed:", error),
     });
-
-    // Listen for chat-triggered image generation requests
-    const unlistenChatImageGen = onChatImageGen(event => {
-      const { prompt } = event;
-      console.log("[App] chat-imagegen triggered, prompt:", prompt);
-      generateImage(prompt).then(result => {
-        const view = chatApplication.getSnapshot();
-        if (event.character_id && (event.character_id !== view.character_id || event.conversation_id !== view.conversation_id)) return;
-        const assetUrl = convertFileSrc(result.image_url);
-        setGeneratedImage(assetUrl);
-        bgSlideshow.setConfig({ mode: "generated" });
-      }).catch(err => console.error("[App] chat-imagegen generation failed:", err));
-    });
+    const unlistenImageGen = onImageGenDone(imageEvents.onImageDone);
+    const unlistenChatImageGen = onChatImageGen(imageEvents.onBackgroundRequested);
 
     // ── MOD System: Theme override ──
     const unlistenModTheme = onModThemeOverride((modTheme: ModThemeJson) => {

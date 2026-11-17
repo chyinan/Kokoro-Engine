@@ -163,6 +163,31 @@ impl LlmProvider for ControlledProvider {
             .rev()
             .find(|message| message["role"] == "user");
         let last_user = last_user.map(Value::to_string).unwrap_or_default();
+        if last_user.contains("[reserved-memory]") {
+            let messages = payload.as_array().unwrap();
+            let user_index = messages
+                .iter()
+                .rposition(|message| message["role"] == "user")
+                .unwrap();
+            let continued = messages[user_index + 1..]
+                .iter()
+                .any(|message| message["role"] == "tool");
+            self.prompts.lock().unwrap().push(payload);
+            if !continued {
+                self.entered_pending.notify_one();
+                self.finish_pending.notified().await;
+            }
+            let event = if continued {
+                LlmStreamEvent::Text("Memory tool finished".into())
+            } else {
+                LlmStreamEvent::ToolCall(LlmToolCall {
+                    id: "reserved-memory-call".into(),
+                    name: "store_memory".into(),
+                    args: HashMap::from([("fact".into(), "User collects model trains.".into())]),
+                })
+            };
+            return Ok(Box::pin(stream::iter([Ok(event)])));
+        }
         if last_user.contains("[owner-approval]") {
             let messages = payload.as_array().unwrap();
             let user_index = messages
@@ -933,6 +958,7 @@ async fn verify_persisted_external_contracts(
         sqlx::query("INSERT INTO characters (id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,?, '', '', 'test',1,1)")
             .bind(character).bind(character).execute(&state.db).await.unwrap();
     }
+    super::ownership_test::verify_reserved_memory_tools(app, provider).await;
     super::ownership_test::verify_admission_selection_generation(app, provider).await;
     verify_legacy_metadata_and_retired_media(app, provider, tools).await;
     let body = json!({"request_id":"format-committed","conversation_id":"review-contract","text":"[formatted-replay]"});

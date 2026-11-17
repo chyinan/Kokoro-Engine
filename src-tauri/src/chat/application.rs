@@ -2317,12 +2317,18 @@ async fn resolve_request_scope(
     if policy.is_desktop() {
         request.conversation_generation = Some(state.current_conversation_generation());
     }
-    request.memory_scope = Some(state.memory_write_scope(
+    let mut memory_scope = state.memory_write_scope(
         &target.character_id,
         &target.conversation_id,
         request.client_request_id.as_deref().unwrap(),
         state.external_memory.epoch(),
-    ));
+    );
+    // A hidden turn may run role-memory tools before its first message commit.
+    // Grant absence only for the target just validated under this selection lock.
+    Arc::get_mut(&mut memory_scope)
+        .unwrap()
+        .allow_reserved_conversation = target.create;
+    request.memory_scope = Some(memory_scope);
     request.resolved_target = Some(target);
     Ok(())
 }
