@@ -426,6 +426,7 @@ pub(super) async fn verify_state_ownership(
     scopes.0.lock().unwrap().clear();
     verify_pending_reply_snapshots(app).await;
     verify_cue_snapshot(app, directory).await;
+    verify_inactive_role_user_save_retry(app, directory).await;
 }
 
 #[derive(Default)]
@@ -1436,4 +1437,309 @@ pub(super) async fn verify_snapshot_preparation_cancellation(
     )
     .await
     .unwrap();
+}
+
+#[derive(Default)]
+struct RetryRoleLlm {
+    prompts: std::sync::Mutex<Vec<serde_json::Value>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for RetryRoleLlm {
+    fn id(&self) -> &str {
+        "retry-role-llm"
+    }
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        _: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+        _: Option<crate::llm::provider::LlmParams>,
+    ) -> Result<String, String> {
+        Ok(r#"{"cue":null}"#.into())
+    }
+    async fn chat_stream(
+        &self,
+        _: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+        _: Option<crate::llm::provider::LlmParams>,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, String>> + Send>>, String>
+    {
+        unreachable!()
+    }
+    async fn chat_stream_with_tools(
+        &self,
+        messages: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+        _: Option<crate::llm::provider::LlmParams>,
+        _: Vec<crate::llm::provider::LlmToolDefinition>,
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn futures::Stream<Item = Result<crate::llm::provider::LlmStreamEvent, String>>
+                    + Send,
+            >,
+        >,
+        String,
+    > {
+        use crate::llm::provider::{LlmStreamEvent, LlmToolCall};
+        let value = serde_json::to_value(messages).unwrap();
+        let continued = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool");
+        self.prompts.lock().unwrap().push(value);
+        if !continued {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        let event = if continued {
+            LlmStreamEvent::Text("Original role retry reply".into())
+        } else {
+            LlmStreamEvent::ToolCall(LlmToolCall {
+                id: "retry-role-cue".into(),
+                name: "play_cue".into(),
+                args: std::collections::HashMap::from([("cue".into(), "role-a-cue".into())]),
+            })
+        };
+        Ok(Box::pin(futures::stream::iter([Ok(event)])))
+    }
+}
+struct RetryRoleVoice {
+    id: &'static str,
+    calls: Arc<std::sync::Mutex<Vec<(String, crate::tts::interface::TtsParams)>>>,
+}
+#[async_trait::async_trait]
+impl crate::tts::interface::TtsProvider for RetryRoleVoice {
+    fn id(&self) -> String {
+        self.id.into()
+    }
+    fn capabilities(&self) -> crate::tts::interface::ProviderCapabilities {
+        Default::default()
+    }
+    fn voices(&self) -> Vec<crate::tts::interface::VoiceProfile> {
+        vec![]
+    }
+    async fn is_available(&self) -> bool {
+        true
+    }
+    async fn synthesize(
+        &self,
+        _: &str,
+        params: crate::tts::interface::TtsParams,
+    ) -> Result<Vec<u8>, crate::tts::interface::TtsError> {
+        self.calls.lock().unwrap().push((self.id.into(), params));
+        Ok(vec![1, 2, 3])
+    }
+}
+async fn verify_inactive_role_user_save_retry(app: &tauri::AppHandle, directory: &std::path::Path) {
+    use crate::chat::application::{retry_chat_persistence, submit_chat, ChatPolicy};
+    use crate::commands::conversation::create_conversation;
+    let state = app.state::<AIOrchestrator>();
+    let coordinator = app.state::<ActivationCoordinator>();
+    let catalog = app.state::<crate::characters::catalog::CharacterCatalog>();
+    let package = catalog.root().join("retry-role-template").join("1.0.0");
+    std::fs::create_dir_all(&package).unwrap();
+    let manifest = serde_json::json!({"schema_version":1,"engine_version":">=0.3.0","id":"retry-role-template","version":"1.0.0","name":"Retry","description":"fixture","author":"Test","license":"CC0-1.0","persona":"ROLE A PERSONA","greeting":"Hello","assets":{"cue_profile":"cues.json"}});
+    std::fs::write(package.join("character.json"), manifest.to_string()).unwrap();
+    std::fs::write(
+        package.join("cues.json"),
+        r#"{"schema_version":1,"cues":{"role-a-cue":{}}}"#,
+    )
+    .unwrap();
+    let a_profile = serde_json::json!({"response_language":"Japanese","tts":{"provider_id":"voice-a","voice":"role-a-voice","speed":1.25,"pitch":0.9}});
+    let b_profile = serde_json::json!({"response_language":"German","tts":{"provider_id":"voice-b","voice":"role-b-voice","speed":0.75}});
+    sqlx::query("INSERT INTO characters(id,name,persona,user_nickname,example_dialogue,source_format,template_id,template_version,template_snapshot_json,runtime_profile_json,greeting_consumed_at) VALUES ('retry-role-a','Role A','ROLE A PERSONA','Owner A','ROLE A EXAMPLE','template','retry-role-template','1.0.0',?,?,1)").bind(manifest.to_string()).bind(a_profile.to_string()).execute(&state.db).await.unwrap();
+    sqlx::query("INSERT INTO characters(id,name,persona,runtime_profile_json,greeting_consumed_at) VALUES ('retry-role-b','Role B','ROLE B PERSONA',?,1)").bind(b_profile.to_string()).execute(&state.db).await.unwrap();
+    let mut tts_config = crate::tts::config::TtsSystemConfig::default();
+    let mut voice_a = tts_config.providers[0].clone();
+    voice_a.id = "voice-a".into();
+    let mut voice_b = voice_a.clone();
+    voice_b.id = "voice-b".into();
+    tts_config.providers = vec![voice_a, voice_b];
+    tts_config.default_provider = Some("voice-b".into());
+    let tts = app.state::<crate::tts::TtsService>();
+    tts.reload_from_config(&tts_config).await.unwrap();
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    for id in ["voice-a", "voice-b"] {
+        tts.register_provider(Arc::new(RetryRoleVoice {
+            id,
+            calls: calls.clone(),
+        }))
+        .await;
+    }
+    let backend = crate::commands::characters::OrchestratorActivationBackend {
+        orchestrator: &state,
+        app_data: directory.join("retry-role-activation"),
+    };
+    let token = coordinator
+        .prepare_with_package_root(
+            &state.db,
+            catalog.root(),
+            "retry-role-a",
+            &tts_config,
+            &[],
+            &backend,
+        )
+        .await
+        .unwrap();
+    coordinator
+        .commit(&state.db, token, &backend)
+        .await
+        .unwrap();
+    create_conversation(app.state()).await.unwrap();
+    let provider = Arc::new(RetryRoleLlm::default());
+    app.state::<crate::llm::service::LlmService>()
+        .replace_test_provider(provider.clone())
+        .await;
+    app.state::<Arc<tokio::sync::RwLock<crate::actions::tool_settings::ToolSettings>>>()
+        .write()
+        .await
+        .max_permission_level = crate::actions::registry::ActionPermissionLevel::Elevated;
+    let request = ChatRequest {
+        message: "Retry original role".into(),
+        character_id: Some("retry-role-a".into()),
+        client_request_id: Some("inactive-role-retry".into()),
+        ..Default::default()
+    };
+    sqlx::query("CREATE TRIGGER reject_role_user BEFORE INSERT ON conversation_messages WHEN NEW.role='user' BEGIN SELECT RAISE(ABORT,'role user save'); END").execute(&state.db).await.unwrap();
+    assert!(matches!(
+        submit_chat(app.clone(), request.clone(), ChatPolicy::Desktop).await,
+        Err(crate::error::KokoroError::ChatPersistence(_))
+    ));
+    sqlx::query("DROP TRIGGER reject_role_user")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(provider.prompts.lock().unwrap().is_empty());
+    let reserved = app
+        .state::<Arc<ChatRuntimeState>>()
+        .turn_scope("inactive-role-retry")
+        .unwrap()
+        .conversation_id
+        .unwrap();
+    let token = coordinator
+        .prepare_with_package_root(
+            &state.db,
+            catalog.root(),
+            "retry-role-b",
+            &tts_config,
+            &[],
+            &backend,
+        )
+        .await
+        .unwrap();
+    coordinator
+        .commit(&state.db, token, &backend)
+        .await
+        .unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured = events.clone();
+    let listener = app.listen("chat-cue", move |event| {
+        captured
+            .lock()
+            .unwrap()
+            .push(serde_json::from_str(event.payload()).unwrap());
+    });
+    let worker = tokio::spawn(retry_chat_persistence(
+        app.clone(),
+        "inactive-role-retry".into(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), provider.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.get_character_id().await,
+        "retry-role-b",
+        "snapshot must not activate its bound role"
+    );
+    let token = coordinator
+        .prepare_with_package_root(
+            &state.db,
+            catalog.root(),
+            "retry-role-a",
+            &tts_config,
+            &[],
+            &backend,
+        )
+        .await
+        .unwrap();
+    coordinator
+        .commit(&state.db, token, &backend)
+        .await
+        .unwrap();
+    provider.release.notify_one();
+    let result = worker.await.unwrap().unwrap();
+    let synthesized = tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    app.unlisten(listener);
+    let tool_result: String = sqlx::query_scalar(
+        "SELECT content FROM conversation_messages WHERE conversation_id=? AND role='tool'",
+    )
+    .bind(&reserved)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    let prompts = provider.prompts.lock().unwrap().clone();
+    assert_eq!(result.conversation_id, reserved);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[0].to_string().contains("ROLE A PERSONA"));
+    assert!(prompts[0].to_string().contains("ROLE A EXAMPLE"));
+    assert!(prompts[0].to_string().contains("Japanese"));
+    assert!(!prompts[0].to_string().contains("ROLE B PERSONA"));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id=? AND role='user'",
+    )
+    .bind(&reserved)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    let saved_owner: String =
+        sqlx::query_scalar("SELECT character_id FROM conversations WHERE id=?")
+            .bind(&reserved)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(saved_owner, "retry-role-a");
+    eprintln!(
+        "inactive role retry: synthesized={synthesized}, tool_result={tool_result}, cue_events={}",
+        events.lock().unwrap().len()
+    );
+    assert!(
+        tool_result.contains("Cue triggered: role-a-cue"),
+        "{tool_result}"
+    );
+    assert!(
+        synthesized,
+        "original role automatic speech was not scheduled"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "voice-a");
+    assert_eq!(calls[0].1.voice.as_deref(), Some("role-a-voice"));
+    assert_eq!(calls[0].1.speed, Some(1.25));
+    assert_eq!(calls[0].1.pitch, Some(0.9));
+    drop(calls);
+    let cue = events
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|event| event["source"] == "builtin-play-cue")
+        .unwrap()
+        .clone();
+    assert_eq!(cue["character_id"], "retry-role-a");
+    assert_eq!(cue["conversation_id"], reserved);
+    assert_eq!(cue["client_request_id"], "inactive-role-retry");
+    let replay = submit_chat(app.clone(), request, ChatPolicy::Desktop)
+        .await
+        .unwrap();
+    assert_eq!(replay.user_message_id, result.user_message_id);
+    assert_eq!(provider.prompts.lock().unwrap().len(), 2);
 }

@@ -835,6 +835,14 @@ impl AIOrchestrator {
         &self,
         character: &str,
     ) -> Result<crate::chat::ownership::PromptSnapshot> {
+        self.prompt_snapshot_with_runtime(character, None).await
+    }
+
+    pub(crate) async fn prompt_snapshot_with_runtime(
+        &self,
+        character: &str,
+        runtime: Option<&crate::characters::activation::BackendRuntimeSnapshot>,
+    ) -> Result<crate::chat::ownership::PromptSnapshot> {
         let mut snapshot = crate::chat::ownership::PromptSnapshot {
             cue_map: None,
             system_prompt: self.system_prompt.lock().await.clone(),
@@ -854,6 +862,11 @@ impl AIOrchestrator {
             // Compatibility boundary for models chosen outside a character package.
             snapshot.cue_map =
                 crate::live2d::load_active_live2d_profile().map(|profile| profile.cue_map);
+        } else if let Some(runtime) = runtime {
+            snapshot.character_name = runtime.character_name.clone();
+            snapshot.user_name = runtime.user_name.clone();
+            snapshot.system_prompt = runtime.system_prompt.clone();
+            snapshot.response_language = runtime.response_language.clone();
         } else {
             let row: Option<(String, String, String, String, String)> = sqlx::query_as(
                 "SELECT name,persona,user_nickname,example_dialogue,runtime_profile_json FROM characters WHERE id=?"

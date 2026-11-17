@@ -3,7 +3,7 @@
 use crate::ai::context::AIOrchestrator;
 use crate::characters::activation::{
     ActivationCoordinator, ActivationRuntimeBackend, BackendRuntimeSnapshot,
-    CharacterActivationToken, CommittedCharacterRuntime, LocalTtsPreset,
+    CharacterActivationToken, CommittedCharacterRuntime,
 };
 use crate::characters::catalog::{CatalogEntry, CharacterCatalog, DOCUMENTATION_TEMPLATE_ID};
 use crate::characters::instance_resource::{
@@ -252,13 +252,7 @@ fn replace_json_file(
         .map_err(|error| KokoroError::Internal(format!("failed to finalize {file_name}: {error}")))
 }
 
-fn allowlisted_local_tts_presets() -> Vec<LocalTtsPreset> {
-    vec![LocalTtsPreset {
-        id: "gpt-sovits-loopback".to_string(),
-        provider_type: "gpt_sovits".to_string(),
-        endpoint: "http://127.0.0.1:9880".to_string(),
-    }]
-}
+use crate::characters::activation::allowlisted_local_tts_presets;
 
 use super::character_instance_core::{
     build_reconcile_preview, create_request_from_manifest, parse_template_defaults,

@@ -155,6 +155,17 @@ pub fn load_active_live2d_profile() -> Option<Live2dModelProfile> {
 pub(crate) fn committed_cue_map(
     runtime: &crate::characters::activation::BackendRuntimeSnapshot,
 ) -> Option<HashMap<String, Live2dCueBinding>> {
+    let models = crate::utils::paths::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("com.chyin.kokoro")
+        .join("live2d_models");
+    runtime_cue_map(runtime, &models)
+}
+
+pub(crate) fn runtime_cue_map(
+    runtime: &crate::characters::activation::BackendRuntimeSnapshot,
+    models: &std::path::Path,
+) -> Option<HashMap<String, Live2dCueBinding>> {
     use crate::characters::activation::PackageAssetReference;
     if let Some(reference) = &runtime.cue_profile {
         let path = match reference {
@@ -170,17 +181,11 @@ pub(crate) fn committed_cue_map(
         );
     }
     match &runtime.live2d_model {
-        Some(PackageAssetReference::Library { model_id }) => {
-            let models = crate::utils::paths::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("com.chyin.kokoro")
-                .join("live2d_models");
-            Some(
-                ensure_profile_for_model(&models, model_id)
-                    .map(|profile| profile.cue_map)
-                    .unwrap_or_default(),
-            )
-        }
+        Some(PackageAssetReference::Library { model_id }) => Some(
+            ensure_profile_for_model(models, model_id)
+                .map(|profile| profile.cue_map)
+                .unwrap_or_default(),
+        ),
         Some(PackageAssetReference::Package { .. }) => Some(HashMap::new()),
         None => None,
     }

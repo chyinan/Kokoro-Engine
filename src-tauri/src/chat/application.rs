@@ -2804,8 +2804,33 @@ async fn execute_chat_with_pending(
         // model, tool, media or memory I/O.
         let (prompt_snapshot, llm_snapshot, speech, speech_snapshot) = {
             let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+            let committed = app
+                .state::<crate::characters::activation::ActivationCoordinator>()
+                .get_committed(&state.db)
+                .await?
+                .filter(|committed| committed.runtime.character_id == char_id);
+            let package_root = app
+                .try_state::<crate::characters::catalog::CharacterCatalog>()
+                .map(|catalog| catalog.root().to_path_buf())
+                .unwrap_or_else(|| {
+                    crate::utils::paths::data_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join("com.chyin.kokoro")
+                        .join("characters")
+                });
+            let uses_committed = committed.is_some();
+            let (runtime, profile) = if let Some(committed) = committed {
+                (committed.runtime, None)
+            } else {
+                crate::characters::activation::read_execution_runtime(
+                    &state.db,
+                    &package_root,
+                    &char_id,
+                )
+                .await?
+            };
             let mut prompt = state
-                .prompt_snapshot(&char_id)
+                .prompt_snapshot_with_runtime(&char_id, Some(&runtime))
                 .await
                 .map_err(|error| KokoroError::Chat(error.to_string()))?;
             prompt.vision_context_history_mode = vision_watcher
@@ -2814,44 +2839,35 @@ async fn execute_chat_with_pending(
                 .await
                 .vision_context_history_mode
                 .clone();
-            let providers = llm_state.execution_snapshot().await;
-            let committed = app
-                .state::<crate::characters::activation::ActivationCoordinator>()
-                .get_committed(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .filter(|committed| committed.runtime.character_id == char_id);
-            if let Some(cues) = committed
-                .as_ref()
-                .and_then(|committed| crate::live2d::committed_cue_map(&committed.runtime))
-            {
+            let cues = if uses_committed {
+                crate::live2d::committed_cue_map(&runtime)
+            } else {
+                crate::live2d::runtime_cue_map(
+                    &runtime,
+                    &package_root
+                        .parent()
+                        .unwrap_or(&package_root)
+                        .join("live2d_models"),
+                )
+            };
+            if let Some(cues) = cues {
                 prompt.cue_map = Some(cues);
             }
-            let speech = committed.map(|committed| committed.runtime.tts);
-            let profile = if !desktop && speech.is_none() {
-                let profile: Option<String> =
-                    sqlx::query_scalar("SELECT runtime_profile_json FROM characters WHERE id=?")
-                        .bind(&char_id)
-                        .fetch_optional(&state.db)
-                        .await?;
-                profile
-                    .and_then(|profile| {
-                        serde_json::from_str::<crate::characters::manifest::CharacterRuntimeProfile>(
-                            &profile,
-                        )
-                        .ok()
-                    })
-                    .and_then(|profile| profile.tts)
-            } else {
-                None
-            };
-            let speech_snapshot = if let Some(tts) = app.try_state::<crate::tts::TtsService>() {
-                tts.execution_snapshot(speech.as_ref(), profile.as_ref())
-                    .await
-            } else {
-                None
-            };
+            let (speech, speech_snapshot) =
+                if let Some(tts) = app.try_state::<crate::tts::TtsService>() {
+                    if uses_committed {
+                        let snapshot = tts.execution_snapshot(Some(&runtime.tts), None).await;
+                        (Some(runtime.tts), snapshot)
+                    } else {
+                        let (speech, snapshot) = tts
+                            .role_execution_snapshot(&profile.unwrap_or_default())
+                            .await;
+                        (Some(speech), snapshot)
+                    }
+                } else {
+                    (Some(runtime.tts), None)
+                };
+            let providers = llm_state.execution_snapshot().await;
             (prompt, providers, speech, speech_snapshot)
         };
 

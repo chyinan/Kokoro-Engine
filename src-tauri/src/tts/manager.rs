@@ -190,7 +190,33 @@ impl TtsService {
         } else {
             None
         };
-        let speech = resolved.as_ref().or(speech);
+        self.capture_execution_snapshot(resolved.as_ref().or(speech))
+            .await
+    }
+
+    /// Resolve the bound role's speech policy and provider under the same config gate.
+    pub(crate) async fn role_execution_snapshot(
+        &self,
+        profile: &crate::characters::manifest::CharacterTtsProfile,
+    ) -> (
+        crate::characters::activation::ResolvedTts,
+        Option<Arc<TtsExecutionSnapshot>>,
+    ) {
+        let _snapshot = self.snapshot_gate.read().await;
+        let speech = crate::characters::activation::resolve_tts(
+            Some(profile),
+            &*self.committed_config.read().await,
+            &crate::characters::activation::allowlisted_local_tts_presets(),
+        );
+        let snapshot = self.capture_execution_snapshot(Some(&speech)).await;
+        (speech, snapshot)
+    }
+
+    /// Caller holds snapshot_gate so config resolution and provider capture agree.
+    async fn capture_execution_snapshot(
+        &self,
+        speech: Option<&crate::characters::activation::ResolvedTts>,
+    ) -> Option<Arc<TtsExecutionSnapshot>> {
         use crate::characters::activation::ResolvedTtsMode;
         if speech.is_some_and(|speech| {
             matches!(
@@ -1064,6 +1090,54 @@ mod tests {
         record_tts_error, wrap_pcm_s16le_as_wav, ChatRuntimeState, TtsService,
         MAX_CANCELLED_TTS_REQUESTS,
     };
+
+    #[tokio::test]
+    async fn role_execution_snapshot_preserves_disabled_preset_and_unavailable_modes() {
+        use crate::characters::activation::ResolvedTtsMode;
+        use crate::characters::manifest::CharacterTtsProfile;
+        let service = TtsService::new();
+        let (browser, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile::default())
+            .await;
+        assert_eq!(browser.mode, ResolvedTtsMode::Browser);
+        assert!(snapshot.unwrap().provider().is_ok());
+        let (disabled, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile {
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(disabled.mode, ResolvedTtsMode::TextOnly);
+        assert!(snapshot.is_none());
+        let (preset, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile {
+                local_preset: Some("gpt-sovits-loopback".into()),
+                provider_type: Some("gpt_sovits".into()),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(preset.mode, ResolvedTtsMode::LocalPresetConfirmation);
+        assert!(snapshot.is_none());
+        let mut config = service.committed_config.write().await;
+        let mut configured = config.providers[0].clone();
+        configured.id = "configured-unavailable".into();
+        configured.provider_type = "openai".into();
+        config.providers.push(configured);
+        drop(config);
+        let (configured, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile {
+                provider_id: Some("configured-unavailable".into()),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(configured.mode, ResolvedTtsMode::ConfiguredProvider);
+        assert!(snapshot
+            .unwrap()
+            .synthesize("no browser fallback")
+            .await
+            .unwrap_err()
+            .contains("configured-unavailable"));
+    }
 
     #[tokio::test]
     async fn execution_snapshot_keeps_provider_voice_and_speed_after_reload() {

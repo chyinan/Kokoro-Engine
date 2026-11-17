@@ -197,8 +197,32 @@ App 的图片完成与背景生成监听现在使用 `image-events.ts` 的实际
 - `npm exec -- vitest run src/lib/chat/application.test.ts src/ui/widgets/chat/chat-edit-session-switch.test.tsx`：108/108；`pr4-round3-frontend.log`。本轮未修改前端。
 - 变更 Rust 文件 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
 
-- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从本轮源码重建，lifecycle **39/39**，exit 0；`pr4-round3-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从本轮源码重建，lifecycle **39/39**，exit 0；`pr4-round3-native-lifecycle.log`、`output/state-ownership/pre-round4-native/native-report.json`。
 
-- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round3-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json` 和同目录 `recovery-report.json`。
+- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round3-native-persistence.log`、`output/state-ownership/pre-round4-native/persistence-persistence-report.json` 和同目录 `persistence-recovery-report.json`。
 
 本轮两个原生套件二进制 SHA-256 一致：`84ECF8FE175644FC125C876F8B42E2AF7DC64782FC147D44CC2F56D3AE0583C0`。`output/state-ownership/source-manifest-pr4-round3.json` 的 49 个 PR 源文件及主代理 `master-round3-source-manifest.json` 的三个本轮源文件复算 changed=0；端口 1420/19333/19334/19335/19336 无监听残留。源码检查、全量 Rust、相关前端回归和新原生验收均通过；真实远程平台/云服务及非 Windows 平台仍未验证。
+
+
+## PR #4 第四轮修复：非当前角色的完整执行配置（2026-11-17）
+
+角色 A 首条用户消息保存失败后，若桌面已激活 B，原请求的用户保存重试仍应完整解析 A。此前该路径只补提示词，语音为 None，cue 白名单也来自当前角色入口；即使模型响应期间切回 A，自动语音和合法动作仍缺失。现在角色激活和聊天准备共用只读的单次 SQL/资产解析函数，按绑定角色解析 persona、语言、语音配置和 cue 资产。只读解析不建立激活 token、不修改选择、不发布另一份可变角色状态。当前角色继续使用已提交视图，并保留已有 custom Live2D 兼容路径。
+
+非当前角色的 TTS 解析和 Provider Arc 捕获在同一个 `snapshot_gate` 内完成，沿用激活的 `resolve_tts` 与本地 preset 白名单。明确 TextOnly 保持无语音，Browser 捕获浏览器 Provider，ConfiguredProvider 缺失保留可观察错误，尚需确认的 LocalPreset 不转成默认语音。整个解析仍在上一轮建立的单一准备取消/超时预算内，快照完成后释放 activation guard。
+
+`verify_inactive_role_user_save_retry` 用 SQLite trigger 让 A 首条用户消息保存失败，实际 prepare/apply/commit 激活 B 后重试原请求，通过 Provider Notify 暂停模型，再实际激活回 A。它检查 A 的 persona/示例/语言、实际 builtin play_cue 的 SQL 工具结果及带原身份的事件、实际 TTS synthesize 的 voice-a/voice/speed/pitch、原角色会话归属及唯一用户行，并确认重复提交不重跑模型。修复前同一回归记录 `synthesized=false` 和 `Unknown cue ... (none)`，修复后记录 `synthesized=true` 和 `Cue triggered`；不是只比较快照字段。`role_execution_snapshot_preserves_disabled_preset_and_unavailable_modes` 另覆盖 Browser、TextOnly、LocalPreset 确认及缺失 Provider 的实际快照/错误语义。
+
+第四轮源码和普通测试继续使用隔离 `KOKORO_TEST_DATA_ROOT`；原生 runner 每次使用独立数据根与 WebView profile。第三轮原生 JSON 已复制到 `output/state-ownership/pre-round4-native/`，保留旧二进制证据。
+
+第四轮检查（日志在 `output/state-ownership/`）：
+
+- 定向 `cargo test --offline --manifest-path src-tauri/Cargo.toml chat::channels_test::desktop_webhook_and_telegram_execute_the_same_bound_chat -- --nocapture`：通过；`pr4-round4-channels.log`。原逻辑红灯保留于 `pr4-round4-red.log`。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1008/1008，bin/doc 0，无后台 panic；`pr4-round4-rust-all.log`。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`pr4-round4-clippy.log`。
+- `npm exec -- vitest run src/features/live2d/Live2DViewer.lifecycle.test.tsx src/features/characters/character-activation.test.ts src/core/services/tts-service.review.test.ts src/lib/chat/application.test.ts`：95/95；`pr4-round4-frontend.log`。本轮前端和 IPC 契约没有修改。
+- 8 个变更 Rust 文件的 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
+
+- `pwsh -NoProfile -File scripts/run-chat-lifecycle-native.ps1 -PlaywrightModule "C:\Users\19254\AppData\Local\npm-cache\_npx\31e32ef8478fbf80\node_modules\playwright"`：从第四轮源码重建，lifecycle **39/39**，exit 0；`pr4-round4-native-lifecycle.log`、`output/playwright/chat-lifecycle/native-report.json`。
+- 同一 runner 命令加 `-Persistence -SkipBuild`：持久化 **17/17**，恢复报告 `status=passed`，exit 0；`pr4-round4-native-persistence.log`、`output/playwright/chat-lifecycle/persistence/persistence-report.json` 和同目录 `recovery-report.json`。
+
+两个套件使用同一新二进制，SHA-256 为 `F544BE8159A336BC596738B6BE1A4487CEC9608A725E57168634DFEB20D54154`。`output/state-ownership/source-manifest-pr4-round4.json` 的 49 个 PR 源文件最终复算 changed=0；端口 1420/19333/19334/19335/19336 无监听残留。原生构建保留 Windows 链接器 LIBCMT 提示，构建及上述运行均成功。普通测试和本地原生 fixture 不调用真实云模型/语音服务，实际 Telegram 网络、远程 Provider 与非 Windows 平台仍未验证。

@@ -388,6 +388,10 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     handle.manage(cancellation.clone());
     handle.manage(Arc::new(PendingToolApprovalState::default()));
     handle.manage(ActivationCoordinator::default());
+    handle.manage(crate::characters::catalog::CharacterCatalog::new(
+        temp.path().join("characters"),
+        semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+    ));
     handle.manage(imagegen);
     handle.manage(crate::tts::TtsService::new());
     handle.manage(WindowSizeState::default());
