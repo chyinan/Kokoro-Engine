@@ -1392,7 +1392,7 @@
         },
         "whitelist": {
             "label": "ALLOWED CHAT IDS",
-            "desc": "Only these chat IDs can interact with the bot. Empty = reject all.",
+            "desc": "Only listed chat IDs are allowed, not sender IDs. A group ID authorizes the whole chat. An empty list means no chats are authorized: all messages and commands are rejected, even while the bot is running.",
             "placeholder": "Chat ID (number)",
             "add": "Add"
         },

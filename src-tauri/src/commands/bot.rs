@@ -2826,6 +2826,45 @@ mod tests {
     }
 
     #[test]
+    fn bot_telegram_missing_or_invalid_config_never_grants_a_default_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bot_config.json");
+        let legacy = temp.path().join("telegram_config.json");
+        for contents in [
+            None,
+            Some("{}"),
+            Some(r#"{"telegram":{"enabled":true}}"#),
+            Some("not json"),
+            Some(r#"{"telegram":{"allowed_chat_ids":["*"]}}"#),
+        ] {
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            assert!(load_bot_config_from_paths(&path, &legacy)
+                .telegram
+                .allowed_chat_ids
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn bot_telegram_running_with_empty_whitelist_does_not_restore_legacy_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bot_config.json");
+        let legacy = temp.path().join("telegram_config.json");
+        let mut current = BotConfig::default();
+        current.telegram.enabled = true;
+        save_bot_config_file_to_path(&path, &current).unwrap();
+        std::fs::write(&legacy, r#"{"allowed_chat_ids":[123,-1001234567890]}"#).unwrap();
+
+        assert!(load_bot_config_from_paths(&path, &legacy)
+            .telegram
+            .allowed_chat_ids
+            .is_empty());
+        assert!(legacy.exists());
+    }
+
+    #[test]
     fn bot_normalize_image_reference_accepts_urls_and_wraps_base64() {
         assert_eq!(
             normalize_image_reference("https://example.com/a.png", "image/png").as_deref(),

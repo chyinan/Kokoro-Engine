@@ -308,12 +308,93 @@ async fn handle_message(
     app: tauri::AppHandle,
     rate_limiter: RateLimiter,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    dispatch_message(
+        &bot,
+        &msg,
+        &config,
+        &rate_limiter,
+        &TelegramMessageHandler {
+            bot: &bot,
+            sessions: &sessions,
+            app: &app,
+        },
+    )
+    .await
+}
+
+/// Keep authorization and routing together, before any business or media work.
+/// The handler boundary lets local tests observe whether business work started.
+trait MessageHandler: Sync {
+    fn command(
+        &self,
+        msg: &Message,
+        text: &str,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+    fn voice(
+        &self,
+        msg: &Message,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+    fn photo(
+        &self,
+        msg: &Message,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+    fn text(
+        &self,
+        msg: &Message,
+        text: &str,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+}
+
+struct TelegramMessageHandler<'a> {
+    bot: &'a Bot,
+    sessions: &'a Sessions,
+    app: &'a tauri::AppHandle,
+}
+
+impl MessageHandler for TelegramMessageHandler<'_> {
+    async fn command(&self, msg: &Message, text: &str, config: &TelegramConfig) -> HandlerResult {
+        handle_command(self.bot, msg, text, config, self.sessions, self.app).await
+    }
+
+    async fn voice(&self, msg: &Message, config: &TelegramConfig) -> HandlerResult {
+        handle_voice(self.bot, msg, config, self.sessions, self.app).await
+    }
+
+    async fn photo(&self, msg: &Message, config: &TelegramConfig) -> HandlerResult {
+        handle_photo(self.bot, msg, config, self.sessions, self.app).await
+    }
+
+    async fn text(&self, msg: &Message, text: &str, config: &TelegramConfig) -> HandlerResult {
+        reply_to_message(
+            self.bot,
+            msg,
+            text,
+            Vec::new(),
+            config,
+            self.sessions,
+            self.app,
+        )
+        .await
+    }
+}
+
+async fn dispatch_message(
+    bot: &Bot,
+    msg: &Message,
+    config: &RwLock<TelegramConfig>,
+    rate_limiter: &RateLimiter,
+    handler: &impl MessageHandler,
+) -> HandlerResult {
     let chat_id = msg.chat.id;
     // 不记录消息内容，避免敏感信息泄露到日志
     tracing::info!(target: "telegram", "[Telegram] Received message from chat_id={}", chat_id.0);
 
     // Snapshot config for this request
-    let config = Arc::new(config.read().await.clone());
+    let config = config.read().await.clone();
 
     // Access control: check whitelist
     if !config.allowed_chat_ids.contains(&chat_id.0) {
@@ -345,23 +426,23 @@ async fn handle_message(
     // Check for commands
     if let Some(text) = msg.text() {
         if text.starts_with('/') {
-            return handle_command(&bot, &msg, text, &config, &sessions, &app).await;
+            return handler.command(msg, text, &config).await;
         }
     }
 
     // Voice message
     if msg.voice().is_some() {
-        return handle_voice(&bot, &msg, &config, &sessions, &app).await;
+        return handler.voice(msg, &config).await;
     }
 
     // Photo message (with optional caption)
     if msg.photo().is_some() {
-        return handle_photo(&bot, &msg, &config, &sessions, &app).await;
+        return handler.photo(msg, &config).await;
     }
 
     // Regular text message
     if let Some(text) = msg.text() {
-        return reply_to_message(&bot, &msg, text, Vec::new(), &config, &sessions, &app).await;
+        return handler.text(msg, text, &config).await;
     }
 
     Ok(())
@@ -705,7 +786,7 @@ fn split_message(text: &str) -> impl Iterator<Item = &str> {
 async fn handle_voice(
     bot: &Bot,
     msg: &Message,
-    config: &Arc<TelegramConfig>,
+    config: &TelegramConfig,
     sessions: &Sessions,
     app: &tauri::AppHandle,
 ) -> HandlerResult {
@@ -872,6 +953,370 @@ async fn send_voice_reply(
 
 #[cfg(test)]
 mod tests {
+    #[derive(Default)]
+    struct EntryEffects {
+        routes: Vec<&'static str>,
+        model: usize,
+        tools: usize,
+        storage: usize,
+        memory: usize,
+        download: usize,
+        transcription: usize,
+        vision: usize,
+        tts: usize,
+    }
+
+    struct RecordingMessageHandler {
+        state: AIOrchestrator,
+        sessions: Sessions,
+        effects: std::sync::Mutex<EntryEffects>,
+    }
+
+    impl RecordingMessageHandler {
+        async fn new() -> Self {
+            Self {
+                state: AIOrchestrator::new("sqlite::memory:")
+                    .await
+                    .unwrap()
+                    .fork_with_isolated_history()
+                    .await,
+                sessions: Sessions::default(),
+                effects: std::sync::Mutex::new(EntryEffects::default()),
+            }
+        }
+
+        async fn reply(&self, msg: &Message, text: &str) -> HandlerResult {
+            self.effects.lock().unwrap().storage += 1;
+            let turn = begin_telegram_turn(
+                &self.state,
+                "default",
+                msg.chat.id.0,
+                msg.id.0,
+                text,
+                false,
+                &self.sessions,
+            )
+            .await?;
+            {
+                // Local substitutes for external services; persistence and
+                // session mutations below use the existing application code.
+                let mut effects = self.effects.lock().unwrap();
+                effects.model += 1;
+                effects.tools += 1;
+                effects.memory += 1;
+                effects.tts += 1;
+            }
+            turn.save_reply(&self.state, "local reply", None).await?;
+            Ok(())
+        }
+
+        async fn assert_no_business_effects(&self) {
+            {
+                let effects = self.effects.lock().unwrap();
+                assert!(effects.routes.is_empty());
+                assert_eq!(effects.model, 0);
+                assert_eq!(effects.tools, 0);
+                assert_eq!(effects.storage, 0);
+                assert_eq!(effects.memory, 0);
+                assert_eq!(effects.download, 0);
+                assert_eq!(effects.transcription, 0);
+                assert_eq!(effects.vision, 0);
+                assert_eq!(effects.tts, 0);
+            }
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap();
+            assert_eq!(rows, 0);
+            let conversations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap();
+            assert_eq!(conversations, 0);
+            let modes = self.sessions.modes.read().await;
+            assert!(modes.private.is_empty());
+            assert!(modes.continued.is_empty());
+            assert!(self.state.history.lock().await.is_empty());
+        }
+    }
+
+    impl MessageHandler for RecordingMessageHandler {
+        async fn command(
+            &self,
+            msg: &Message,
+            _text: &str,
+            _config: &TelegramConfig,
+        ) -> HandlerResult {
+            self.effects.lock().unwrap().routes.push("command");
+            // Any command reaching this substitute mutates real session state.
+            self.sessions.start_new(msg.chat.id, "default").await;
+            Ok(())
+        }
+
+        async fn voice(&self, msg: &Message, _config: &TelegramConfig) -> HandlerResult {
+            {
+                let mut effects = self.effects.lock().unwrap();
+                effects.routes.push("voice");
+                effects.download += 1;
+                effects.transcription += 1;
+            }
+            self.reply(msg, "local transcript").await
+        }
+
+        async fn photo(&self, msg: &Message, _config: &TelegramConfig) -> HandlerResult {
+            {
+                let mut effects = self.effects.lock().unwrap();
+                effects.routes.push("photo");
+                effects.download += 1;
+                effects.vision += 1;
+            }
+            self.reply(msg, "local photo description").await
+        }
+
+        async fn text(&self, msg: &Message, text: &str, _config: &TelegramConfig) -> HandlerResult {
+            self.effects.lock().unwrap().routes.push("text");
+            self.reply(msg, text).await
+        }
+    }
+
+    fn incoming_message(chat_id: i64, message_id: i32, input: &str) -> Message {
+        let mut message = serde_json::json!({
+            "message_id": message_id,
+            "date": 1_700_000_000,
+            "chat": if chat_id < 0 {
+                serde_json::json!({"id": chat_id, "type": "supergroup", "title": "Local group"})
+            } else {
+                serde_json::json!({"id": chat_id, "type": "private", "first_name": "Local chat"})
+            },
+            "from": {"id": 42, "is_bot": false, "first_name": "Local sender", "username": "allowed_name"}
+        });
+        match input {
+            "voice" => {
+                message["voice"] = serde_json::json!({
+                "file_id": "voice", "file_unique_id": "voice-unique", "duration": 1,
+                "file_size": 10, "mime_type": "audio/ogg"
+                })
+            }
+            "photo" => {
+                message["photo"] = serde_json::json!([{
+                    "file_id": "photo", "file_unique_id": "photo-unique", "width": 1, "height": 1, "file_size": 10
+                }])
+            }
+            "document" => {
+                message["document"] = serde_json::json!({
+                    "file_id": "document", "file_unique_id": "document-unique", "file_size": 10
+                })
+            }
+            text => message["text"] = serde_json::json!(text),
+        }
+        let message: Message = serde_json::from_value(message).unwrap();
+        match input {
+            "voice" => assert!(message.voice().is_some()),
+            "photo" => assert!(message.photo().is_some()),
+            "document" => assert!(message.document().is_some()),
+            text => assert_eq!(message.text(), Some(text)),
+        }
+        message
+    }
+
+    async fn local_bot() -> (Bot, wiremock::MockServer) {
+        let server = wiremock::MockServer::start().await;
+        let bot = Bot::new("local-test-token").set_api_url(server.uri().parse().unwrap());
+        (bot, server)
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_rejects_all_routes_before_business_or_media_work() {
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, telegram) = local_bot().await;
+        let limiter = RateLimiter::default();
+        // Empty, mismatched sender ID, and special values are never wildcards.
+        for ids in [vec![], vec![42], vec![0, -1], vec![123]] {
+            let config = RwLock::new(TelegramConfig {
+                allowed_chat_ids: ids,
+                ..Default::default()
+            });
+            for chat in [456, -1001234567890] {
+                for (index, input) in [
+                    "hello",
+                    "/new",
+                    "/continue",
+                    "/status",
+                    "/start",
+                    "/unknown",
+                    "voice",
+                    "photo",
+                    "document",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    dispatch_message(
+                        &bot,
+                        &incoming_message(chat, index as i32 + 1, input),
+                        &config,
+                        &limiter,
+                        &handler,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
+        handler.assert_no_business_effects().await;
+        assert!(limiter.read().await.is_empty());
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_accepts_exact_signed_chat_ids_and_preserves_routes() {
+        for chat in [
+            123,
+            -1001234567890,
+            4_503_599_627_370_495,
+            -4_503_599_627_370_495,
+        ] {
+            let handler = RecordingMessageHandler::new().await;
+            let (bot, telegram) = local_bot().await;
+            let limiter = RateLimiter::default();
+            let config = RwLock::new(TelegramConfig {
+                allowed_chat_ids: vec![chat],
+                ..Default::default()
+            });
+            // A sign change must not authorize a different chat.
+            dispatch_message(
+                &bot,
+                &incoming_message(-chat, 1, "hello"),
+                &config,
+                &limiter,
+                &handler,
+            )
+            .await
+            .unwrap();
+            handler.assert_no_business_effects().await;
+            for (id, input) in [
+                (1, "hello"),
+                (2, "/new"),
+                (3, "voice"),
+                (4, "photo"),
+                (5, "document"),
+            ] {
+                dispatch_message(
+                    &bot,
+                    &incoming_message(chat, id, input),
+                    &config,
+                    &limiter,
+                    &handler,
+                )
+                .await
+                .unwrap();
+            }
+            {
+                let effects = handler.effects.lock().unwrap();
+                assert_eq!(effects.routes, ["text", "command", "voice", "photo"]);
+                assert_eq!(
+                    (
+                        effects.model,
+                        effects.tools,
+                        effects.storage,
+                        effects.memory,
+                        effects.tts
+                    ),
+                    (3, 3, 3, 3, 3)
+                );
+                assert_eq!(
+                    (effects.download, effects.transcription, effects.vision),
+                    (2, 1, 1)
+                );
+            }
+            assert!(matches!(
+                handler.sessions.mode(ChatId(chat), "default").await,
+                SessionMode::Fresh { .. }
+            ));
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+                .fetch_one(&handler.state.db)
+                .await
+                .unwrap();
+            assert_eq!(rows, 6);
+            assert!(telegram.received_requests().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_uses_updated_service_whitelist_for_each_new_message() {
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, telegram) = local_bot().await;
+        let limiter = RateLimiter::default();
+        let service = crate::telegram::TelegramService::new(TelegramConfig::default());
+        for (ids, chat, id, input, expected_calls) in [
+            (vec![123], 123, 1, "hello", 1),
+            (vec![-1001234567890], 123, 2, "/new", 1),
+            (vec![-1001234567890], -1001234567890, 3, "photo", 2),
+            (vec![], -1001234567890, 4, "voice", 2),
+            (vec![], 123, 5, "/continue", 2),
+            (vec![123], 123, 6, "/new", 3),
+        ] {
+            service
+                .update_config(TelegramConfig {
+                    allowed_chat_ids: ids,
+                    ..Default::default()
+                })
+                .await;
+            dispatch_message(
+                &bot,
+                &incoming_message(chat, id, input),
+                &service.config,
+                &limiter,
+                &handler,
+            )
+            .await
+            .unwrap();
+            assert_eq!(handler.effects.lock().unwrap().routes.len(), expected_calls);
+        }
+        {
+            let effects = handler.effects.lock().unwrap();
+            assert_eq!(effects.routes, ["text", "photo", "command"]);
+            assert_eq!(effects.transcription, 0);
+        }
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_rejects_missing_or_invalid_authorization_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("telegram.json");
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, telegram) = local_bot().await;
+        let limiter = RateLimiter::default();
+        for contents in [
+            None,
+            Some("{}"),
+            Some(r#"{"enabled":true,"bot_token":"local-test-token"}"#),
+            Some("not json"),
+            Some(r#"{"allowed_chat_ids":null}"#),
+            Some(r#"{"allowed_chat_ids":["*"]}"#),
+            Some(r#"{"allowed_chat_ids":[1.5]}"#),
+        ] {
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let config = RwLock::new(super::super::config::load_config(&path));
+            for input in ["hello", "/new", "voice", "photo"] {
+                dispatch_message(
+                    &bot,
+                    &incoming_message(123, 1, input),
+                    &config,
+                    &limiter,
+                    &handler,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        handler.assert_no_business_effects().await;
+        assert!(limiter.read().await.is_empty());
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+    }
 
     async fn start_new_telegram_session(
         _state: &AIOrchestrator,

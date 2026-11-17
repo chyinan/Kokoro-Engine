@@ -624,11 +624,24 @@ interface TelegramConfig {
   enabled: boolean;
   bot_token?: string;
   bot_token_env?: string;
-  allowed_chat_ids: number[];
+  allowed_chat_ids: number[]; // exact signed chat IDs; empty denies all
   send_voice_reply: boolean;
   character_id?: string;
 }
 ```
+
+The Bot Token connects the application to Telegram; it does not authorize chats.
+`allowed_chat_ids` authorizes whole chats, including all members who can send
+messages in a listed group. It does not match sender IDs or usernames. Preserve
+the sign of group IDs. An empty or missing list authorizes no chats, even when
+the bot is running; there is no wildcard ID.
+
+Text, commands (`/start`, `/new`, `/continue`, `/status`, and unknown commands),
+voice, and photos all pass the same whitelist check before session changes,
+media downloads, transcription, model/tool calls, or persistence. Saved config
+changes replace a complete in-memory snapshot: each new message uses the config
+at authorization time. Clearing the list rejects subsequent messages; work
+already accepted is not revoked by this update.
 
 ### `WebhookMessageRequest`
 
