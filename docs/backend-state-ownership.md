@@ -138,3 +138,22 @@ Rust 使用 `ORT_SKIP_DOWNLOAD=1` 与已有本地 ONNX DLL，以及 `CARGO_TARGE
 本次 rebase 后的全量测试、严格检查和原生验收全部通过，表中 12 项本地行为保证在新基线继续成立。仅提交本任务源码和文档，`git diff --check` 通过；运行产物、依赖、数据库和本机配置未纳入提交。
 
 首次验收报告与二进制信息已复制到 `output/state-ownership/pre-rebase-native/`，绑定旧源码清单和原二进制；不能用它们代替本次 rebase 后的原生验收。真实平台网络、云 Provider 和非 Windows 平台的未验证范围继续适用。
+
+
+## PR #4 修复：保留空白视图的准入代次（2026-11-17）
+
+隐藏/主动轮次在空白视图准入后，若用户在快照准备、模型响应或保存重试前点击“新建会话”，后续 bound/scope/保存恢复曾重新采用最新桌面选择代次，使旧轮次投影到新的空白视图。现在保留原准入代次，只有本轮成功提交并实际选中其新会话时才发布更新代次；没有切换的首次可见、隐藏回复及隐藏保存恢复继续正确选中自己的已提交会话。
+
+`verify_admission_selection_generation` 通过已有 prompt mutex 和 Provider Notify 控制真实入口的执行顺序，并用 SQLite trigger 注入回复保存失败。7 个场景检查实际 bound/start/finish 事件、journal 代次、SQL 会话所属角色与消息行、最终选择和保存恢复不重复调用模型。新增回归在修复前稳定失败：原准入代次 1 被 bound 改为 2；红灯日志为 `output/state-ownership/pr4-generation-red.log`。
+
+测试 fixture 显式关闭桌面选择文件持久化；本轮修复后 Rust 命令还设置 `KOKORO_TEST_DATA_ROOT` 到本工作树忽略的 `output/state-ownership/pr4-isolated-data`，不会写入用户桌面选择文件。
+
+本轮验证（日志均在 `output/state-ownership/`）：
+
+- 定向 `cargo test --offline --manifest-path src-tauri/Cargo.toml chat::channels_test::desktop_webhook_and_telegram_execute_the_same_bound_chat -- --nocapture`：通过，包含新增 7 场景；`pr4-generation-green.log`。
+- `npm exec -- vitest run src/lib/chat/application.test.ts`：61/61；`pr4-projection.log`。前端代码未修改。
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml`：1007/1007，bin/doc 0，无后台 panic；`pr4-rust-all.log`。
+- `cargo clippy --offline --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`：通过；`pr4-clippy.log`。
+- 三个变更 Rust 文件的 `rustfmt --check --edition 2021` 与 `git diff --check`：通过。
+
+本轮未重跑原生 WebView 套件；上文 rebase 原生结果仍绑定原实现提交和二进制，不作为本轮补丁的原生验证。

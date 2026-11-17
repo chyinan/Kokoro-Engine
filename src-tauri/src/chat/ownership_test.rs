@@ -863,3 +863,209 @@ async fn verify_deleted_approval(app: &tauri::AppHandle) {
     .unwrap();
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+/// The prompt mutex pauses a real admitted worker before its execution snapshot;
+/// the existing provider Notify pauses it again after bound/start publication.
+pub(super) async fn verify_admission_selection_generation(
+    app: &tauri::AppHandle,
+    provider: &ControlledProvider,
+) {
+    use crate::chat::application::{retry_chat_persistence, submit_chat, ChatPolicy};
+    use crate::commands::conversation::{
+        create_conversation, load_conversation, LoadConversationRequest,
+    };
+    let state = app.state::<AIOrchestrator>();
+    let runtime = app.state::<Arc<ChatRuntimeState>>();
+    let events = Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let listeners: Vec<_> = ["chat-turn-bound", "chat-turn-start", "chat-turn-finish"]
+        .into_iter()
+        .map(|name| {
+            let events = events.clone();
+            app.listen(name, move |event| {
+                let payload: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+                events.lock().unwrap().push((name.into(), payload));
+            })
+        })
+        .collect();
+    for (index, hidden, switch_at, save_retry) in [
+        (0, true, "snapshot", false),
+        (1, false, "snapshot", false),
+        (2, true, "model", false),
+        (3, true, "retry", true),
+        (4, true, "never", false),
+        (5, false, "never", false),
+        (6, true, "never", true),
+    ] {
+        create_conversation(app.state()).await.unwrap();
+        let admitted_generation = state.current_conversation_generation();
+        let request_id = format!("selection-generation-{index}");
+        let prompt_guard = if switch_at == "snapshot" {
+            Some(state.system_prompt.lock().await)
+        } else {
+            None
+        };
+        let worker = tokio::spawn(submit_chat(
+            app.clone(),
+            ChatRequest {
+                message: "[wait] preserve admission selection".into(),
+                hidden,
+                character_id: Some("test-character".into()),
+                conversation_generation: Some(admitted_generation),
+                client_request_id: Some(request_id.clone()),
+                ..Default::default()
+            },
+            ChatPolicy::Desktop,
+        ));
+        if prompt_guard.is_some() {
+            // Observation only: the held mutex is the actual pause, no timing sleeps.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while runtime.turn_scope(&request_id).is_none() || !state.is_chat_busy() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            create_conversation(app.state()).await.unwrap();
+        }
+        drop(prompt_guard);
+        until_request_started(provider).await;
+        let bound = runtime.turn_scope(&request_id).unwrap();
+        let conversation = bound.conversation_id.clone().unwrap();
+        let prepared_generation = if !hidden && switch_at != "snapshot" {
+            admitted_generation + 1
+        } else {
+            admitted_generation
+        };
+        let observed_before = bound.conversation_generation;
+        let bound_events: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, p)| {
+                p["client_request_id"] == request_id
+                    && (name == "chat-turn-bound" || name == "chat-turn-start")
+            })
+            .map(|(_, p)| p["conversation_generation"].as_u64())
+            .collect();
+        assert_eq!(bound_events.len(), 2);
+        if switch_at == "model" {
+            create_conversation(app.state()).await.unwrap();
+        }
+        if save_retry {
+            sqlx::query("CREATE TRIGGER reject_generation_reply BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'generation retry'); END").execute(&state.db).await.unwrap();
+        }
+        provider.finish_pending.notify_one();
+        let result = worker.await.unwrap();
+        let response = if save_retry {
+            assert!(matches!(
+                result,
+                Err(crate::error::KokoroError::ChatPersistence(_))
+            ));
+            sqlx::query("DROP TRIGGER reject_generation_reply")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            if switch_at == "retry" {
+                create_conversation(app.state()).await.unwrap();
+            }
+            let before = provider.prompts.lock().unwrap().len();
+            let response = retry_chat_persistence(app.clone(), request_id.clone())
+                .await
+                .unwrap();
+            assert_eq!(provider.prompts.lock().unwrap().len(), before);
+            response
+        } else {
+            result.unwrap()
+        };
+        let final_turn = runtime.turn_scope(&request_id).unwrap();
+        let final_generation = if switch_at == "never" {
+            admitted_generation + 1
+        } else {
+            admitted_generation
+        };
+        let selected = state.selection.current_conversation_id.lock().await.clone();
+        assert_eq!(response.conversation_id, conversation);
+        assert_eq!(
+            selected,
+            if switch_at == "never" {
+                Some(conversation.clone())
+            } else {
+                None
+            }
+        );
+        let owner: String = sqlx::query_scalar("SELECT character_id FROM conversations WHERE id=?")
+            .bind(&conversation)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(owner, "test-character");
+        let roles: Vec<String> = sqlx::query_scalar(
+            "SELECT role FROM conversation_messages WHERE conversation_id=? ORDER BY id",
+        )
+        .bind(&conversation)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            roles,
+            if hidden {
+                vec!["assistant"]
+            } else {
+                vec!["user", "assistant"]
+            }
+        );
+        assert_eq!(
+            observed_before,
+            Some(prepared_generation),
+            "bound journal adopted a later empty selection: {index}"
+        );
+        assert!(
+            bound_events
+                .iter()
+                .all(|generation| *generation == Some(prepared_generation)),
+            "bound/start event changed selection owner: {index}: {bound_events:?}"
+        );
+        assert_eq!(
+            final_turn.conversation_generation,
+            Some(final_generation),
+            "completion/retry adopted a later empty selection: {index}"
+        );
+        let finish = events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(name, p)| name == "chat-turn-finish" && p["client_request_id"] == request_id)
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(
+            finish["conversation_generation"].as_u64(),
+            Some(final_generation)
+        );
+        if switch_at != "never" {
+            let view = crate::chat::runtime::get_chat_view(&state, &runtime, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(view.conversation_id.is_none() && view.messages.is_empty());
+            assert_ne!(
+                final_turn.conversation_generation,
+                Some(view.version.generation)
+            );
+        }
+    }
+    for listener in listeners {
+        app.unlisten(listener);
+    }
+    load_conversation(
+        LoadConversationRequest {
+            id: "desktop".into(),
+        },
+        app.state(),
+    )
+    .await
+    .unwrap();
+}

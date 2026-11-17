@@ -336,7 +336,10 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         .unwrap();
     let handle = app.handle().clone();
 
-    let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    let mut state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+    Arc::get_mut(&mut state.selection)
+        .unwrap()
+        .persist_conversation_selection = false;
     state.set_memory_enabled(false).await;
     state.set_character_id("test-character".into()).await;
     let now = "2026-11-14T00:00:00Z";
@@ -930,6 +933,7 @@ async fn verify_persisted_external_contracts(
         sqlx::query("INSERT INTO characters (id,name,persona,user_nickname,source_format,created_at,updated_at) VALUES (?,?, '', '', 'test',1,1)")
             .bind(character).bind(character).execute(&state.db).await.unwrap();
     }
+    super::ownership_test::verify_admission_selection_generation(app, provider).await;
     verify_legacy_metadata_and_retired_media(app, provider, tools).await;
     let body = json!({"request_id":"format-committed","conversation_id":"review-contract","text":"[formatted-replay]"});
     let first = webhook_body(app, body.clone()).await;

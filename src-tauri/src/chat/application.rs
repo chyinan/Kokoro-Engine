@@ -2573,9 +2573,7 @@ pub async fn retry_chat_persistence(
         let snapshot = runtime.complete_save_retry(
             &client_request_id,
             response.clone(),
-            pending
-                .creation_generation
-                .map(|_| state.current_conversation_generation()),
+            select_on_commit.then(|| state.current_conversation_generation()),
         );
         drop(_selection);
         if let Some(snapshot) = snapshot {
@@ -3127,6 +3125,9 @@ async fn execute_chat_with_pending(
                 has_trailing_user,
             );
 
+            // A reserved conversation belongs to its admitted empty view until
+            // this turn actually selects the newly committed conversation.
+            let mut projection_generation = initial_generation;
             let (cid, mid) = if should_insert {
                 let already_saved: bool = sqlx::query_scalar(
                     "SELECT EXISTS (
@@ -3188,19 +3189,20 @@ async fn execute_chat_with_pending(
                         };
                         (target, messages, revision)
                     };
+                let select_on_commit = create
+                    && state.current_conversation_generation() == initial_generation
+                    && state.get_character_id().await == char_id
+                    && state
+                        .selection
+                        .current_conversation_id
+                        .lock()
+                        .await
+                        .is_none();
                 let saved = state
                     .save_messages_expected_locked(
                         &target,
                         &messages,
-                        create
-                            && state.current_conversation_generation() == initial_generation
-                            && state.get_character_id().await == char_id
-                            && state
-                                .selection
-                                .current_conversation_id
-                                .lock()
-                                .await
-                                .is_none(),
+                        select_on_commit,
                         None,
                         pending_user_save.as_ref().and(original_revision),
                     )
@@ -3223,6 +3225,9 @@ async fn execute_chat_with_pending(
                     );
                 }
                 let saved = saved?;
+                if select_on_commit {
+                    projection_generation = state.current_conversation_generation();
+                }
                 if saved.iter().any(|row| row.changed) {
                     state
                         .schedule_conversation_summary(
@@ -3260,7 +3265,7 @@ async fn execute_chat_with_pending(
                         "turn_id": assistant_turn_id,
                         "character_id": char_id,
                         "conversation_id": identity.conversation_id,
-                        "conversation_generation": state.current_conversation_generation(),
+                        "conversation_generation": projection_generation,
                         "user_message_id": mid,
                     }),
                 )
@@ -4714,7 +4719,11 @@ async fn execute_chat_with_pending(
         } else {
             persistence::current_revision(&state.db, &target).await.ok().flatten()
         };
-        let saved = match state.save_messages_locked(&target, &messages, create && state.current_conversation_generation() == bound_generation && state.get_character_id().await == char_id && state.selection.current_conversation_id.lock().await.is_none(), None).await {
+        let select_on_commit = create
+            && state.current_conversation_generation() == bound_generation
+            && state.get_character_id().await == char_id
+            && state.selection.current_conversation_id.lock().await.is_none();
+        let saved = match state.save_messages_locked(&target, &messages, select_on_commit, None).await {
             Ok(saved) => saved,
             Err(error) => {
                 if let Some(expected_revision) = retry_revision {
@@ -4737,7 +4746,7 @@ async fn execute_chat_with_pending(
             }
         };
         draft_row_id = if full_response.is_empty() { None } else { saved.last().map(|row| row.id) };
-        if create {
+        if select_on_commit {
             app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>().event("chat-turn-scope", &serde_json::json!({
                 "turn_id": assistant_turn_id, "conversation_id": target.conversation_id,
                 "conversation_generation": state.current_conversation_generation(),
