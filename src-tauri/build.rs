@@ -1,12 +1,17 @@
 // pattern: Imperative Shell
 
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 /// ONNX Runtime version compatible with ort-sys 2.0.0-rc.11 (requires >= 1.23.x).
 /// fastembed 5.13.0 pulls ort 2.0.0-rc.11 which rejects anything below 1.23.x.
 const ORT_VERSION: &str = "1.23.0";
+// Microsoft.ML.OnnxRuntime 1.23.0 on NuGet; update these when changing ORT_VERSION.
+const ORT_NUGET_BYTES: u64 = 122_633_649;
+const ORT_NUGET_SHA256: &str = "cadbf21358de4b6002eddce08329465071271d52bb1483779f6f09670af281fc";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=ORT_DYLIB_PATH");
@@ -48,12 +53,27 @@ fn main() {
             fs::create_dir_all(&target_dir).expect("failed to create ort-dist cache dir");
 
             let archive_path = target_dir.join(archive_filename());
-            if !archive_path.exists() {
-                download(&archive_url, &archive_path);
-            }
+            let download_result = if archive_path.exists() {
+                Ok(())
+            } else {
+                download(&archive_url, &archive_path)
+            };
 
-            let extracted = extract_lib(&archive_path, &target_dir, lib_name);
-            fs::copy(&extracted, &dest).expect("failed to copy ONNX Runtime lib to project root");
+            match download_result {
+                Ok(()) => {
+                    let extracted = extract_lib(&archive_path, &target_dir, lib_name);
+                    fs::copy(&extracted, &dest)
+                        .expect("failed to copy ONNX Runtime lib to project root");
+                }
+                Err(ureq::Error::StatusCode(404))
+                    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") =>
+                {
+                    println!("cargo:warning=ONNX Runtime GitHub asset returned 404; trying Microsoft NuGet");
+                    install_macos_ort_from_nuget(&target_dir, &dest)
+                        .expect("failed to install ONNX Runtime from Microsoft NuGet");
+                }
+                Err(error) => panic!("failed to download ONNX Runtime from {archive_url}: {error}"),
+            }
             println!(
                 "cargo:warning=ONNX Runtime v{} installed to {}",
                 ORT_VERSION,
@@ -154,14 +174,75 @@ fn archive_filename() -> String {
     format!("onnxruntime-{}-{}.{}", arch_label, ORT_VERSION, ext)
 }
 
-fn download(url: &str, dest: &Path) {
+fn download(url: &str, dest: &Path) -> Result<(), ureq::Error> {
     println!("cargo:warning=GET {}", url);
-    let resp = ureq::get(url)
-        .call()
-        .expect("failed to download ONNX Runtime");
+    let resp = ureq::get(url).call()?;
     let mut reader = resp.into_body().into_reader();
     let mut file = fs::File::create(dest).expect("failed to create archive file");
     io::copy(&mut reader, &mut file).expect("failed to write archive");
+    Ok(())
+}
+
+fn install_macos_ort_from_nuget(cache_dir: &Path, dest: &Path) -> io::Result<()> {
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x64",
+        _ => return Err(io::Error::other("unsupported macOS target architecture")),
+    };
+    let url = format!(
+        "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/{ORT_VERSION}/microsoft.ml.onnxruntime.{ORT_VERSION}.nupkg"
+    );
+    println!("cargo:warning=GET {url}");
+    let response = ureq::get(&url).call().map_err(io::Error::other)?;
+    let entry_name = format!("runtimes/osx-{arch}/native/libonnxruntime.dylib");
+    install_verified_nuget_library(
+        response.into_body().into_reader(),
+        cache_dir,
+        dest,
+        &entry_name,
+    )
+}
+
+fn install_verified_nuget_library(
+    reader: impl Read,
+    cache_dir: &Path,
+    dest: &Path,
+    entry_name: &str,
+) -> io::Result<()> {
+    let mut reader = reader.take(ORT_NUGET_BYTES + 1);
+    let mut package = NamedTempFile::new_in(cache_dir)?;
+    let bytes = io::copy(&mut reader, &mut package)?;
+    if bytes != ORT_NUGET_BYTES {
+        return Err(io::Error::other(format!(
+            "expected {ORT_NUGET_BYTES} bytes for the ONNX Runtime NuGet package, read {bytes}"
+        )));
+    }
+
+    package.rewind()?;
+    let mut hash = Sha256::new();
+    io::copy(&mut package, &mut hash)?;
+    if format!("{:x}", hash.finalize()) != ORT_NUGET_SHA256 {
+        return Err(io::Error::other(
+            "ONNX Runtime NuGet package SHA-256 mismatch",
+        ));
+    }
+
+    let mut zip = zip::ZipArchive::new(package.reopen()?).map_err(io::Error::other)?;
+    let mut entry = zip.by_name(entry_name).map_err(io::Error::other)?;
+    let library_dir = dest.parent().expect("missing library directory");
+    #[cfg(unix)]
+    let mut library = {
+        use std::os::unix::fs::PermissionsExt;
+
+        tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o644))
+            .tempfile_in(library_dir)?
+    };
+    #[cfg(not(unix))]
+    let mut library = NamedTempFile::new_in(library_dir)?;
+    io::copy(&mut entry, &mut library)?;
+    library.persist(dest).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn extract_lib(archive: &Path, cache_dir: &Path, lib_name: &str) -> PathBuf {

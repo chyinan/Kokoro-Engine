@@ -22,6 +22,8 @@ ureq = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
+sha2 = "0.10"
+tempfile = "3"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
