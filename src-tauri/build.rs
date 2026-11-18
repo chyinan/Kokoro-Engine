@@ -65,11 +65,9 @@ fn main() {
                     fs::copy(&extracted, &dest)
                         .expect("failed to copy ONNX Runtime lib to project root");
                 }
-                Err(ureq::Error::StatusCode(404))
-                    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") =>
-                {
+                Err(ureq::Error::StatusCode(404)) => {
                     println!("cargo:warning=ONNX Runtime GitHub asset returned 404; trying Microsoft NuGet");
-                    install_macos_ort_from_nuget(&target_dir, &dest)
+                    install_ort_from_nuget(&target_dir, &dest, lib_name)
                         .expect("failed to install ONNX Runtime from Microsoft NuGet");
                 }
                 Err(error) => panic!("failed to download ONNX Runtime from {archive_url}: {error}"),
@@ -183,18 +181,28 @@ fn download(url: &str, dest: &Path) -> Result<(), ureq::Error> {
     Ok(())
 }
 
-fn install_macos_ort_from_nuget(cache_dir: &Path, dest: &Path) -> io::Result<()> {
+fn install_ort_from_nuget(cache_dir: &Path, dest: &Path, lib_name: &str) -> io::Result<()> {
+    let platform = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => "win",
+        Ok("linux") => "linux",
+        Ok("macos") => "osx",
+        _ => return Err(io::Error::other("unsupported ONNX Runtime target OS")),
+    };
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
         Ok("x86_64") => "x64",
-        _ => return Err(io::Error::other("unsupported macOS target architecture")),
+        _ => {
+            return Err(io::Error::other(
+                "unsupported ONNX Runtime target architecture",
+            ))
+        }
     };
     let url = format!(
         "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/{ORT_VERSION}/microsoft.ml.onnxruntime.{ORT_VERSION}.nupkg"
     );
     println!("cargo:warning=GET {url}");
     let response = ureq::get(&url).call().map_err(io::Error::other)?;
-    let entry_name = format!("runtimes/osx-{arch}/native/libonnxruntime.dylib");
+    let entry_name = format!("runtimes/{platform}-{arch}/native/{lib_name}");
     install_verified_nuget_library(
         response.into_body().into_reader(),
         cache_dir,
