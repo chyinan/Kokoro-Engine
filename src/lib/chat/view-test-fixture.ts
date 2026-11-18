@@ -1,3 +1,4 @@
+import { chatReply } from "./__tests__/wire-fixtures";
 import { vi } from "vitest";
 import type { ChatRequest, ChatViewSnapshot, StreamChatResponse } from "../kokoro-bridge";
 
@@ -15,7 +16,7 @@ export const chatViewFixture = {
   },
   subscribe: (callback: () => void) => { listeners.add(callback); return () => listeners.delete(callback); },
   set: (patch: Partial<ChatViewSnapshot>) => { snapshot = { ...snapshot, ...patch }; listeners.forEach(callback => callback()); },
-  send: vi.fn<(request: ChatRequest) => Promise<StreamChatResponse>>(async () => ({ conversation_id: "conv-1", status: "completed", text: "reply" })),
+  send: vi.fn<(request: ChatRequest) => Promise<StreamChatResponse>>(async () => (chatReply({ conversation_id: "conv-1", status: "completed", text: "reply" }))),
   cancel: vi.fn(async () => {}), selectConversation: vi.fn(async () => {}),
   clear: vi.fn(async () => {}), edit: vi.fn(async () => {}), continueFrom: vi.fn(async () => {}),
   retryPersistence: vi.fn(async (_id: string) => {}),

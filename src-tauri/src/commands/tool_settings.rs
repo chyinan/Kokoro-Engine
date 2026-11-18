@@ -1,5 +1,6 @@
 use crate::actions::tool_settings::{self, ToolSettings};
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
@@ -12,13 +13,15 @@ fn tool_settings_path() -> std::path::PathBuf {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_tool_settings(
     state: State<'_, Arc<RwLock<ToolSettings>>>,
-) -> Result<ToolSettings, KokoroError> {
-    Ok(state.read().await.clone())
+) -> Result<Response<ToolSettings>, KokoroError> {
+    Ok(Response(state.read().await.clone()))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn save_tool_settings(
     settings: ToolSettings,
     state: State<'_, Arc<RwLock<ToolSettings>>>,

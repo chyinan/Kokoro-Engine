@@ -1,47 +1,11 @@
-import { listen, emit } from "@tauri-apps/api/event";
+import { events } from "@/lib/generated/ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { cancelTts, getLatestTtsRequestId, finishChatPlayback } from "../../lib/kokoro-bridge";
 import { chatApplication, type ChatApplication } from "../../lib/chat/application";
 import { chatEventMatchesView } from "../../lib/chat/projection";
 import type { ChatPlaybackScope } from "../../lib/kokoro-bridge";
-import type { TtsAudioFormat } from "../../core/types/mod";
 import { audioPlayer } from "../services";
 import { VoiceInterruptService } from "./voice-interrupt-service";
-
-interface TtsStartEvent {
-    request_id?: string;
-    chat_scope?: ChatPlaybackScope;
-    text: string;
-}
-
-interface TtsAudioEvent {
-    request_id?: string;
-    sentence_id?: number;
-    sequence?: number;
-    response_id?: string | null;
-    format?: TtsAudioFormat | null;
-    data: number[]; // Vec<u8> comes as number array in JSON
-}
-
-interface TtsEndEvent {
-    request_id?: string;
-    text: string;
-    status?: "completed" | "cancelled" | "error";
-}
-
-interface TtsErrorEvent {
-    request_id?: string;
-    error: string;
-}
-
-interface TtsBrowserDelegateEvent {
-    request_id?: string;
-    sentence_id?: number;
-    text: string;
-    voice: string | null;
-    speed: number | null;
-    pitch: number | null;
-}
 
 /**
  * Browser-native SpeechSynthesis wrapper.
@@ -139,7 +103,7 @@ export class TtsService {
         const gen = ++this.generation; // unique id for THIS init() call
         // A default Any listener receives targeted events in every WebView.
         // Scope all playback listeners to the selected physical output window.
-        const playbackTarget = { target: getCurrentWindow().label };
+        const playbackWindow = getCurrentWindow();
 
         console.log(`[TTS] Initializing (gen=${gen})...`);
 
@@ -172,7 +136,7 @@ export class TtsService {
         }
 
         // Listen for Start
-        const unlistenStart = await listen<TtsStartEvent>("tts:start", (event) => {
+        const unlistenStart = await events.ttsStart(playbackWindow).listen((event) => {
             if (this.generation !== gen) return;
             const requestId = event.payload.request_id ?? getLatestTtsRequestId() ?? "legacy-tts-request";
             const latestRequestId = getLatestTtsRequestId();
@@ -198,12 +162,12 @@ export class TtsService {
             });
             this.pendingStart = { requestId, ready, audioBytes: 0 };
             return ready;
-        }, playbackTarget);
+        });
         if (this.generation !== gen) { unlistenStart(); return; }
         this.unlistenFunctions.push(unlistenStart);
 
         // Listen for Audio Chunks (from Rust providers)
-        const unlistenAudio = await listen<TtsAudioEvent>("tts:audio", async (event) => {
+        const unlistenAudio = await events.ttsAudio(playbackWindow).listen(async (event) => {
             if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) {
                 const pending = this.pendingStart;
                 pending.audioBytes += event.payload.data.length;
@@ -238,14 +202,12 @@ export class TtsService {
                         this.pendingAudioBytes = Math.max(0, this.pendingAudioBytes - data.length);
                     }
                 });
-        }, playbackTarget);
+        });
         if (this.generation !== gen) { unlistenAudio(); return; }
         this.unlistenFunctions.push(unlistenAudio);
 
         // Listen for Browser Delegate (frontend handles TTS)
-        const unlistenBrowserDelegate = await listen<TtsBrowserDelegateEvent>(
-            "tts:browser-delegate",
-            async (event) => {
+        const unlistenBrowserDelegate = await events.ttsBrowserDelegate(playbackWindow).listen(async (event) => {
                 if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) await this.pendingStart.ready;
                 if (this.generation !== gen || !this.isCurrentRequest(event.payload.request_id)) return;
                 const { text, voice, speed, pitch } = event.payload;
@@ -270,21 +232,20 @@ export class TtsService {
                 } catch (error) {
                     this.failPlayback(requestId, playbackGeneration, error instanceof Error ? error.message : String(error));
                 }
-            }, playbackTarget
-        );
+            });
         if (this.generation !== gen) { unlistenBrowserDelegate(); return; }
         this.unlistenFunctions.push(unlistenBrowserDelegate);
 
         // Listen for End
-        const unlistenError = await listen<TtsErrorEvent>("tts:error", async (event) => {
+        const unlistenError = await events.ttsError(playbackWindow).listen(async (event) => {
             if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) await this.pendingStart.ready;
             if (this.generation !== gen || !this.isCurrentRequest(event.payload.request_id)) return;
             console.warn("[TTS] Synthesis request failed:", event.payload.error);
-        }, playbackTarget);
+        });
         if (this.generation !== gen) { unlistenError(); return; }
         this.unlistenFunctions.push(unlistenError);
 
-        const unlistenEnd = await listen<TtsEndEvent>("tts:end", async (event) => {
+        const unlistenEnd = await events.ttsEnd(playbackWindow).listen(async (event) => {
             if (this.pendingStart && this.pendingStart.requestId === event.payload.request_id) await this.pendingStart.ready;
             if (this.generation !== gen) return;
             if (!this.isCurrentRequest(event.payload.request_id)) return;
@@ -299,7 +260,7 @@ export class TtsService {
             this.serverEnded = true;
             audioPlayer.finishStream();
             this.finishIfDrained();
-        }, playbackTarget);
+        });
         if (this.generation !== gen) { unlistenEnd(); return; }
         this.unlistenFunctions.push(unlistenEnd);
     }
@@ -358,7 +319,7 @@ export class TtsService {
         if (!requestId || generation !== this.playbackGeneration || !this.isCurrentRequest(requestId)) return;
         void this.stopPlayback(requestId, message);
         // Settings previews also use this event to report errors.
-        void Promise.resolve(emit("tts:playback-error", { request_id: requestId, error: message }))
+        void Promise.resolve(events.ttsPlaybackError.emit({ request_id: requestId, error: message }))
             .catch(error => console.warn("[TTS] Failed to report playback error:", error));
     }
 
@@ -415,7 +376,7 @@ export class TtsService {
             // Bridge to STT: emit event so ChatPanel can start listening
             const sttEnabled = localStorage.getItem("kokoro_stt_enabled") === "true";
             if (sttEnabled) {
-                emit("voice-interrupt-stt", {});
+                events.voiceInterruptStt.emit({});
             }
         });
 

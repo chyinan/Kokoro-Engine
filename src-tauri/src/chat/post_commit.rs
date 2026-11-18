@@ -5,6 +5,7 @@ use crate::ai::context::{database_operation_generation, AIOrchestrator, Message}
 use crate::ai::memory_event_ingress::{build_cooldown_key, MemoryIngressDecision};
 use crate::ai::memory_extractor::{self, MemoryExtractionOptions};
 use crate::imagegen::ImageGenService;
+use crate::chat::event_payloads::{ChatEventScope, ChatImageGenError, ImageGenDone};
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
 use std::sync::Arc;
@@ -251,15 +252,28 @@ impl DesktopPostCommit {
                     .await
                 {
                     Ok(result) if self.is_current(&state).await => {
-                        let mut event = serde_json::to_value(result).unwrap_or_default();
-                        event["character_id"] = self.character_id.clone().into();
-                        event["conversation_id"] = self.conversation_id.clone().into();
-                        event["client_request_id"] = self.request_id.clone().into();
-                        event["turn_id"] = self.turn_id.clone().into();
-                        events.notify(ChatEvent::ImageGenerated, event);
+                        events.notify(ChatEvent::ImageGenerated(ImageGenDone {
+                            result,
+                            scope: ChatEventScope {
+                                character_id: Some(self.character_id.clone()),
+                                conversation_id: Some(self.conversation_id.clone()),
+                                client_request_id: Some(Some(self.request_id.clone())),
+                                ..Default::default()
+                            },
+                            turn_id: Some(Some(self.turn_id.clone())),
+                        }));
                     }
                     Err(error) => {
-                        events.notify(ChatEvent::ImageGenerationError, serde_json::json!({"character_id":self.character_id,"conversation_id":self.conversation_id,"client_request_id":self.request_id,"turn_id":self.turn_id,"message":error.to_string()}));
+                        events.notify(ChatEvent::ImageGenerationError(ChatImageGenError {
+                            scope: ChatEventScope {
+                                character_id: Some(self.character_id.clone()),
+                                conversation_id: Some(self.conversation_id.clone()),
+                                client_request_id: Some(Some(self.request_id.clone())),
+                                ..Default::default()
+                            },
+                            turn_id: Some(Some(self.turn_id.clone())),
+                            message: error.to_string(),
+                        }));
                     }
                     _ => {}
                 }

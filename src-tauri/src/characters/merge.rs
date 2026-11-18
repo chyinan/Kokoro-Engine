@@ -6,15 +6,19 @@ use crate::characters::manifest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct CharacterTemplateFields {
     pub name: String,
     pub description: String,
+    #[serde(default)]
     pub avatar: Option<String>,
     pub persona: String,
     pub greeting: String,
+    #[serde(default)]
     pub example_dialogue: Option<String>,
+    #[serde(default)]
     pub assets: Option<CharacterAssets>,
+    #[serde(default)]
     pub runtime: Option<CharacterRuntimeProfile>,
 }
 

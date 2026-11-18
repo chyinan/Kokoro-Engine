@@ -407,27 +407,31 @@ pub struct MemoryRetrievalObservation {
     pub filtered_out_count: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, sqlx::FromRow, specta::Type)]
 pub struct MemoryRetrievalLogRecord {
     pub query: String,
     pub semantic_candidates: i64,
     pub bm25_candidates: i64,
     pub fused_candidates: i64,
     pub injected_count: i64,
+    #[serde(default)]
     pub overlap_count: Option<i64>,
+    #[serde(default)]
     pub semantic_only_count: Option<i64>,
+    #[serde(default)]
     pub bm25_only_count: Option<i64>,
+    #[serde(default)]
     pub filtered_out_count: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct MemoryRetrievalEvalSummary {
     pub retrieval_eval_enabled: bool,
     pub query_length: i64,
     pub candidate_efficiency_pct: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct MemoryObservabilitySummary {
     pub write_event_count: i64,
     pub retrieval_log_count: i64,
@@ -603,7 +607,7 @@ pub struct MemorySearchResult {
     pub mode: MemoryRetrievalMode,
 }
 
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow, specta::Type)]
 pub struct MemoryWriteEventRecord {
     pub source: String,
     pub trigger: String,
@@ -614,7 +618,7 @@ pub struct MemoryWriteEventRecord {
     pub duration_ms: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow, specta::Type)]
 pub struct MemoryDreamJobRecord {
     pub id: i64,
     pub character_id: String,
@@ -628,7 +632,7 @@ pub struct MemoryDreamJobRecord {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow, specta::Type)]
 pub struct MemoryDreamSourceRecord {
     pub id: i64,
     pub content: String,
@@ -689,7 +693,7 @@ impl MemoryDreamProposalRow {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct MemoryDreamProposalRecord {
     pub id: i64,
     pub character_id: String,
@@ -710,14 +714,14 @@ pub struct MemoryDreamProposalRecord {
     pub applied_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct MemoryDreamingSummary {
     pub latest_job: Option<MemoryDreamJobRecord>,
     pub pending_proposal_count: i64,
     pub auto_applied_proposal_count: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct MemoryDreamRunResult {
     pub job: MemoryDreamJobRecord,
     pub auto_applied_count: i64,
@@ -4693,7 +4697,7 @@ struct MemoryRow {
 }
 
 /// Public record type returned to frontend via Tauri commands.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct MemoryRecord {
     pub id: i64,
     pub content: String,

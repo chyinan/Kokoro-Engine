@@ -1,6 +1,7 @@
 use crate::ai::context::history::HistoryDeletionTarget;
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::{build_openai_client, create_chat};
 use tauri::{AppHandle, Manager, State};
@@ -13,7 +14,7 @@ fn memory_upgrade_config_path() -> std::path::PathBuf {
 
 const USER_PROFILE_SETTINGS_FILE: &str = "user_profile.json";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct UserProfileSettings {
     pub user_name: String,
     pub user_persona: String,
@@ -68,59 +69,69 @@ where
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_memory_upgrade_config(config: MemoryUpgradeConfig) -> Result<(), KokoroError> {
     crate::config::save_memory_upgrade_config(&memory_upgrade_config_path(), &config)
 }
 
 #[tauri::command]
-pub async fn get_memory_upgrade_config() -> Result<MemoryUpgradeConfig, KokoroError> {
-    Ok(crate::config::load_memory_upgrade_config(
+#[specta::specta]
+pub async fn get_memory_upgrade_config() -> Result<Response<MemoryUpgradeConfig>, KokoroError> {
+    Ok(Response(crate::config::load_memory_upgrade_config(
         &memory_upgrade_config_path(),
-    ))
+    )))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_memory_observability_summary(
     state: State<'_, AIOrchestrator>,
-) -> Result<crate::ai::memory::MemoryObservabilitySummary, KokoroError> {
+) -> Result<Response<crate::ai::memory::MemoryObservabilitySummary>, KokoroError> {
     state
         .memory_manager
         .memory_observability_summary()
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_latest_memory_write_event(
     state: State<'_, AIOrchestrator>,
-) -> Result<Option<crate::ai::memory::MemoryWriteEventRecord>, KokoroError> {
+) -> Result<Response<Option<crate::ai::memory::MemoryWriteEventRecord>>, KokoroError> {
     state
         .memory_manager
         .latest_memory_write_event()
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_latest_memory_retrieval_log(
     state: State<'_, AIOrchestrator>,
-) -> Result<Option<crate::ai::memory::MemoryRetrievalLogRecord>, KokoroError> {
+) -> Result<Response<Option<crate::ai::memory::MemoryRetrievalLogRecord>>, KokoroError> {
     state
         .memory_manager
         .latest_memory_retrieval_log()
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_latest_memory_retrieval_eval_summary(
     state: State<'_, AIOrchestrator>,
-) -> Result<Option<crate::ai::memory::MemoryRetrievalEvalSummary>, KokoroError> {
+) -> Result<Response<Option<crate::ai::memory::MemoryRetrievalEvalSummary>>, KokoroError> {
     state
         .memory_manager
         .latest_memory_retrieval_eval_summary()
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[cfg(test)]
@@ -219,6 +230,7 @@ fn memory_config_path() -> std::path::PathBuf {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_persona(
     prompt: String,
     state: State<'_, AIOrchestrator>,
@@ -228,6 +240,7 @@ pub async fn set_persona(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_character_name(
     name: String,
     state: State<'_, AIOrchestrator>,
@@ -237,6 +250,7 @@ pub async fn set_character_name(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_active_character_id(
     id: String,
     state: State<'_, AIOrchestrator>,
@@ -246,6 +260,7 @@ pub async fn set_active_character_id(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_user_profile_settings(
     app: AppHandle,
 ) -> Result<Option<UserProfileSettings>, KokoroError> {
@@ -254,6 +269,7 @@ pub async fn get_user_profile_settings(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_user_name(
     name: String,
     app: AppHandle,
@@ -268,6 +284,7 @@ pub async fn set_user_name(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_user_persona(persona: String, app: AppHandle) -> Result<(), KokoroError> {
     update_user_profile_settings(&app, |settings| {
         settings.user_persona = persona;
@@ -276,6 +293,7 @@ pub async fn set_user_persona(persona: String, app: AppHandle) -> Result<(), Kok
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_response_language(
     language: String,
     state: State<'_, AIOrchestrator>,
@@ -285,6 +303,7 @@ pub async fn set_response_language(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_user_language(
     language: String,
     state: State<'_, AIOrchestrator>,
@@ -302,6 +321,7 @@ pub(crate) fn jailbreak_prompt_path() -> std::path::PathBuf {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_jailbreak_prompt(
     prompt: String,
     state: State<'_, AIOrchestrator>,
@@ -322,6 +342,7 @@ pub async fn set_jailbreak_prompt(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     let _activation = state.acquire_activation_lock().await;
     if let Some(memory_prompt) = state.get_jailbreak_prompt().await {
@@ -338,6 +359,7 @@ pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<St
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_proactive_enabled(
     enabled: bool,
     state: State<'_, AIOrchestrator>,
@@ -359,11 +381,13 @@ pub async fn set_proactive_enabled(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_proactive_enabled(state: State<'_, AIOrchestrator>) -> Result<bool, KokoroError> {
     Ok(state.is_proactive_enabled())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_memory_enabled(
     enabled: bool,
     state: State<'_, AIOrchestrator>,
@@ -377,11 +401,13 @@ pub async fn set_memory_enabled(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_memory_enabled(state: State<'_, AIOrchestrator>) -> Result<bool, KokoroError> {
     Ok(state.is_memory_enabled())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     state.clear_history().await;
@@ -391,6 +417,7 @@ pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), Kokor
 pub use crate::chat::tags::{is_visible_message_meta, is_visible_message_raw};
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_last_messages(
     count: usize,
     expected_conversation_id: Option<String>,
@@ -410,14 +437,17 @@ pub async fn delete_last_messages(
 
 /// End the current session: generate a summary from recent history, save it,
 /// then clear conversation history. The summary generation runs in background.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, specta::Type)]
 pub struct EndSessionRequest {
     pub api_key: String,
+    #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn end_session(
     request: EndSessionRequest,
     state: State<'_, AIOrchestrator>,

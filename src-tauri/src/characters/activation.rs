@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const COMMITTED_RUNTIME_TABLE: &str = "character_activation_runtime";
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct BackendRuntimeSnapshot {
     pub character_id: String,
     pub character_name: String,
@@ -24,16 +24,20 @@ pub struct BackendRuntimeSnapshot {
     pub system_prompt: String,
     pub response_language: String,
     pub proactive_enabled: bool,
+    #[serde(default)]
     pub current_conversation_id: Option<String>,
+    #[serde(default)]
     pub live2d_model: Option<PackageAssetReference>,
+    #[serde(default)]
     pub background: Option<PackageAssetReference>,
+    #[serde(default)]
     pub cue_profile: Option<PackageAssetReference>,
     pub tts: ResolvedTts,
 }
 
 pub type ResolvedCharacterRuntime = BackendRuntimeSnapshot;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum PackageAssetReference {
     Package {
@@ -46,7 +50,7 @@ pub enum PackageAssetReference {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedTtsMode {
     ConfiguredProvider,
@@ -56,20 +60,27 @@ pub enum ResolvedTtsMode {
     TextOnly,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct ResolvedTts {
     pub mode: ResolvedTtsMode,
+    #[serde(default)]
     pub provider_id: Option<String>,
+    #[serde(default)]
     pub provider_type: Option<String>,
+    #[serde(default)]
     pub local_preset: Option<String>,
+    #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub voice: Option<String>,
+    #[serde(default)]
     pub speed: Option<f64>,
+    #[serde(default)]
     pub pitch: Option<f64>,
     pub requires_save_confirmation: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct PromptPayload {
     pub character_name: String,
     pub user_name: String,
@@ -77,15 +88,17 @@ pub struct PromptPayload {
     pub example_dialogue: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct CapabilityRecommendations {
+    #[serde(default)]
     pub vision: Option<bool>,
+    #[serde(default)]
     pub memory: Option<bool>,
     pub mcp_servers: Vec<String>,
     pub bot_platforms: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum GreetingAction {
     None,
@@ -93,7 +106,7 @@ pub enum GreetingAction {
     Emit { content: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct CharacterActivationToken {
     pub revision: u64,
     pub nonce: String,
@@ -101,12 +114,13 @@ pub struct CharacterActivationToken {
     pub previous_committed: BackendRuntimeSnapshot,
     pub resolved_runtime: ResolvedCharacterRuntime,
     pub prompt: PromptPayload,
+    #[serde(default)]
     pub target_conversation_id: Option<String>,
     pub greeting_action: GreetingAction,
     pub recommendations: CapabilityRecommendations,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct CommittedCharacterRuntime {
     pub revision: u64,
     pub runtime: ResolvedCharacterRuntime,

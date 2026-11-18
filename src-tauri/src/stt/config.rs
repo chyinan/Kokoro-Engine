@@ -4,7 +4,7 @@ use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct SttProviderConfig {
     pub id: String,
     /// "openai_whisper", "whisper_cpp", "faster_whisper", "local_whisper", "sensevoice_local"
@@ -13,12 +13,16 @@ pub struct SttProviderConfig {
     pub enabled: bool,
 
     /// Direct API key (takes precedence over env var)
+    #[serde(default)]
     pub api_key: Option<String>,
     /// Environment variable name to read API key from
+    #[serde(default)]
     pub api_key_env: Option<String>,
     /// Base URL for the API
+    #[serde(default)]
     pub base_url: Option<String>,
     /// Model name (e.g., "whisper-1")
+    #[serde(default)]
     pub model: Option<String>,
 
     // ── sensevoice_local fields ────────────────────────
@@ -46,7 +50,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct SttConfig {
     /// ID of the active STT provider
     #[serde(default = "default_active_provider")]

@@ -87,6 +87,7 @@ impl AudioBuffer {
 
 /// Append a chunk of audio data (float32 PCM, 16kHz mono).
 #[tauri::command]
+#[specta::specta]
 pub async fn process_audio_chunk(
     state: State<'_, AudioBuffer>,
     chunk: Vec<f32>,
@@ -96,6 +97,7 @@ pub async fn process_audio_chunk(
 
 /// Finalize the stream and transcribe. Clears the buffer.
 #[tauri::command]
+#[specta::specta]
 pub async fn complete_audio_stream(
     app_handle: AppHandle,
     state: State<'_, AudioBuffer>,
@@ -118,6 +120,7 @@ pub async fn complete_audio_stream(
 /// Transcribe the current buffer WITHOUT clearing it.
 /// Useful for intermediate feedback (snapshot).
 #[tauri::command]
+#[specta::specta]
 pub async fn snapshot_audio_stream(
     app_handle: AppHandle,
     state: State<'_, AudioBuffer>,
@@ -136,6 +139,7 @@ pub async fn snapshot_audio_stream(
 /// Prune the audio buffer, keeping only the last `keep_seconds`.
 /// Useful for sliding window streaming (infinite stream).
 #[tauri::command]
+#[specta::specta]
 pub async fn prune_audio_buffer(
     state: State<'_, AudioBuffer>,
     keep_seconds: f32,
@@ -161,6 +165,7 @@ pub async fn prune_audio_buffer(
 
 /// Discard current buffer without transcribing.
 #[tauri::command]
+#[specta::specta]
 pub async fn discard_audio_stream(state: State<'_, AudioBuffer>) -> Result<(), String> {
     state.discard()
 }

@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CharacterRecord, VisionConfig, SttConfig, TtsSystemConfig, BotConfig } from "@/lib/kokoro-bridge";
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 import {
   saveVisionConfig,
   saveSttConfig,
@@ -47,6 +48,7 @@ const char1: CharacterRecord = {
   user_nickname: "User",
   persona: "Persona of Character One",
   source_format: "manual",
+  ...emptyCharacterDetails,
   created_at: 100,
   updated_at: 100,
 };
@@ -57,6 +59,7 @@ const char2: CharacterRecord = {
   user_nickname: "User",
   persona: "Persona of Character Two",
   source_format: "manual",
+  ...emptyCharacterDetails,
   created_at: 200,
   updated_at: 200,
 };

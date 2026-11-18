@@ -29,7 +29,7 @@ pub enum ModManifestError {
     InvalidCapability(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ModCapability {
     pub name: String,
     #[serde(default)]
@@ -38,7 +38,7 @@ pub struct ModCapability {
     pub requires_confirmation: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ModManifest {
     pub id: String,
     pub name: String,
@@ -74,7 +74,9 @@ pub struct ModManifest {
     pub capabilities: Vec<ModCapability>,
 
     // Legacy fields kept for transition — will be removed
+    #[serde(default)]
     pub entry: Option<String>,
+    #[serde(default)]
     pub ui_entry: Option<String>,
 }
 

@@ -13,6 +13,7 @@ use crate::characters::instance_resource::{
 };
 use crate::characters::{validate_package_content, PackageContentEntry};
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use crate::registry::client::verify_registry_entry_archive;
 use crate::registry::manifest::{RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_URL};
 use semver::Version;
@@ -84,7 +85,7 @@ pub(crate) const BACKUP_FORMAT_VERSION: &str = "2";
 
 // ── Types ────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
 pub struct BackupManifest {
     pub version: String,
     pub created_at: String,
@@ -93,7 +94,7 @@ pub struct BackupManifest {
     pub includes_character_resources: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, specta::Type)]
 pub struct ExportOptions {
     #[serde(default)]
     pub include_character_resources: bool,
@@ -318,7 +319,7 @@ pub struct BackupArchiveInspection {
     pub includes_provider_credentials: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, specta::Type)]
 pub struct BackupStats {
     pub memories: i64,
     pub conversations: i64,
@@ -326,7 +327,7 @@ pub struct BackupStats {
     pub configs: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct ExportResult {
     pub path: String,
     pub size_bytes: u64,
@@ -339,7 +340,7 @@ pub struct ExportResult {
 /// reuses a local id. The preview exposes them so the user can decide, per
 /// character, whether to import it as a new instance or merge its data into an
 /// existing one.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, specta::Type)]
 pub struct BackupCharacterSummary {
     pub id: String,
     pub name: String,
@@ -347,7 +348,7 @@ pub struct BackupCharacterSummary {
     pub conversation_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct ImportPreview {
     pub manifest: BackupManifest,
     pub has_database: bool,
@@ -359,7 +360,7 @@ pub struct ImportPreview {
 }
 
 /// Routes the rows of one imported character to a local character instance.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, specta::Type)]
 pub struct CharacterMerge {
     /// Character id as stored inside the backup.
     pub imported_id: String,
@@ -367,7 +368,7 @@ pub struct CharacterMerge {
     pub target_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 pub struct ImportOptions {
     pub import_database: bool,
     pub import_configs: bool,
@@ -382,7 +383,7 @@ pub struct ImportOptions {
     pub ignored_characters: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum ConflictStrategy {
     Skip,
@@ -398,7 +399,7 @@ impl ConflictStrategy {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct ImportResult {
     pub imported_memories: i64,
     pub imported_conversations: i64,
@@ -3380,12 +3381,13 @@ fn prepare_backup_config_for_install(
 // ── Commands ─────────────────────────────────────────
 
 #[tauri::command]
+#[specta::specta]
 pub async fn export_data(
     app: AppHandle,
     export_path: String,
     _characters_json: Option<String>,
     options: Option<ExportOptions>,
-) -> Result<ExportResult, KokoroError> {
+) -> Result<Response<ExportResult>, KokoroError> {
     let _database_operation_guard = acquire_database_operation_read_guard().await;
     let app_data = app_data_dir(&app)?;
     ensure_non_redirected_parent_chain(&app_data, &app_data)?;
@@ -3468,11 +3470,11 @@ pub async fn export_data(
         export_path, size_bytes, stats.memories, stats.conversations, stats.configs
     );
 
-    Ok(ExportResult {
+    Ok(Response(ExportResult {
         path: export_path,
         size_bytes,
         stats,
-    })
+    }))
 }
 
 /// 核心导出逻辑，供自动备份模块复用（不需要 AppHandle）
@@ -3551,7 +3553,8 @@ pub async fn export_data_to_path(
 }
 
 #[tauri::command]
-pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroError> {
+#[specta::specta]
+pub async fn preview_import(file_path: String) -> Result<Response<ImportPreview>, KokoroError> {
     let path = PathBuf::from(&file_path);
     let file = fs::File::open(&path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -3620,14 +3623,14 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
         )
     };
 
-    Ok(ImportPreview {
+    Ok(Response(ImportPreview {
         manifest,
         has_database,
         has_configs,
         config_files,
         stats,
         characters,
-    })
+    }))
 }
 
 /// List the character instances stored in a backup database, with the amount of
@@ -3682,11 +3685,12 @@ async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool, sqlx::Erro
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn import_data(
     app: AppHandle,
     file_path: String,
     options: ImportOptions,
-) -> Result<ImportResult, KokoroError> {
+) -> Result<Response<ImportResult>, KokoroError> {
     let _database_operation_guard = acquire_database_operation_write_guard().await;
     let app_data = app_data_dir(&app)?;
     let staged_configs = if options.import_configs {
@@ -4321,7 +4325,7 @@ pub async fn import_data(
         result.imported_memories, result.imported_conversations, result.imported_configs
     );
 
-    Ok(result)
+    Ok(Response(result))
 }
 
 #[cfg(test)]

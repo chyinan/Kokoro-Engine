@@ -2,9 +2,11 @@ use crate::actions::registry::ActionServices;
 use crate::ai::context::AIOrchestrator;
 use crate::bot::{BotChatServices, BotEvent};
 use crate::chat::application::{ChatDependencies, ChatService};
-use crate::chat::events::{ChatDesktop, ChatEvent, ChatEvents};
+use crate::chat::event_payloads::{ChatEventScope, ImageGenDone};
+use crate::chat::events::{ChatDesktop, ChatEvents};
 use crate::chat::runtime::ChatRuntimeState;
 use crate::imagegen::{ImageGenService, WindowSizeState};
+use crate::ipc::{events::{QqAuthorizationExpired, QqAuthorizationRequest, ShowMainWindow}, wire::{emit, validate_json}};
 use crate::live2d::Live2dStore;
 use crate::tts::{desktop::TauriTtsPlayback, TtsPlayback};
 use serde_json::Value;
@@ -37,12 +39,12 @@ impl TauriChatDesktop {
         let app = self.0.upgrade().ok_or("The desktop is closed")?;
         let result = match event {
             BotEvent::QqAuthorizationRequested(prompt) => {
-                let result = app.emit("qq-authorization-request", prompt);
-                let _ = app.emit("show-main-window", ());
+                let result = emit(&*app, QqAuthorizationRequest(prompt));
+                let _ = emit(&*app, ShowMainWindow);
                 result
             }
             BotEvent::QqAuthorizationExpired(prompt) => {
-                app.emit("qq-authorization-expired", prompt)
+                emit(&*app, QqAuthorizationExpired(prompt))
             }
             BotEvent::ImageGenerated {
                 result,
@@ -50,11 +52,16 @@ impl TauriChatDesktop {
                 conversation_id,
                 client_request_id,
             } => {
-                let mut payload = serde_json::to_value(result).unwrap_or_default();
-                payload["character_id"] = character_id.into();
-                payload["conversation_id"] = conversation_id.into();
-                payload["client_request_id"] = client_request_id.into();
-                app.emit("imagegen:done", payload)
+                emit(&*app, ImageGenDone {
+                    result,
+                    scope: ChatEventScope {
+                        character_id: Some(character_id),
+                        conversation_id: Some(Some(conversation_id)),
+                        client_request_id: Some(Some(client_request_id)),
+                        ..Default::default()
+                    },
+                    turn_id: None,
+                })
             }
         };
         result.map_err(|error| error.to_string())
@@ -62,11 +69,12 @@ impl TauriChatDesktop {
 }
 
 impl ChatDesktop for TauriChatDesktop {
-    fn emit(&self, event: ChatEvent, payload: Value) -> Result<(), String> {
+    fn emit(&self, name: &'static str, payload: Value) -> Result<(), String> {
         let Some(app) = self.0.upgrade() else {
             return Ok(());
         };
-        app.emit(event.name(), payload)
+        validate_json(&payload)?;
+        app.emit(name, payload)
             .map_err(|error| error.to_string())
     }
 

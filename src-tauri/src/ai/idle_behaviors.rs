@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 #[serde(tag = "type", content = "params")]
 pub enum IdleBehavior {
     #[serde(rename = "look_around")]

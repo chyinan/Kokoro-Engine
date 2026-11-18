@@ -69,7 +69,7 @@ export function MemoryTimeline({ memories, onSelect }: MemoryTimelineProps) {
                                 {/* Connector dot */}
                                 <div className={clsx(
                                     "absolute -left-[1.6rem] top-4 w-2.5 h-2.5 rounded-full border-2 border-slate-900 transition-all shadow-lg",
-                                    importanceColor(mem.importance)
+                                    importanceColor(mem.importance ?? 0)
                                 )} />
 
                                 {/* Content */}
@@ -77,7 +77,7 @@ export function MemoryTimeline({ memories, onSelect }: MemoryTimelineProps) {
                                     <p className="text-sm text-slate-200 line-clamp-3 leading-relaxed">
                                         {stripStructuredMemoryPrefix(mem.content)}
                                     </p>
-                                    {mem.importance >= 8 && (
+                                    {(mem.importance ?? 0) >= 8 && (
                                         <Star size={12} className="text-amber-500 fill-amber-500/20 shrink-0 mt-1" />
                                     )}
                                 </div>

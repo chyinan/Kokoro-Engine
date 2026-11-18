@@ -17,7 +17,7 @@ vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => k
 
 it("shows a transient backend warning without replacing the completed text reply", async () => {
     chat.reset();
-    chat.set({ messages: [{ id: 1, role: "assistant", content: "Completed answer", created_at: "now" }] });
+    chat.set({ messages: [{ metadata: null, id: 1, role: "assistant", content: "Completed answer", created_at: "now" }] });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -52,7 +52,7 @@ it("shows a transient backend warning without replacing the completed text reply
 
 it("restores a speech failure on its saved reply after reopening and never recreates a removed reply", async () => {
     chat.reset();
-    const message = { id: 2, role: "assistant", content: "Completed answer", created_at: "now" };
+    const message = { metadata: null, id: 2, role: "assistant", content: "Completed answer", created_at: "now" };
     const completed = {
         ...turn("speech", 2, "completed"), character_id: "char-1", conversation_id: "conv-1",
         assistant_message_id: message.id, completion_revision: 2,
@@ -94,7 +94,7 @@ it("restores an unfinished reply and offers its storage retry without a saved di
         user_message_id: 1, assistant_message_id: null, error: "Could not save chat messages",
         error_code: "CHAT_PERSISTENCE_ERROR", persistence_retryable: true, text: "Partial reply",
     };
-    const prompt = { id: 1, role: "user", content: "Prompt", created_at: "now" };
+    const prompt = { metadata: null, id: 1, role: "user", content: "Prompt", created_at: "now" };
     chat.set({ revision: 3, messages: [prompt], turns: [failed] });
     const container = document.createElement("div");
     document.body.append(container);
@@ -181,7 +181,7 @@ it.each([null, "conv-1"])("recovers a hidden reply through the save button in %s
 
 it("shows the legacy Mod failure once across the journal and history, scoped to its conversation and character", async () => {
     chat.reset();
-    const prompt = { id: 1, role: "user", content: "Mod prompt", created_at: "now" };
+    const prompt = { metadata: null, id: 1, role: "user", content: "Mod prompt", created_at: "now" };
     const failed = {
         ...turn("mod_connection", 3, "error"), character_id: "char-1", conversation_id: "conv-1",
         user_message_id: prompt.id, error: "Model connection failed", completion_revision: 3,
@@ -236,7 +236,7 @@ it.each([false, true])("announces a composer failure once when history arrives f
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const prompt = { id: 1, role: "user", content: "Prompt that failed", created_at: "now" };
+    const prompt = { metadata: null, id: 1, role: "user", content: "Prompt that failed", created_at: "now" };
     const alertNodes = () => [...container.querySelectorAll('[role="alert"]')];
     try {
         await act(async () => root.render(<ChatPanel />));
@@ -301,7 +301,7 @@ it.each(["other conversation", "same conversation reselected"])("discards a late
 
 it("dismisses the old editor when another conversation replaces a message at the same position", async () => {
     chat.reset();
-    const first = { id: 101, role: "user", content: "Message A", created_at: "now" };
+    const first = { metadata: null, id: 101, role: "user", content: "Message A", created_at: "now" };
     const second = { ...first, id: 201, content: "Message B" };
     chat.set({ messages: [first] });
     const container = document.createElement("div");
@@ -354,9 +354,9 @@ it.each(["native", "text"])("keeps %s tool details open through the streaming dr
     chat.reset();
     const snapshot = {
         ...turn("search", 2), character_id: "char-1", conversation_id: "conv-1",
-        tools: [{ turn_id: "turn_search", tool: "search", result: { message: "found result" }, tool_trace_id: "0:0" }],
+        tools: [{ turn_id: "turn_search", tool: "search", result: { success: true, message: "found result" }, tool_trace_id: "0:0" }],
     };
-    const user = { id: 1, role: "user", content: "question", created_at: "now" };
+    const user = { metadata: null, id: 1, role: "user", content: "question", created_at: "now" };
     chat.set({ revision: 2, busy: true, messages: [user], turns: [snapshot] });
     const completed = { ...snapshot, revision: 3, status: "completed" as const, assistant_message_id: 3 };
     const container = document.createElement("div");
@@ -411,10 +411,10 @@ it.each(["native", "text"])("keeps %s tool details open through the streaming dr
 
 it("keeps a text-mode tool-only reply expanded after history catches up", async () => {
     chat.reset();
-    const user = { id: 1, role: "user", content: "question", created_at: "now" };
+    const user = { metadata: null, id: 1, role: "user", content: "question", created_at: "now" };
     const streaming = {
         ...turn("tool-only", 2), character_id: "char-1", conversation_id: "conv-1", text: "",
-        tools: [{ turn_id: "turn_tool-only", tool: "lookup", result: { message: "Tool-only result" }, tool_trace_id: "0:0" }],
+        tools: [{ turn_id: "turn_tool-only", tool: "lookup", result: { success: true, message: "Tool-only result" }, tool_trace_id: "0:0" }],
     };
     chat.set({ revision: 2, busy: true, messages: [user], turns: [streaming] });
     const container = document.createElement("div");
@@ -440,7 +440,7 @@ it("keeps a text-mode tool-only reply expanded after history catches up", async 
         expect(details()[0]).toBe(toggle);
         expect(container.textContent).toContain("Tool-only result");
 
-        const next = { id: 2, role: "user", content: "Next question", created_at: "now" };
+        const next = { metadata: null, id: 2, role: "user", content: "Next question", created_at: "now" };
         await act(async () => chat.set({ messages: [user, next] }));
         expect(details()).toHaveLength(1);
         expect(details()[0]).toBe(toggle);
@@ -474,7 +474,7 @@ it("keeps approved tool details expanded when the first hidden turn creates its 
         await act(async () => toggle.click());
         expect(container.textContent).toContain("Waiting for approval");
 
-        const approved = { ...request, approval_status: "approved" as const, error: undefined, deny_kind: undefined, result: { message: "Approved tool result" } };
+        const approved = { ...request, approval_status: "approved" as const, error: undefined, deny_kind: undefined, result: { success: true, message: "Approved tool result" } };
         const resolved = { ...pending, revision: 3, tools: [request, approved] };
         await act(async () => chat.set({ turns: [resolved] }));
         expect(container.textContent).toContain("Approved tool result");

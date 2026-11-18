@@ -997,7 +997,8 @@ pub(super) async fn verify_admission_selection_generation(
             let before = provider.prompts.lock().unwrap().len();
             let response = retry_chat_persistence(app.clone(), request_id.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .0;
             assert_eq!(provider.prompts.lock().unwrap().len(), before);
             response
         } else {

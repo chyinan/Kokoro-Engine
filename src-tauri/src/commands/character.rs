@@ -1,11 +1,13 @@
 use super::live2d::legacy_app_data_dir;
 use crate::ai::context::AIOrchestrator;
+use crate::chat::event_payloads::CueEvent;
 use crate::error::KokoroError;
+use crate::ipc::wire::emit;
 use crate::live2d::Live2dStore;
 use serde::Serialize;
-use tauri::{Emitter, State};
+use tauri::State;
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct CharacterState {
     pub name: String,
     pub current_cue: String,
@@ -13,7 +15,7 @@ pub struct CharacterState {
     pub is_speaking: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct ChatResponse {
     pub text: String,
     pub cue: String,
@@ -34,6 +36,7 @@ fn resolve_default_cue() -> String {
 
 /// Returns the current character state for Live2D sync.
 #[tauri::command]
+#[specta::specta]
 pub async fn get_character_state(
     state: State<'_, AIOrchestrator>,
 ) -> Result<CharacterState, KokoroError> {
@@ -48,6 +51,7 @@ pub async fn get_character_state(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn play_cue(
     app: tauri::AppHandle,
     state: State<'_, AIOrchestrator>,
@@ -82,12 +86,9 @@ pub async fn play_cue(
         )));
     }
 
-    let _ = app.emit(
-        "chat-cue",
-        serde_json::json!({
-            "cue": trimmed,
-            "source": "manual",
-        }),
+    let _ = emit(
+        &app,
+        CueEvent { cue: trimmed.into(), source: Some("manual".into()), ..Default::default() },
     );
 
     let name = state.get_character_id().await;
@@ -102,6 +103,7 @@ pub async fn play_cue(
 /// Legacy command kept for compatibility.
 /// Real chat flow must use `stream_chat`.
 #[tauri::command]
+#[specta::specta]
 pub async fn send_message(message: String) -> Result<ChatResponse, KokoroError> {
     if message.trim().is_empty() {
         return Err(KokoroError::Validation(

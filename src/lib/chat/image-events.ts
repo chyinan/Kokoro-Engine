@@ -1,4 +1,4 @@
-import type { ChatImageGenEvent, ChatViewSnapshot, ImageGenResult } from "../kokoro-bridge";
+import type { ChatImageGenEvent, ChatViewSnapshot, ImageGenDone, ImageGenResult } from "../kokoro-bridge";
 import { chatEventMatchesView } from "./projection";
 
 interface ImageEventDependencies {
@@ -12,7 +12,7 @@ interface ImageEventDependencies {
 /** Used by App's real listeners; recheck ownership after asynchronous generation. */
 export function createImageEventHandlers(deps: ImageEventDependencies) {
   return {
-    onImageDone(result: ImageGenResult): void {
+    onImageDone(result: ImageGenDone): void {
       if (chatEventMatchesView(deps.getView(), result)) deps.showImage(result);
     },
     async onBackgroundRequested(event: ChatImageGenEvent): Promise<void> {

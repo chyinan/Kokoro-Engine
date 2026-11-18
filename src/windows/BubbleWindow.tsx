@@ -1,5 +1,5 @@
+import { events } from "@/lib/generated/ipc";
 import { useState, useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 
 function LoadingDots() {
@@ -22,7 +22,7 @@ export default function BubbleWindow() {
     const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        const unlisten = listen<string>("bubble-text-update", (event) => {
+        const unlisten = events.bubbleTextUpdate.listen((event) => {
             setText(event.payload);
             setVisible(true);
         });

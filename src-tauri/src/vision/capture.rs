@@ -17,7 +17,7 @@ pub struct CapturedImage {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct ScreenInfo {
     pub display_id: String,
     pub label: String,

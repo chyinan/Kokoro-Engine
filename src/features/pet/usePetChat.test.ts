@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { chatReply } from "../../lib/chat/__tests__/wire-fixtures";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +20,7 @@ describe("pet chat display adapter", () => {
  let root: Root, container: HTMLDivElement, state: PetChatState;
  function Harness() { state = usePetChat(); return null; }
  beforeEach(async () => {
-  vi.clearAllMocks(); chat.reset(); chat.send.mockResolvedValue({ status: "completed", conversation_id: "conv-1", text: "reply" });
+  vi.clearAllMocks(); chat.reset(); chat.send.mockResolvedValue(chatReply({ status: "completed", conversation_id: "conv-1", text: "reply" }));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   await act(async () => root.render(createElement(Harness)));
  });
@@ -27,7 +28,7 @@ describe("pet chat display adapter", () => {
  it("submits directly without ChatPanel or an acceptance handshake", async () => {
   await act(async () => state.sendMessage("  hello  "));
   expect(chat.send).toHaveBeenCalledWith({ message: "  hello  ", client_request_id: expect.stringMatching(/^pet_/), character_id: "char-1", conversation_id: "conv-1", conversation_generation: 1 });
-  expect(invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("stream_chat", expect.anything(), undefined);
  });
  it("coalesces duplicate clicks while the same user intent is in flight", async () => {
   let done!: (value: any) => void; chat.send.mockImplementationOnce(() => new Promise(resolve => { done = resolve; }));
@@ -40,16 +41,16 @@ describe("pet chat display adapter", () => {
   vi.mocked(invoke).mockClear();
   root = createRoot(container);
   await act(async () => root.render(createElement(Harness)));
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" }, undefined);
   expect(state.isStreaming).toBe(true);
   await act(async () => chat.set({ turns: [{ ...snapshot("streaming", 3), text: "intermediate recovered text" }] }));
-  expect(invoke).toHaveBeenLastCalledWith("update_bubble_text", { text: "intermediate recovered text" });
+  expect(invoke).toHaveBeenLastCalledWith("update_bubble_text", { text: "intermediate recovered text" }, undefined);
   expect(state.isStreaming).toBe(true);
   await act(async () => chat.set({ turns: [{ ...snapshot("completed", 4), text: "final recovered text" }], busy: false }));
   expect(vi.mocked(invoke).mock.calls).toEqual([
-   ["show_bubble_window", { text: "complete recovered text" }],
-   ["update_bubble_text", { text: "intermediate recovered text" }],
-   ["update_bubble_text", { text: "final recovered text" }],
+   ["show_bubble_window", { text: "complete recovered text" }, undefined],
+   ["update_bubble_text", { text: "intermediate recovered text" }, undefined],
+   ["update_bubble_text", { text: "final recovered text" }, undefined],
   ]);
  });
  it("keeps the submitted reply selected when the first history read appends older pet turns", async () => {
@@ -61,21 +62,21 @@ describe("pet chat display adapter", () => {
   const pending = { ...snapshot("pending", 0), client_request_id: id, text: "" };
   const old = { ...snapshot("completed", 5), text: "old reply" };
   await act(async () => chat.set({ turns: [pending, old], busy: true }));
-  expect(invoke).not.toHaveBeenCalledWith("update_bubble_text", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("update_bubble_text", expect.anything(), undefined);
   await act(async () => chat.set({ turns: [{ ...pending, status: "streaming", revision: 6, text: "new" }, old] }));
   await act(async () => {
    chat.set({ turns: [{ ...pending, status: "completed", revision: 7, text: "new reply" }, old], busy: false });
-   response.resolve({ conversation_id: "conv-1", status: "completed" });
+   response.resolve(chatReply({ conversation_id: "conv-1", status: "completed" }));
    await sending;
   });
   expect(vi.mocked(invoke).mock.calls.filter(([name]) => name === "update_bubble_text")).toEqual([
-   ["update_bubble_text", { text: "new" }], ["update_bubble_text", { text: "new reply" }],
+   ["update_bubble_text", { text: "new" }, undefined], ["update_bubble_text", { text: "new reply" }, undefined],
   ]);
  });
  it("does not concatenate replayed full snapshots", async () => {
   await act(async () => chat.set({ turns: [snapshot()] }));
   await act(async () => chat.set({ turns: [snapshot()] }));
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" }, undefined);
  });
  it("a late speech failure does not replay the reply or restart its hide timer", async () => {
   vi.useFakeTimers();
@@ -86,7 +87,7 @@ describe("pet chat display adapter", () => {
   await act(async () => chat.set({ turns: [{ ...completed, revision: 4, speech_error: "Speech failed" }] }));
   expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
   await act(async () => vi.advanceTimersByTimeAsync(1000));
-  expect(invoke).toHaveBeenCalledWith("hide_bubble_window");
+  expect(invoke).toHaveBeenCalledWith("hide_bubble_window", undefined, undefined);
  });
  it("does not present another entry's reply as a pet request", async () => {
   await act(async () => chat.set({ turns: [{ ...snapshot(), client_request_id: "interaction_a" }] }));
@@ -102,7 +103,7 @@ describe("pet chat display adapter", () => {
   await act(async () => chat.set({ turns: [snapshot()], busy: true }));
   await act(async () => chat.set({ turns: [snapshot("completed", 3)], busy: false }));
   await act(async () => vi.advanceTimersByTimeAsync(5000));
-  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window", undefined, undefined);
   act(() => root.unmount());
   vi.mocked(invoke).mockClear();
   root = createRoot(container);
@@ -117,10 +118,10 @@ describe("pet chat display adapter", () => {
   await act(async () => chat.set({ turns: [old], busy: true }));
   vi.mocked(invoke).mockClear();
   await act(async () => chat.set({ character_id: "char-2" }));
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("hide_bubble_window");
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("hide_bubble_window", undefined, undefined);
   const current = { ...snapshot("streaming", 3), character_id: "char-2", client_request_id: "pet_b", text: "new character reply" };
   await act(async () => chat.set({ turns: [old, current] }));
-  expect(invoke).toHaveBeenLastCalledWith("show_bubble_window", { text: "new character reply" });
+  expect(invoke).toHaveBeenLastCalledWith("show_bubble_window", { text: "new character reply" }, undefined);
   await act(async () => chat.set({ turns: [{ ...old, revision: 5, text: "late foreign text" }, current] }));
   expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
  });
@@ -153,7 +154,7 @@ describe("pet chat display adapter", () => {
   await act(async () => { response.reject(new Error("old character failure")); await sending; });
   expect(invoke).not.toHaveBeenCalled();
   await act(async () => chat.set({ turns: [{ ...snapshot(), character_id: "char-2" }] }));
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("show_bubble_window", { text: "complete recovered text" }, undefined);
  });
  it("unmount does not cancel an in-flight business request", async () => {
   await act(async () => chat.set({ turns: [snapshot()], busy: true }));
@@ -164,7 +165,7 @@ describe("pet chat display adapter", () => {
  it("displays authoritative busy rejection and permits a subsequent send", async () => {
   chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
   await act(async () => state.sendMessage("one"));
-  expect(invoke).toHaveBeenCalledWith("show_bubble_window", { text: "chat_turn_busy" });
+  expect(invoke).toHaveBeenCalledWith("show_bubble_window", { text: "chat_turn_busy" }, undefined);
   await act(async () => state.sendMessage("two")); expect(chat.send).toHaveBeenCalledTimes(2);
  });
  it("ignores empty input", async () => { await state.sendMessage("  "); expect(chat.send).not.toHaveBeenCalled(); });
@@ -190,9 +191,9 @@ describe("pet chat display adapter", () => {
   vi.useFakeTimers(); chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
   await act(async () => state.sendMessage("one"));
   await act(async () => vi.advanceTimersByTimeAsync(4999));
-  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window", undefined, undefined);
   await act(async () => vi.advanceTimersByTimeAsync(1));
-  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window", undefined, undefined);
  });
  it("an old error timer cannot hide a subsequent pending request", async () => {
   vi.useFakeTimers(); chat.send.mockRejectedValueOnce(new Error("chat_turn_busy"));
@@ -202,16 +203,16 @@ describe("pet chat display adapter", () => {
   let sending!: Promise<void>;
   await act(async () => { sending = state.sendMessage("two"); });
   await act(async () => vi.advanceTimersByTimeAsync(2000));
-  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window", undefined, undefined);
   await act(async () => { response.reject(new Error("second failure")); await sending; });
   await act(async () => vi.advanceTimersByTimeAsync(4999));
-  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window");
+  expect(invoke).not.toHaveBeenCalledWith("hide_bubble_window", undefined, undefined);
   await act(async () => vi.advanceTimersByTimeAsync(1));
-  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window");
+  expect(invoke).toHaveBeenLastCalledWith("hide_bubble_window", undefined, undefined);
  });
  it("preserves structured backend rejection text in the bubble", async () => {
   chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: active request" });
   await act(async () => state.sendMessage("one"));
-  expect(invoke).toHaveBeenCalledWith("show_bubble_window", { text: "chat_turn_busy: active request" });
+  expect(invoke).toHaveBeenCalledWith("show_bubble_window", { text: "chat_turn_busy: active request" }, undefined);
  });
 });

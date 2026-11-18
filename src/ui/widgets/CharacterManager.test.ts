@@ -1,3 +1,4 @@
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 import { describe, expect, it } from "vitest";
 import {
     RESPONSE_LANGUAGE_PRESETS,
@@ -37,6 +38,7 @@ describe("character language presets", () => {
 
 describe("character dirty checking", () => {
     const baseCharacter: CharacterRecord = {
+        ...emptyCharacterDetails,
         id: "char-1",
         name: "Kokoro",
         user_nickname: "User",
@@ -71,6 +73,7 @@ describe("character dirty checking", () => {
 
 describe("character draft management and lifecycle semantics", () => {
     const charA: CharacterRecord = {
+        ...emptyCharacterDetails,
         id: "char-a",
         name: "Character A",
         user_nickname: "User",
@@ -82,6 +85,7 @@ describe("character draft management and lifecycle semantics", () => {
     };
 
     const charB: CharacterRecord = {
+        ...emptyCharacterDetails,
         id: "char-b",
         name: "Character B",
         user_nickname: "User",

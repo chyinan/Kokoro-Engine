@@ -7,10 +7,12 @@ use crate::chat::application::{
 use crate::chat::events::ChatEvents;
 use crate::chat::settings::ContextSettings;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use std::sync::Arc;
 use tauri::{command, Manager, State};
 
 #[command]
+#[specta::specta]
 pub async fn approve_tool_approval(
     approval_request_id: String,
     approval_state: State<'_, Arc<PendingToolApprovalState>>,
@@ -19,6 +21,7 @@ pub async fn approve_tool_approval(
 }
 
 #[command]
+#[specta::specta]
 pub async fn reject_tool_approval(
     approval_request_id: String,
     reason: Option<String>,
@@ -28,6 +31,7 @@ pub async fn reject_tool_approval(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn cancel_chat_turn(
     turn_id: String,
     reason: Option<String>,
@@ -48,18 +52,21 @@ pub async fn cancel_chat_turn(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn is_chat_busy(state: State<'_, AIOrchestrator>) -> bool {
     state.is_chat_busy()
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_context_settings(
     state: State<'_, AIOrchestrator>,
-) -> Result<ContextSettings, KokoroError> {
-    Ok(ContextSettings::current(&state).await)
+) -> Result<Response<ContextSettings>, KokoroError> {
+    Ok(Response(ContextSettings::current(&state).await))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_context_settings(
     state: State<'_, AIOrchestrator>,
     settings: ContextSettings,
@@ -75,6 +82,7 @@ pub async fn set_context_settings(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub(crate) fn finish_chat_playback(
     window: tauri::Window,
     request_id: String,
@@ -85,54 +93,63 @@ pub(crate) fn finish_chat_playback(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_chat_runtime_snapshot(
     state: State<'_, AIOrchestrator>,
     runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
-) -> Result<Vec<crate::chat::runtime::ChatTurnSnapshot>, KokoroError> {
+) -> Result<Response<Vec<crate::chat::runtime::ChatTurnSnapshot>>, KokoroError> {
     let (conversation, _) = state.conversation_state_snapshot().await;
-    Ok(runtime.desktop_snapshots(conversation.as_deref()).1)
+    Ok(Response(runtime.desktop_snapshots(conversation.as_deref()).1))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_chat_view(
     state: State<'_, AIOrchestrator>,
     runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
     known_version: Option<crate::chat::runtime::ChatViewVersion>,
-) -> Result<Option<crate::chat::runtime::ChatViewSnapshot>, KokoroError> {
+) -> Result<Response<Option<crate::chat::runtime::ChatViewSnapshot>>, KokoroError> {
     crate::chat::runtime::get_chat_view(&state, &runtime, known_version).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn recover_chat_draft_submission(
     state: State<'_, AIOrchestrator>,
     runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
     character_id: String,
     client_request_id: String,
-) -> Result<ChatDraftSubmissionStatus, KokoroError> {
+) -> Result<Response<ChatDraftSubmissionStatus>, KokoroError> {
     recover_chat_draft_submission_inner(&state.db, &runtime, &character_id, &client_request_id)
         .await
+        .map(Response)
 }
 
 /// The IPC future only waits on the application task; dropping a WebView cannot
 /// drop execution. Every producer enters this same idempotent admission path.
 #[tauri::command]
+#[specta::specta]
 pub async fn stream_chat(
     app: tauri::AppHandle,
     request: ChatRequest,
-) -> Result<StreamChatResponse, KokoroError> {
+) -> Result<Response<StreamChatResponse>, KokoroError> {
     let chat = app
         .try_state::<ChatService>()
         .ok_or_else(|| KokoroError::Chat("AI is not available".into()))?;
     chat.submit(request, ChatPolicy::Desktop).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn retry_chat_persistence(
     app: tauri::AppHandle,
     client_request_id: String,
-) -> Result<StreamChatResponse, KokoroError> {
+) -> Result<Response<StreamChatResponse>, KokoroError> {
     let chat = app
         .try_state::<ChatService>()
         .ok_or_else(|| KokoroError::Chat("AI is not available".into()))?;
     chat.retry_chat_persistence(client_request_id).await
+        .map(Response)
 }

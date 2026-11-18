@@ -14,7 +14,14 @@ vi.mock("@tauri-apps/api/event", () => ({
     fakes.handlers.set(name, callback); return () => { fakes.handlers.delete(name); };
   }), emit: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ label: "main" }) }));
+vi.mock("@tauri-apps/api/window", async () => {
+  const { listen } = await import("@tauri-apps/api/event");
+  return { getCurrentWindow: () => ({
+    label: "main",
+    listen: (name: string, callback: Parameters<typeof listen>[1]) =>
+      listen(name, callback, { target: { kind: "Window", label: "main" } }),
+  }) };
+});
 vi.mock("../services", () => ({ get audioPlayer() { return fakes.player; } }));
 vi.mock("../../lib/kokoro-bridge", () => ({
   cancelTts: fakes.cancelTts, finishChatPlayback: fakes.finishChatPlayback,

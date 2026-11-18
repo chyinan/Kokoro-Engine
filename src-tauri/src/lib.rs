@@ -12,6 +12,7 @@ mod desktop_heartbeat;
 pub mod error;
 pub mod hooks;
 pub mod imagegen;
+pub mod ipc;
 pub mod live2d;
 pub mod llm;
 pub mod mcp;
@@ -80,6 +81,7 @@ pub fn run() {
         }
     }
 
+    let ipc = ipc::builder();
     let desktop_owner = Arc::new(std::sync::Mutex::new(None));
     let setup_desktop_owner = desktop_owner.clone();
     tauri::Builder::default()
@@ -96,195 +98,7 @@ pub fn run() {
             "character-instance-resource",
             commands::live2d_protocol::handle_character_instance_resource_request(),
         )
-        .invoke_handler(tauri::generate_handler![
-            commands::system::get_engine_info,
-            commands::system::check_latest_release,
-            commands::system::get_system_status,
-            commands::system::set_window_size,
-            commands::character::get_character_state,
-            commands::character::play_cue,
-            commands::character::send_message,
-            commands::database::init_db,
-            commands::database::test_vector_store,
-            commands::chat::stream_chat,
-            commands::chat::retry_chat_persistence,
-            commands::chat::get_chat_runtime_snapshot,
-            commands::chat::get_chat_view,
-            commands::chat::recover_chat_draft_submission,
-            commands::chat::finish_chat_playback,
-            commands::chat::get_context_settings,
-            commands::chat::set_context_settings,
-            commands::chat::approve_tool_approval,
-            commands::chat::reject_tool_approval,
-            commands::chat::cancel_chat_turn,
-            commands::chat::is_chat_busy,
-            commands::context::set_persona,
-            commands::context::set_character_name,
-            commands::context::set_active_character_id,
-            commands::context::get_user_profile_settings,
-            commands::context::set_user_name,
-            commands::context::set_user_persona,
-            commands::context::set_response_language,
-            commands::context::set_user_language,
-            commands::context::set_jailbreak_prompt,
-            commands::context::get_jailbreak_prompt,
-            commands::context::set_proactive_enabled,
-            commands::context::get_proactive_enabled,
-            commands::context::set_memory_enabled,
-            commands::context::get_memory_enabled,
-            commands::context::set_memory_upgrade_config,
-            commands::context::get_memory_upgrade_config,
-            commands::context::get_memory_observability_summary,
-            commands::context::get_latest_memory_write_event,
-            commands::context::get_latest_memory_retrieval_log,
-            commands::context::get_latest_memory_retrieval_eval_summary,
-            commands::context::clear_history,
-            commands::context::delete_last_messages,
-            commands::context::end_session,
-            commands::tts::synthesize,
-            commands::tts::cancel_tts,
-            commands::tts::list_tts_providers,
-            commands::tts::list_tts_voices,
-            commands::tts::list_openai_tts_models,
-            commands::tts::get_tts_provider_status,
-            commands::tts::clear_tts_cache,
-            commands::tts::get_tts_config,
-            commands::tts::save_tts_config,
-            commands::tts::list_gpt_sovits_models,
-            commands::mods::list_mods,
-            commands::mods::load_mod,
-            commands::mods::install_mod,
-            commands::mods::update_mod,
-            commands::mods::install_mod_from_registry,
-            commands::mods::remove_mod,
-            commands::mods::install_mod_from_url,
-            commands::mods::get_mod_theme,
-            commands::mods::get_mod_layout,
-            commands::mods::dispatch_mod_event,
-            commands::mods::unload_mod,
-            commands::live2d::import_live2d_zip,
-            commands::live2d::import_live2d_folder,
-            commands::live2d::export_live2d_model,
-            commands::live2d::list_live2d_models,
-            commands::live2d::delete_live2d_model,
-            commands::live2d::rename_live2d_model,
-            commands::live2d::get_live2d_model_profile,
-            commands::live2d::save_live2d_model_profile,
-            commands::live2d::set_active_live2d_model,
-            commands::imagegen::generate_image,
-            commands::imagegen::get_imagegen_config,
-            commands::imagegen::save_imagegen_config,
-            commands::imagegen::test_sd_connection,
-            commands::vision::upload_vision_image,
-            commands::vision::get_vision_config,
-            commands::vision::list_vision_screens,
-            commands::vision::save_vision_config,
-            commands::vision::start_vision_watcher,
-            commands::vision::stop_vision_watcher,
-            commands::vision::set_vision_text_input_focused,
-            commands::vision::capture_screen_now,
-            commands::memory::list_memories,
-            commands::memory::update_memory,
-            commands::memory::delete_memory,
-            commands::memory::update_memory_tier,
-            commands::memory::run_dream_now,
-            commands::memory::get_dreaming_summary,
-            commands::memory::list_dream_jobs,
-            commands::memory::list_dream_proposals,
-            commands::memory::approve_dream_proposal,
-            commands::memory::reject_dream_proposal,
-            commands::memory::get_memory_embedding_model_status,
-            commands::memory::download_memory_embedding_model,
-            commands::characters::list_characters,
-            commands::characters::create_character,
-            commands::characters::create_character_with_avatar,
-            commands::characters::update_character_with_avatar,
-            commands::characters::update_character,
-            commands::characters::delete_character,
-            commands::characters::duplicate_character,
-            commands::characters::restore_character_defaults,
-            commands::characters::list_character_templates,
-            commands::characters::instantiate_character_template,
-            commands::characters::reconcile_character_template,
-            commands::characters::apply_character_template_reconciliation,
-            commands::characters::prepare_character_activation,
-            commands::characters::commit_character_activation,
-            commands::characters::get_committed_character_runtime,
-            commands::registry::list_registry_entries,
-            commands::registry::install_character_from_registry,
-            commands::registry::install_character_from_url,
-            commands::registry::remove_character_package,
-            commands::conversation::list_conversations,
-            commands::conversation::load_conversation,
-            commands::conversation::delete_conversation,
-            commands::conversation::create_conversation,
-            commands::conversation::rename_conversation,
-            commands::conversation::update_conversation_state,
-            commands::conversation::edit_conversation_message,
-            commands::conversation::list_character_ids,
-            commands::llm::get_llm_config,
-            commands::llm::save_llm_config,
-            commands::llm::test_llm_connection,
-            commands::llm::list_ollama_models,
-            commands::llm::list_anthropic_models,
-            commands::llm::get_llama_cpp_status,
-            commands::llm::get_codex_runtime_status,
-            commands::llm::list_codex_runtime_models,
-            commands::stt::transcribe_audio,
-            commands::stt::get_stt_config,
-            commands::stt::save_stt_config,
-            commands::stt::transcribe_wake_word_audio,
-            commands::stt::start_native_mic,
-            commands::stt::stop_native_mic,
-            commands::stt::start_native_wake_word,
-            commands::stt::stop_native_wake_word,
-            commands::stt::get_sensevoice_local_status,
-            commands::stt::download_sensevoice_local_model,
-            commands::actions::list_actions,
-            commands::actions::list_builtin_tools,
-            commands::actions::execute_action,
-            commands::tool_settings::get_tool_settings,
-            commands::tool_settings::save_tool_settings,
-            commands::mcp::list_mcp_servers,
-            commands::mcp::add_mcp_server,
-            commands::mcp::remove_mcp_server,
-            commands::mcp::refresh_mcp_tools,
-            commands::mcp::reconnect_mcp_server,
-            commands::mcp::toggle_mcp_server,
-            commands::bot::get_bot_config,
-            commands::bot::save_bot_config,
-            commands::bot::respond_qq_authorization,
-            commands::bot::start_bot_platform,
-            commands::bot::stop_bot_platform,
-            commands::bot::get_bot_status,
-            commands::telegram::get_telegram_config,
-            commands::telegram::save_telegram_config,
-            commands::telegram::start_telegram_bot,
-            commands::telegram::stop_telegram_bot,
-            commands::telegram::get_telegram_status,
-            commands::backup::export_data,
-            commands::backup::preview_import,
-            commands::backup::import_data,
-            commands::auto_backup::get_auto_backup_config,
-            commands::auto_backup::save_auto_backup_config,
-            commands::auto_backup::run_auto_backup_now,
-            commands::pet::show_pet_window,
-            commands::pet::hide_pet_window,
-            commands::pet::toggle_pet_window,
-            commands::pet::set_pet_drag_mode,
-            commands::pet::get_pet_config,
-            commands::pet::save_pet_config,
-            commands::pet::move_pet_window,
-            commands::pet::resize_pet_window,
-            commands::pet::show_bubble_window,
-            commands::pet::update_bubble_text,
-            commands::pet::hide_bubble_window,
-            stt::stream::process_audio_chunk,
-            stt::stream::complete_audio_stream,
-            stt::stream::discard_audio_stream,
-            stt::stream::snapshot_audio_stream,
-            stt::stream::prune_audio_buffer,
-        ])
+        .invoke_handler(ipc::invoke_handler(&ipc))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if window.label() == "main" {
@@ -315,6 +129,7 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            ipc.mount_events(app);
             let host = Arc::new(app.handle().clone());
             let desktop = desktop_chat::TauriChatDesktop::new(&host);
             *setup_desktop_owner.lock().unwrap() = Some(host);
@@ -654,87 +469,12 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
 
-            // Connect MCP servers in background — per-server tasks so the
-            // manager lock is only held briefly and list_mcp_servers stays responsive.
-            let mcp_mgr_clone = mcp_manager.clone();
+            // Each supported server connects independently outside application state locks.
             let mcp_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Delay to let app fully init
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-                // Grab configs & mark "connecting", then release lock immediately
-                let configs = {
-                    let mut mgr = mcp_mgr_clone.lock().await;
-                    mgr.prepare_connect_all()
-                };
-
-                // Spawn a task per server so they connect in parallel
-                let mut handles = Vec::new();
-                for (cfg, generation) in configs {
-                    let mgr_arc = mcp_mgr_clone.clone();
-                    let app_handle = mcp_app.clone();
-                    handles.push(tauri::async_runtime::spawn(async move {
-                        // Slow I/O (process spawn / TCP / MCP handshake) happens
-                        // outside the lock so list_mcp_servers stays responsive.
-                        let build_result =
-                            crate::mcp::manager::build_connected_client(&cfg).await;
-
-                        // Brief lock only to insert the result.
-                        let (connect_result, stale_client) = {
-                            let mut mgr = mgr_arc.lock().await;
-                            match build_result {
-                                Ok(client) => match mgr.commit_client(cfg.name.clone(), generation, client) {
-                                    Ok(()) => (Ok(()), None),
-                                    Err(client) => (Err("connection result was superseded".to_string()), Some(client)),
-                                },
-                                Err(e) => {
-                                    let display_error = match &e {
-                                        crate::error::KokoroError::Config(message)
-                                        | crate::error::KokoroError::Database(message)
-                                        | crate::error::KokoroError::Llm(message)
-                                        | crate::error::KokoroError::Tts(message)
-                                        | crate::error::KokoroError::Stt(message)
-                                        | crate::error::KokoroError::Io(message)
-                                        | crate::error::KokoroError::ExternalService(message)
-                                        | crate::error::KokoroError::Mod(message)
-                                        | crate::error::KokoroError::NotFound(message)
-                                        | crate::error::KokoroError::Unauthorized(message)
-                                        | crate::error::KokoroError::Internal(message)
-                                        | crate::error::KokoroError::Chat(message)
-                                        | crate::error::KokoroError::ChatPersistence(message)
-                                        | crate::error::KokoroError::Validation(message) => message.clone(),
-                                    };
-                                    if mgr.finish_connection_error(&cfg.name, generation, display_error.clone()) {
-                                        (Err(display_error), None)
-                                    } else {
-                                        (
-                                            Err("connection result was superseded".to_string()),
-                                            None,
-                                        )
-                                    }
-                                }
-                            }
-                        };
-                        if let Some(client) = stale_client {
-                            let _ = client.shutdown().await;
-                        }
-
-                        if let Ok(()) = connect_result {
-                            tracing::info!(target: "mcp", "Connected '{}', registering tools...", cfg.name);
-                            if let Some(registry) =
-                                app_handle.try_state::<std::sync::Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>()
-                            {
-                                crate::mcp::bridge::register_mcp_tools(&mgr_arc, registry.inner()).await;
-                            }
-                        } else if let Err(e) = connect_result {
-                            tracing::error!(target: "mcp", "Failed to connect '{}': {}", cfg.name, e);
-                        }
-                    }));
-                }
-
-                // Wait for all to finish (fire-and-forget is also fine)
-                for h in handles {
-                    let _ = h.await;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if let Some(registry) = mcp_app.try_state::<Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>() {
+                    crate::mcp::bridge::start_enabled(&mcp_manager, registry.inner()).await;
                 }
             });
 
@@ -913,8 +653,13 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(move |_app, event| {
+        .run(move |app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(manager) =
+                    app.try_state::<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>()
+                {
+                    tauri::async_runtime::block_on(crate::mcp::bridge::shutdown(manager.inner()));
+                }
                 desktop_owner.lock().unwrap().take();
             }
         });
@@ -952,7 +697,6 @@ mod tests {
     use super::auto_start_pet_on_launch;
     use crate::error::KokoroError;
     use crate::utils::logging::format_log_line;
-    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -995,47 +739,5 @@ mod tests {
     fn startup_log_line_uses_level_target_structure() {
         let line = format_log_line("INFO", "ai", "startup", false);
         assert!(line.starts_with("[INFO][ai] "));
-    }
-
-    #[test]
-    fn invoke_handler_has_no_duplicate_command_registrations() {
-        let source = include_str!("lib.rs");
-        let handler_start = source
-            .find(".invoke_handler(tauri::generate_handler![")
-            .expect("invoke_handler block should exist");
-        let block_start = handler_start
-            + source[handler_start..]
-                .find('[')
-                .expect("generate_handler should include `[`")
-            + 1;
-        let block_end = source[block_start..]
-            .find("])")
-            .map(|idx| block_start + idx)
-            .expect("generate_handler should include closing `])`");
-
-        let block = &source[block_start..block_end];
-        let mut seen = HashSet::new();
-        let mut duplicates = Vec::new();
-
-        for line in block.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("//") {
-                continue;
-            }
-            let command = trimmed.trim_end_matches(',');
-            if command.is_empty() {
-                continue;
-            }
-
-            if !seen.insert(command.to_string()) {
-                duplicates.push(command.to_string());
-            }
-        }
-
-        assert!(
-            duplicates.is_empty(),
-            "found duplicate Tauri command registrations: {:?}",
-            duplicates
-        );
     }
 }

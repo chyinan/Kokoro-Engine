@@ -1,8 +1,9 @@
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use tauri::State;
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, specta::Type)]
 pub struct DbTestResult {
     pub success: bool,
     pub message: String,
@@ -10,6 +11,7 @@ pub struct DbTestResult {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn init_db(_state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     // Migration logic could go here, but context::new does basic setup
     // For now, we can clear or re-initialize if needed
@@ -17,9 +19,10 @@ pub async fn init_db(_state: State<'_, AIOrchestrator>) -> Result<String, Kokoro
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn test_vector_store(
     state: State<'_, AIOrchestrator>,
-) -> Result<DbTestResult, KokoroError> {
+) -> Result<Response<DbTestResult>, KokoroError> {
     // Memories only exist for a real character instance, so the diagnostic runs
     // against the first one instead of inventing an owner.
     let character_id: Option<String> =
@@ -28,11 +31,11 @@ pub async fn test_vector_store(
             .await
             .map_err(|e| KokoroError::Database(e.to_string()))?;
     let Some(character_id) = character_id else {
-        return Ok(DbTestResult {
+        return Ok(Response(DbTestResult {
             success: false,
             message: "No character exists to own a test memory.".to_string(),
             record_count: 0,
-        });
+        }));
     };
 
     // 1. Add a test memory
@@ -56,9 +59,9 @@ pub async fn test_vector_store(
         "No results found".to_string()
     };
 
-    Ok(DbTestResult {
+    Ok(Response(DbTestResult {
         success,
         message,
         record_count: results.len(),
-    })
+    }))
 }

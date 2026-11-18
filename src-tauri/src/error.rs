@@ -5,7 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// 统一的 Kokoro 错误类型，支持结构化序列化
-#[derive(Debug, Error, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Serialize, Deserialize, Clone, PartialEq, Eq, specta::Type)]
 #[serde(tag = "code", content = "message")]
 pub enum KokoroError {
     #[error("配置错误: {0}")]
@@ -54,7 +54,7 @@ pub enum KokoroError {
 /// 便捷类型别名
 pub type KokoroResult<T> = Result<T, KokoroError>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct FailureEvent {
     pub event_id: String,
     pub timestamp: String,
@@ -64,9 +64,14 @@ pub struct FailureEvent {
     pub message: String,
     pub retryable: bool,
     pub trace_id: String,
+    #[serde(default)]
     pub conversation_id: Option<String>,
+    #[serde(default)]
     pub turn_id: Option<String>,
+    #[serde(default)]
     pub character_id: Option<String>,
+    #[specta(type = Option<crate::ipc::wire::JsonValue>)]
+    #[serde(default)]
     pub context: Option<Value>,
 }
 
@@ -205,7 +210,7 @@ impl KokoroError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 pub struct ChatErrorEvent {
     pub code: String,
     pub stage: String,

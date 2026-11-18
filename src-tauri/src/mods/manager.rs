@@ -2,7 +2,9 @@
 #[cfg(test)]
 use super::script_queue::SCRIPT_EVENT_CAPACITY;
 use super::script_queue::{ModScriptQueue, ScriptCommand, ScriptModule};
+use crate::chat::event_payloads::CueEvent;
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, ModHookPayload};
+use crate::ipc::{events::{ModComponentsRegister, ModLayoutOverride, ModThemeOverride, ModUnload}, wire::{emit, JsonPayload}};
 use crate::mods::api::ScriptEvent;
 use crate::mods::manifest::ModManifest;
 use crate::mods::theme::ModThemeJson;
@@ -13,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 const SCRIPT_EXECUTION_BUDGET: Duration = Duration::from_secs(5);
 const SCRIPT_EVENT_BUDGET: Duration = Duration::from_millis(250);
@@ -176,23 +178,21 @@ fn run_script_command(
 }
 
 /// Payload for the mod:script-event Tauri event
-#[derive(serde::Serialize, Clone)]
-struct ScriptEventPayload {
+#[derive(serde::Serialize, Clone, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "mod:script-event")]
+pub(crate) struct ScriptEventPayload {
     event: String,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     payload: serde_json::Value,
 }
 
 /// Payload for the mod:ui-message Tauri event
-#[derive(serde::Serialize, Clone)]
-struct UiMessagePayload {
+#[derive(serde::Serialize, Clone, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "mod:ui-message")]
+pub(crate) struct UiMessagePayload {
     component: String,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     payload: serde_json::Value,
-}
-
-/// Payload for character cue events
-#[derive(serde::Serialize, Clone)]
-struct CuePayload {
-    cue: String,
 }
 
 fn validate_manifest_capabilities(manifest: &ModManifest) -> Result<(), String> {
@@ -368,8 +368,8 @@ impl ModManager {
             while let Ok(event) = event_rx.recv() {
                 match event {
                     ScriptEvent::Emit { event, payload } => {
-                        let _ = handle.emit(
-                            "mod:script-event",
+                        let _ = emit(
+                            &handle,
                             ScriptEventPayload {
                                 event: event.clone(),
                                 payload: payload.clone(),
@@ -382,8 +382,8 @@ impl ModManager {
                         );
                     }
                     ScriptEvent::UiSend { component, data } => {
-                        let _ = handle.emit(
-                            "mod:ui-message",
+                        let _ = emit(
+                            &handle,
                             UiMessagePayload {
                                 component: component.clone(),
                                 payload: data.clone(),
@@ -392,7 +392,7 @@ impl ModManager {
                         tracing::info!(target: "mods", "[ModManager] UI message sent to component '{}'", component);
                     }
                     ScriptEvent::PlayCue { cue } => {
-                        let _ = handle.emit("chat-cue", CuePayload { cue: cue.clone() });
+                        let _ = emit(&handle, CueEvent { cue: cue.clone(), ..Default::default() });
                         tracing::info!(target: "mods", "[ModManager] Cue triggered '{}'", cue);
                     }
                 }
@@ -523,7 +523,7 @@ impl ModManager {
                         }
 
                         self.active_theme = Some(theme.clone());
-                        let _ = app_handle.emit("mod:theme-override", &theme);
+                        let _ = emit(app_handle, ModThemeOverride(theme));
                         tracing::info!(target: "mods", "[ModManager] Theme loaded for mod '{}'", mod_id);
                     }
                     Err(e) => {
@@ -549,7 +549,7 @@ impl ModManager {
                 Ok(content) => match serde_json::from_str::<JsonValue>(&content) {
                     Ok(layout) => {
                         self.active_layout = Some(layout.clone());
-                        let _ = app_handle.emit("mod:layout-override", &layout);
+                        let _ = emit(app_handle, ModLayoutOverride(JsonPayload(layout)));
                         tracing::info!(target: "mods", "[ModManager] Layout loaded for mod '{}'", mod_id);
                     }
                     Err(e) => {
@@ -569,11 +569,12 @@ impl ModManager {
                 .iter()
                 .map(|(slot, path)| (slot.clone(), format!("mod://{}/{}", mod_id, path)))
                 .collect();
-            let _ = app_handle.emit("mod:components-register", &component_map);
+            let component_count = component_map.len();
+            let _ = emit(app_handle, ModComponentsRegister(component_map));
             tracing::info!(
                 target: "mods",
                 "[ModManager] Registered {} components for mod '{}'",
-                component_map.len(),
+                component_count,
                 mod_id
             );
         }
@@ -702,7 +703,7 @@ impl ModManager {
                 tracing::warn!(target: "mods", "Failed to reset MOD listeners during unload: {}", error);
             }
         }
-        let _ = app_handle.emit("mod:unload", ());
+        let _ = emit(app_handle, ModUnload);
         if let (Some(hooks), Some(manifest)) = (app_handle.try_state::<HookRuntime>(), manifest) {
             hooks
                 .emit_best_effort(

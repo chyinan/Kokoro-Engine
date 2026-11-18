@@ -60,7 +60,7 @@ pub(crate) fn list_gpt_sovits_models(
     })
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, specta::Type)]
 pub struct GptSovitsModels {
     pub gpt_models: Vec<String>,
     pub sovits_models: Vec<String>,

@@ -1,5 +1,6 @@
 // pattern: Imperative Shell
 use crate::ai::context::AIOrchestrator;
+use crate::ipc::events::SttMicAutoStop;
 use crate::stt::stream::{AudioBuffer, SAMPLE_RATE};
 use crate::stt::SttService;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -13,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
+use tauri_specta::Event;
 
 const VOLUME_EVENT_INTERVAL: Duration = Duration::from_millis(50);
 const RESAMPLER_CHUNK_SIZE: usize = 256;
@@ -32,8 +34,9 @@ enum WorkerCommand {
     },
 }
 
-#[derive(Clone, Copy, Serialize)]
-struct MicVolumeEvent {
+#[derive(Clone, Copy, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "stt:mic-volume")]
+pub(crate) struct MicVolumeEvent {
     volume: f32,
     rms: f32,
 }
@@ -187,13 +190,7 @@ impl NativeFrameProcessor {
 
     fn process_frame(&mut self, frame: NativeAudioFrame) {
         if self.last_volume_emit.elapsed() >= VOLUME_EVENT_INTERVAL {
-            let _ = self.app.emit(
-                "stt:mic-volume",
-                MicVolumeEvent {
-                    volume: frame.volume,
-                    rms: frame.rms,
-                },
-            );
+            let _ = MicVolumeEvent { volume: frame.volume, rms: frame.rms }.emit(&self.app);
             self.last_volume_emit = Instant::now();
         }
 
@@ -205,7 +202,7 @@ impl NativeFrameProcessor {
             }
             if !self.auto_stop_emitted && !vad.is_empty() {
                 self.auto_stop_emitted = true;
-                let _ = self.app.emit("stt:mic-auto-stop", ());
+                let _ = SttMicAutoStop.emit(&self.app);
             }
         }
 
@@ -317,13 +314,7 @@ fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
                         drop(input_stream);
                         processor.stop();
                     }
-                    let _ = app.emit(
-                        "stt:mic-volume",
-                        MicVolumeEvent {
-                            volume: 0.0,
-                            rms: 0.0,
-                        },
-                    );
+                    let _ = MicVolumeEvent { volume: 0.0, rms: 0.0 }.emit(&app);
                     let _ = response.send(Ok(()));
                 }
             }
@@ -576,13 +567,7 @@ where
             },
             move |err| {
                 tracing::error!(target: "stt", "[STT] Native microphone stream error: {err}");
-                let _ = err_app.emit(
-                    "stt:mic-volume",
-                    MicVolumeEvent {
-                        volume: 0.0,
-                        rms: 0.0,
-                    },
-                );
+                let _ = MicVolumeEvent { volume: 0.0, rms: 0.0 }.emit(&err_app);
             },
             None,
         )

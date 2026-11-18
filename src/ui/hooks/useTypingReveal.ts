@@ -1,19 +1,11 @@
+import { events } from "@/lib/generated/ipc";
 import { useRef, useCallback, useEffect } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { chatApplication } from "@/lib/chat/application";
-import { chatEventMatchesView, type ChatEventScope } from "@/lib/chat/projection";
+import { chatEventMatchesView } from "@/lib/chat/projection";
 
 // ── Types ──────────────────────────────────────────
 
 type TypingSpeed = "Instant" | "Fast" | "Normal" | "Slow" | "Thinking";
-
-interface TypingEvent extends ChatEventScope {
-    character_id?: string;
-    conversation_id?: string;
-    client_request_id?: string;
-    duration_ms: number;
-    speed: TypingSpeed;
-}
 
 /** Per-character delay (ms) for each speed tier */
 const SPEED_DELAYS: Record<TypingSpeed, { base: number; variance: number }> = {
@@ -74,7 +66,7 @@ export function useTypingReveal({ onReveal, active }: UseTypingRevealOptions) {
     useEffect(() => {
         let unlisten: (() => void) | undefined;
         let disposed = false;
-        listen<TypingEvent>("chat-typing", (ev) => {
+        events.chatTyping.listen((ev) => {
             if (!chatEventMatchesView(chatApplication.getSnapshot(), ev.payload)) return;
             speedRef.current = ev.payload.speed;
         }).then(fn => {
@@ -99,7 +91,7 @@ export function useTypingReveal({ onReveal, active }: UseTypingRevealOptions) {
     useEffect(() => {
         let unlisten: (() => void) | undefined;
         let disposed = false;
-        listen<ChatEventScope & { cue: string }>("chat-cue", (ev) => {
+        events.chatCue.listen((ev) => {
             if (!chatEventMatchesView(chatApplication.getSnapshot(), ev.payload)) return;
             emotionRef.current = ev.payload.cue;
         }).then(fn => {

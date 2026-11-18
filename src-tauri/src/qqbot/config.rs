@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const QQ_APP_ID_ENV: &str = "QQBOT_APP_ID";
 pub const QQ_APP_SECRET_ENV: &str = "QQBOT_APP_SECRET";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(default)]
 pub struct QQBotConfig {
     pub enabled: bool,

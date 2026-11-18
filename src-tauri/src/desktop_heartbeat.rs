@@ -3,9 +3,10 @@
 use crate::ai::context::AIOrchestrator;
 use crate::ai::initiative::InitiativeDecision;
 use crate::chat::application::ChatService;
+use crate::ipc::{events::ProactiveTrigger, wire::emit};
 use chrono::Timelike;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 /// Configuration for the heartbeat system.
 pub struct HeartbeatConfig {
@@ -25,8 +26,9 @@ impl Default for HeartbeatConfig {
 }
 
 /// Event emitted when the character performs an idle animation.
-#[derive(Debug, Clone, Serialize)]
-struct IdleBehaviorEvent {
+#[derive(Debug, Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "idle-behavior")]
+pub(crate) struct IdleBehaviorEvent {
     pub behavior: crate::ai::idle_behaviors::IdleBehavior,
     pub character_id: String,
     pub conversation_id: Option<String>,
@@ -87,8 +89,8 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
             let mut state = behavior.lock().await;
             let idle_sys = &mut state.idle_behaviors;
             if let Some(behavior) = idle_sys.decide(idle_secs) {
-                let _ = app_handle.emit(
-                    "idle-behavior",
+                let _ = emit(
+                    &app_handle,
                     IdleBehaviorEvent {
                         behavior,
                         character_id: character.clone(),
@@ -277,14 +279,16 @@ async fn trigger_proactive_message(
         return;
     };
 
-    let _ = app_handle.emit(
-        "proactive-trigger",
-        serde_json::json!({
-            "trigger": trigger_type,
-            "character_id":scope.0,"conversation_id":scope.1,"client_request_id":request_id,
-            "idle_seconds": idle_secs,
-            "instruction": full_instruction,
-        }),
+    let _ = emit(
+        app_handle,
+        ProactiveTrigger {
+            trigger: trigger_type.into(),
+            character_id: scope.0.clone(),
+            conversation_id: scope.1.clone(),
+            client_request_id: request_id,
+            idle_seconds: Some(idle_secs),
+            instruction: full_instruction,
+        },
     );
 
     // Reset idle timer so we don't re-trigger immediately

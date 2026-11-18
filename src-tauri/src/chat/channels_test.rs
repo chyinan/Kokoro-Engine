@@ -831,7 +831,8 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     assert_eq!(
         desktop("pending", "[wait] desktop owner", None)
             .await
-            .unwrap(),
+            .unwrap()
+            .0,
         result
     );
     let before_rejected_replay = (
@@ -942,7 +943,8 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     assert_eq!(
         desktop("detached", "[wait] detached subscriber", None)
             .await
-            .unwrap(),
+            .unwrap()
+            .0,
         result
     );
     assert_eq!(

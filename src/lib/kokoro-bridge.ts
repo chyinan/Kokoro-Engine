@@ -3,173 +3,153 @@
 /**
  * Kokoro Engine — IPC Bridge
  * 
- * Typed wrapper around Tauri's invoke API.
- * All backend commands are accessed through this module.
+ * Application adapters for the generated Tauri IPC contract.
  */
 // Reason: This boundary module only declares IPC contracts and delegates side effects to Tauri.
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { commands, events, type JsonValue } from "@/lib/generated/ipc";
+import type { EventCallback, UnlistenFn } from "@tauri-apps/api/event";
 import type { ModManifest, TtsAudioFormat, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson } from "../core/types/mod";
 export type { ModManifest, TtsAudioFormat, TtsConfig, ProviderStatus, VoiceProfile, TtsSystemConfig, ModThemeJson };
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+type IpcResponse<Command extends keyof typeof commands> = Awaited<ReturnType<(typeof commands)[Command]>>;
+type IpcEventPayload<Event> = Event extends { listen(callback: EventCallback<infer Payload>): Promise<UnlistenFn> }
+    ? Payload
+    : never;
+
+type PresentFields<Value, Key extends keyof Value> = Value & { [Field in Key]-?: NonNullable<Value[Field]> };
+
+async function withKokoroError<T>(result: Promise<T>): Promise<T> {
     try {
-        return await tauriInvoke<T>(cmd, args);
+        return await result;
     } catch (error) {
-        throw parseKokoroError(error);
+        // Preserve framework exceptions and normalize Rust and legacy rejection payloads.
+        throw error instanceof Error ? error : parseKokoroError(error);
     }
 }
 
 // ── Types ──────────────────────────────────────────
 
-export interface EngineInfo {
-    name: string;
-    version: string;
-    platform: string;
-}
+export type EngineInfo = IpcResponse<"getEngineInfo">;
 
-export interface SystemStatus {
-    engine_running: boolean;
-    active_modules: string[];
-    memory_usage_mb: number;
-}
+export type SystemStatus = IpcResponse<"getSystemStatus">;
 
-export interface CharacterState {
-    name: string;
-    current_cue: string;
-    mood: number;
-    is_speaking: boolean;
-}
+export type CharacterState = IpcResponse<"getCharacterState">;
 
-export interface ChatResponse {
-    text: string;
-    cue: string;
-    mood_delta: number;
-}
+export type ChatResponse = IpcResponse<"sendMessage">;
 
 // ── System Commands ────────────────────────────────
 
 export async function getEngineInfo(): Promise<EngineInfo> {
-    return invoke<EngineInfo>("get_engine_info");
+    return withKokoroError(commands.getEngineInfo());
 }
 
 export async function getSystemStatus(): Promise<SystemStatus> {
-    return invoke<SystemStatus>("get_system_status");
+    return withKokoroError(commands.getSystemStatus());
 }
 
 export async function setWindowSize(width: number, height: number): Promise<void> {
-    return invoke("set_window_size", { width, height });
+    await withKokoroError(commands.setWindowSize(width, height));
 }
 
 // ── Character Commands ─────────────────────────────
 
 export async function getCharacterState(): Promise<CharacterState> {
-    return invoke<CharacterState>("get_character_state");
+    return withKokoroError(commands.getCharacterState());
 }
 
 export async function playCue(cue: string): Promise<CharacterState> {
-    return invoke<CharacterState>("play_cue", { cue });
+    return withKokoroError(commands.playCue(cue));
 }
 
 // ── Database Commands ──────────────────────────────
 
-export interface DbTestResult {
-    success: boolean;
-    message: string;
-    record_count: number;
-}
+export type DbTestResult = IpcResponse<"testVectorStore">;
 
 export async function initDb(): Promise<string> {
-    return invoke<string>("init_db");
+    return withKokoroError(commands.initDb());
 }
 
 export async function testVectorStore(): Promise<DbTestResult> {
-    return invoke<DbTestResult>("test_vector_store");
+    return withKokoroError(commands.testVectorStore());
 }
 
 export async function sendMessage(message: string): Promise<ChatResponse> {
-    return invoke<ChatResponse>("send_message", { message });
+    return withKokoroError(commands.sendMessage(message));
 }
 
 // ── Context Management ─────────────────────────────
 
 /** @deprecated Use character runtime overrides and serialized activation. */
 export async function setPersona(prompt: string): Promise<void> {
-    return invoke("set_persona", { prompt });
+    await withKokoroError(commands.setPersona(prompt));
 }
 
 /** @deprecated Partial character updates are rejected by the backend. */
 export async function setCharacterName(name: string): Promise<void> {
-    return invoke("set_character_name", { name });
+    await withKokoroError(commands.setCharacterName(name));
 }
 
 export async function setUserName(name: string): Promise<void> {
-    return invoke("set_user_name", { name });
+    await withKokoroError(commands.setUserName(name));
 }
 
 export async function setUserPersona(persona: string): Promise<void> {
-    return invoke("set_user_persona", { persona });
+    await withKokoroError(commands.setUserPersona(persona));
 }
 
 /** @deprecated Partial character updates are rejected by the backend. */
 export async function setResponseLanguage(language: string): Promise<void> {
-    return invoke("set_response_language", { language });
+    await withKokoroError(commands.setResponseLanguage(language));
 }
 
 export async function setUserLanguage(language: string): Promise<void> {
-    return invoke("set_user_language", { language });
+    await withKokoroError(commands.setUserLanguage(language));
 }
 
-export interface UserProfileSettings {
-    user_name: string;
-    user_persona: string;
-}
+export type UserProfileSettings = NonNullable<IpcResponse<"getUserProfileSettings">>;
 
 export async function getUserProfileSettings(): Promise<UserProfileSettings | null> {
-    return invoke<UserProfileSettings | null>("get_user_profile_settings");
+    return withKokoroError(commands.getUserProfileSettings());
 }
 
 export async function setJailbreakPrompt(prompt: string): Promise<void> {
-    return invoke("set_jailbreak_prompt", { prompt });
+    await withKokoroError(commands.setJailbreakPrompt(prompt));
 }
 
 export async function getJailbreakPrompt(): Promise<string> {
-    return invoke("get_jailbreak_prompt");
+    return withKokoroError(commands.getJailbreakPrompt());
 }
 
 export async function setProactiveEnabled(enabled: boolean): Promise<void> {
-    return invoke("set_proactive_enabled", { enabled });
+    await withKokoroError(commands.setProactiveEnabled(enabled));
 }
 
 export async function getProactiveEnabled(): Promise<boolean> {
-    return invoke("get_proactive_enabled");
+    return withKokoroError(commands.getProactiveEnabled());
 }
 
 export async function clearHistory(): Promise<void> {
-    return invoke("clear_history");
+    await withKokoroError(commands.clearHistory());
 }
 
 export async function setMemoryEnabled(enabled: boolean): Promise<void> {
-    return invoke("set_memory_enabled", { enabled });
+    await withKokoroError(commands.setMemoryEnabled(enabled));
 }
 
 export async function getMemoryEnabled(): Promise<boolean> {
-    return invoke<boolean>("get_memory_enabled");
+    return withKokoroError(commands.getMemoryEnabled());
 }
 
 // ── Context Settings ───────────────────────────────
 
-export interface ContextSettings {
-    strategy: "window" | "summary";
-    max_message_chars: number;
-}
+export type ContextSettings = IpcResponse<"getContextSettings">;
 
 export async function getContextSettings(): Promise<ContextSettings> {
-    return invoke<ContextSettings>("get_context_settings");
+    return withKokoroError(commands.getContextSettings());
 }
 
 export async function setContextSettings(settings: ContextSettings): Promise<void> {
-    return invoke("set_context_settings", { settings });
+    await withKokoroError(commands.setContextSettings(settings));
 }
 
 export async function deleteLastMessages(
@@ -178,218 +158,115 @@ export async function deleteLastMessages(
     expectedTailMessageId?: number | null,
     expectedHistory?: { generation: number; historyRevision: number; keepThroughId: number },
 ): Promise<void> {
-    return invoke("delete_last_messages", {
-        count,
-        expectedConversationId: expectedConversationId ?? null,
-        expectedTailMessageId: expectedTailMessageId ?? null,
-        expectedHistory: expectedHistory ?? null,
-    });
+    await withKokoroError(commands.deleteLastMessages(count, expectedConversationId ?? null, expectedTailMessageId ?? null, expectedHistory ?? null));
 }
 
 // ── LLM Config Management ──────────────────────────
 
-export interface LlmProviderConfig {
-    id: string;
-    provider_type: string;
-    enabled: boolean;
-    supports_native_tools: boolean;
-    api_key?: string;
-    api_key_env?: string;
-    base_url?: string;
-    model?: string;
-    extra?: Record<string, unknown>;
-}
+type WireLlmConfig = Parameters<typeof commands.saveLlmConfig>[0];
+type WireLlmProviderConfig = NonNullable<WireLlmConfig["providers"]>[number];
 
-export interface LlmPreset {
-    id: string;
-    name: string;
-    active_provider: string;
-    system_provider?: string;
-    system_model?: string;
-    providers: LlmProviderConfig[];
-}
+export type LlmProviderConfig = PresentFields<WireLlmProviderConfig, "enabled" | "supports_native_tools">;
 
-export interface LlmConfig {
-    active_provider: string;
-    system_provider?: string;
-    system_model?: string;
+type WireLlmPreset = NonNullable<WireLlmConfig["presets"]>[number];
+export type LlmPreset = Omit<WireLlmPreset, "providers"> & { providers: LlmProviderConfig[] };
+
+export type LlmConfig = Omit<PresentFields<WireLlmConfig, "active_provider">, "providers" | "presets"> & {
     providers: LlmProviderConfig[];
     presets?: LlmPreset[];
-}
+};
 
-export interface LlmConnectionTestedTarget {
-    role: "active" | "system" | string;
-    provider_id: string;
-    model?: string;
-}
+export type LlmConnectionTestedTarget = LlmConnectionTestResult["tested_targets"][number];
 
-export interface LlmConnectionTestResult {
-    tested_targets: LlmConnectionTestedTarget[];
-}
+export type LlmConnectionTestResult = IpcResponse<"testLlmConnection">;
 
-export interface OllamaModelInfo {
-    name: string;
-    size?: number;
-    modified_at?: string;
-}
+export type OllamaModelInfo = IpcResponse<"listOllamaModels">[number];
 
-export interface LlamaCppStatus {
-    current_model?: string;
-    context_length?: number;
-    available_models: string[];
-}
+export type LlamaCppStatus = IpcResponse<"getLlamaCppStatus">;
 
-export interface CodexRuntimeInfo {
-    status: "available" | "not_installed" | "error" | string;
-    binary: string;
-    version?: string;
-}
+export type CodexRuntimeInfo = IpcResponse<"getCodexRuntimeStatus">;
 
 export async function getLlmConfig(): Promise<LlmConfig> {
-    return invoke<LlmConfig>("get_llm_config");
+    return withKokoroError(commands.getLlmConfig());
 }
 
 export async function saveLlmConfig(config: LlmConfig): Promise<void> {
-    return invoke("save_llm_config", { config });
+    await withKokoroError(commands.saveLlmConfig(config));
 }
 
 export async function testLlmConnection(config: LlmConfig): Promise<LlmConnectionTestResult> {
-    return invoke<LlmConnectionTestResult>("test_llm_connection", { config });
+    return withKokoroError(commands.testLlmConnection(config));
 }
 
 export async function listOllamaModels(baseUrl: string): Promise<OllamaModelInfo[]> {
-    return invoke<OllamaModelInfo[]>("list_ollama_models", { baseUrl });
+    return withKokoroError(commands.listOllamaModels(baseUrl));
 }
 
 export async function listAnthropicModels(baseUrl: string, apiKey: string): Promise<string[]> {
-    const models = await invoke<Array<{ id: string }>>("list_anthropic_models", { baseUrl, apiKey });
+    const models = await withKokoroError(commands.listAnthropicModels(baseUrl, apiKey));
     return models.map((model) => model.id).sort();
 }
 
 export async function getLlamaCppStatus(baseUrl: string): Promise<LlamaCppStatus> {
-    return invoke<LlamaCppStatus>("get_llama_cpp_status", { baseUrl });
+    return withKokoroError(commands.getLlamaCppStatus(baseUrl));
 }
 
 export async function getCodexRuntimeStatus(): Promise<CodexRuntimeInfo> {
-    return invoke<CodexRuntimeInfo>("get_codex_runtime_status");
+    return withKokoroError(commands.getCodexRuntimeStatus());
 }
 
 export async function listCodexRuntimeModels(): Promise<string[]> {
-    return invoke<string[]>("list_codex_runtime_models");
+    return withKokoroError(commands.listCodexRuntimeModels());
 }
 
 // ── LLM Streaming ──────────────────────────────────
 
-export interface ChatRequest {
-    message: string;
-    api_key?: string;
-    endpoint?: string;
-    model?: string;
-    allow_image_gen?: boolean;
-    images?: string[];
-    /** One-shot camera context, never included in chat snapshots. */
-    camera_frame?: string;
-    character_id?: string;
-    /** If true, the user instruction is hidden; non-empty assistant replies may still be saved. */
-    hidden?: boolean;
-    /** Optional caller correlation echoed on turn lifecycle events. */
-    client_request_id?: string;
-    /** If true, this turn is regenerating an assistant reply for the last user message. */
-    regenerate?: boolean;
-    retry_failure?: { diagnostic_message_id: number; expected_tail_message_id: number; expected_history_revision?: number };
-    regenerate_reply?: { assistant_message_id: number; expected_tail_message_id: number; expected_history_revision: number };
-    /** Optional target conversation ID. If specified, backend binds strictly to this conversation. */
-    conversation_id?: string | null;
-    conversation_generation?: number;
-}
+export type ChatRequest = NonNullable<Parameters<typeof commands.streamChat>[0]>;
 
-export interface StreamChatResponse {
-    /** Final canonical text, available even if every event was lost. */
-    text?: string;
-    conversation_id: string;
-    user_message_id?: number | null;
-    assistant_message_id?: number | null;
-    client_request_id?: string | null;
-    status?: "completed" | "cancelled" | string | null;
-}
+export type StreamChatResponse = IpcResponse<"streamChat">;
 
 export async function streamChat(request: ChatRequest): Promise<StreamChatResponse> {
-    return invoke<StreamChatResponse>("stream_chat", { request });
+    return withKokoroError(commands.streamChat(request));
 }
 
 export function retryChatPersistence(clientRequestId: string): Promise<StreamChatResponse> {
-    return invoke("retry_chat_persistence", { clientRequestId });
+    return withKokoroError(commands.retryChatPersistence(clientRequestId));
 }
 
-export interface ChatTurnSnapshot {
-    revision: number;
-    completion_revision?: number;
-    client_request_id: string;
-    turn_id: string | null;
-    character_id: string | null;
-    conversation_id: string | null;
-    conversation_generation?: number;
-    user_message_id: number | null;
-    assistant_message_id: number | null;
-    message: string;
-    images: string[];
-    hidden: boolean;
-    reusing_saved_prompt?: boolean;
-    status: "pending" | "accepted" | "streaming" | "completed" | "cancelled" | "rejected" | "error";
-    text: string;
-    translation: string | null;
-    tools: ChatTurnToolEvent[];
-    error: string | null;
-    error_code?: string;
-    persistence_retryable?: boolean;
-    user_save_failed?: boolean;
-    preparation_timed_out?: boolean;
-    speech_error?: string;
-}
-export interface ChatViewVersion {
-    revision: number;
-    history_revision: number;
-    generation: number;
-    busy: boolean;
-}
-export interface ChatViewSnapshot extends ChatViewVersion {
-    character_id: string;
-    conversation_id: string | null;
-    conversation_history_revision: number | null;
-    messages: ConversationMessage[];
-    turns: ChatTurnSnapshot[];
-}
+export type ChatTurnSnapshot = IpcResponse<"getChatRuntimeSnapshot">[number];
+export type ChatViewVersion = NonNullable<Parameters<typeof commands.getChatView>[0]>;
+export type ChatViewSnapshot = NonNullable<IpcResponse<"getChatView">>;
 export function getChatRuntimeSnapshot(): Promise<ChatTurnSnapshot[]> {
-    return invoke("get_chat_runtime_snapshot");
+    return withKokoroError(commands.getChatRuntimeSnapshot());
 }
 export function getChatView(): Promise<ChatViewSnapshot>;
 export function getChatView(knownVersion: ChatViewVersion): Promise<ChatViewSnapshot | null>;
 export function getChatView(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null> {
-    return invoke("get_chat_view", knownVersion ? { knownVersion } : undefined);
+    return withKokoroError(commands.getChatView(knownVersion ?? null));
 }
-export type ChatDraftSubmissionStatus = "pending" | "persisted" | "unsent";
+export type ChatDraftSubmissionStatus = IpcResponse<"recoverChatDraftSubmission">;
 
 export function recoverChatDraftSubmission(characterId: string, clientRequestId: string): Promise<ChatDraftSubmissionStatus> {
-    return invoke("recover_chat_draft_submission", { characterId, clientRequestId });
+    return withKokoroError(commands.recoverChatDraftSubmission(characterId, clientRequestId));
 }
 export function onChatRuntimeChanged(callback: (snapshot: ChatTurnSnapshot) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnSnapshot>("chat-runtime-changed", event => callback(event.payload));
+    return events.chatRuntimeChanged.listen(event => callback(event.payload));
 }
 
 export function finishChatPlayback(requestId: string, error?: string): Promise<void> {
-    return invoke("finish_chat_playback", { requestId, error });
+    return withKokoroError(commands.finishChatPlayback(requestId, error ?? null));
 }
 
 export async function cancelChatTurn(turnId: string, reason?: string): Promise<void> {
-    return invoke("cancel_chat_turn", { turnId, reason: reason ?? null });
+    await withKokoroError(commands.cancelChatTurn(turnId, reason ?? null));
 }
 
 export async function isChatBusy(): Promise<boolean> {
-    return invoke<boolean>("is_chat_busy");
+    return withKokoroError(commands.isChatBusy());
 }
 
 export function startNativeMic(autoStopOnSilence: boolean, onlyWhenChatIdle: boolean): Promise<boolean> {
-    return invoke("start_native_mic", { autoStopOnSilence, onlyWhenChatIdle });
+    return withKokoroError(commands.startNativeMic(autoStopOnSilence, onlyWhenChatIdle));
 }
 
 export function isChatTurnBusyError(error: unknown): boolean {
@@ -398,19 +275,12 @@ export function isChatTurnBusyError(error: unknown): boolean {
 }
 
 export async function onChatError(callback: (error: string) => void): Promise<UnlistenFn> {
-    return listen<unknown>("chat-error", (event) => callback(parseLegacyChatError(event.payload)));
+    return events.chatError.listen((event) => callback(parseLegacyChatError(event.payload)));
 }
 
-export interface ChatWarningEvent {
-    message: string;
-    character_id: string;
-    conversation_id: string;
-    client_request_id: string;
-    turn_id: string;
-    conversation_generation?: number;
-}
+export type ChatWarningEvent = IpcEventPayload<typeof events.chatWarning>;
 export async function onChatWarning(callback: (warning: ChatWarningEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatWarningEvent>("chat-warning", (event) => callback(event.payload));
+    return events.chatWarning.listen((event) => callback(event.payload));
 }
 
 export interface FailureEventContext {
@@ -419,23 +289,12 @@ export interface FailureEventContext {
     [key: string]: unknown;
 }
 
-export interface FailureEvent {
-    event_id: string;
-    timestamp: string;
-    domain: string;
-    stage: string;
-    code: string;
-    message: string;
-    retryable: boolean;
-    trace_id: string;
-    conversation_id?: string | null;
-    turn_id?: string | null;
-    character_id?: string | null;
+export type FailureEvent = Omit<IpcEventPayload<typeof events.chatFailure>, "context"> & {
     context?: FailureEventContext | null;
-}
+};
 
 export async function onChatFailure(callback: (event: FailureEvent) => void): Promise<UnlistenFn> {
-    return listen<FailureEvent | string>("chat-failure", (event) => {
+    return events.chatFailure.listen((event) => {
         callback(parseFailureEvent(event.payload) ?? createFallbackFailureEvent(parseLegacyChatError(event.payload)));
     });
 }
@@ -487,6 +346,9 @@ function createFallbackFailureEvent(message: string): FailureEvent {
         message,
         retryable: false,
         trace_id: "",
+        conversation_id: null,
+        turn_id: null,
+        character_id: null,
     };
 }
 
@@ -544,43 +406,17 @@ export function parseLegacyChatError(payload: unknown): string {
     return stringifyUnknown(payload);
 }
 
-export interface ChatTurnAcknowledgedEvent {
-    turn_id?: string;
-    client_request_id?: string | null;
-}
+export type ChatTurnAcknowledgedEvent = IpcEventPayload<typeof events.chatTurnAcknowledged>;
 
-export interface ChatTurnStartEvent {
-    turn_id: string;
-    client_request_id?: string | null;
-    conversation_id?: string | null;
-    user_message_id?: number | null;
-}
+export type ChatTurnStartEvent = IpcEventPayload<typeof events.chatTurnStart>;
 
-export interface ChatTurnDeltaEvent {
-    turn_id: string;
-    delta: string;
-    client_request_id?: string | null;
-}
+export type ChatTurnDeltaEvent = IpcEventPayload<typeof events.chatTurnDelta>;
 
-export interface ChatTurnFinishEvent {
-    turn_id: string;
-    status: "completed" | "error" | "cancelled";
-    client_request_id?: string | null;
-    conversation_id?: string | null;
-    assistant_message_id?: number | null;
-}
+export type ChatTurnFinishEvent = IpcEventPayload<typeof events.chatTurnFinish>;
 
-export interface ChatTurnTranslationEvent {
-    turn_id: string;
-    translation: string;
-}
+export type ChatTurnTranslationEvent = IpcEventPayload<typeof events.chatTurnTranslation>;
 
-export interface ChatTurnTextCompleteEvent {
-    turn_id: string;
-    text: string;
-    translation_pending: boolean;
-    translation?: string | null;
-}
+export type ChatTurnTextCompleteEvent = IpcEventPayload<typeof events.chatTurnTextComplete>;
 
 export interface ToolTraceItem {
     tool: string;
@@ -599,66 +435,40 @@ export interface ToolTraceItem {
     approvalStatus?: "requested" | "approved" | "rejected";
 }
 
-export interface ChatTurnToolEvent {
-    turn_id: string;
-    tool: string;
-    tool_name?: string;
-    tool_id?: string;
-    tool_trace_id?: string;
-    source?: "builtin" | "mcp";
-    server_name?: string;
-    needs_feedback?: boolean;
-    permission_level?: "safe" | "elevated";
-    risk_tags?: Array<"read" | "write" | "external" | "sensitive">;
-    result?: {
-        message: string;
-    };
-    error?: string;
-    deny_kind?: ToolTraceItem["denyKind"];
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-}
+export type ChatTurnToolEvent = IpcEventPayload<typeof events.chatTurnTool>;
 
 export async function onChatTurnAcknowledged(callback: (event: ChatTurnAcknowledgedEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnAcknowledgedEvent>("chat-turn-acknowledged", (event) => callback(event.payload));
+    return events.chatTurnAcknowledged.listen((event) => callback(event.payload));
 }
 
 export async function onChatTurnStart(callback: (event: ChatTurnStartEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnStartEvent>("chat-turn-start", (event) => callback(event.payload));
+    return events.chatTurnStart.listen((event) => callback(event.payload));
 }
 
 export async function onChatTurnDelta(callback: (event: ChatTurnDeltaEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnDeltaEvent>("chat-turn-delta", (event) => callback(event.payload));
+    return events.chatTurnDelta.listen((event) => callback(event.payload));
 }
 
 export async function onChatTurnFinish(callback: (event: ChatTurnFinishEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnFinishEvent>("chat-turn-finish", (event) => callback(event.payload));
+    return events.chatTurnFinish.listen((event) => callback(event.payload));
 }
 
 export async function onChatTurnTextComplete(callback: (event: ChatTurnTextCompleteEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnTextCompleteEvent>("chat-turn-text-complete", (event) => callback(event.payload));
+    return events.chatTurnTextComplete.listen((event) => callback(event.payload));
 }
 
 export async function onChatTurnTranslation(callback: (event: ChatTurnTranslationEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnTranslationEvent>("chat-turn-translation", (event) => callback(event.payload));
+    return events.chatTurnTranslation.listen((event) => callback(event.payload));
 }
 
 // ── Cue Events ─────────────────────────────────────
 
-export interface CueEvent {
-    character_id?: string | null;
-    conversation_id?: string | null;
-    conversation_generation?: number | null;
-    client_request_id?: string | null;
-    turn_id?: string | null;
-    cue: string;
-    source?: string;
-}
+export type CueEvent = IpcEventPayload<typeof events.chatCue>;
 
 export async function onChatCue(
     callback: (data: CueEvent) => void
 ): Promise<UnlistenFn> {
-    return listen<CueEvent>("chat-cue", (event) => callback(event.payload));
+    return events.chatCue.listen((event) => callback(event.payload));
 }
 
 // ── LLM Management ──────────────────────────────────
@@ -706,15 +516,23 @@ export async function fetchModels(endpoint: string, apiKey: string): Promise<str
 // ── Mod System ──────────────────────────────────────
 
 export async function listMods(): Promise<ModManifest[]> {
-    return invoke("list_mods");
+    return withKokoroError(commands.listMods());
 }
 
-export async function loadMod(modId: string): Promise<ModManifest> {
-    return invoke("load_mod", { modId });
+export async function loadMod(modId: string): Promise<void> {
+    await withKokoroError(commands.loadMod(modId));
 }
 
 export async function installMod(filePath: string): Promise<ModManifest> {
-    return invoke("install_mod", { filePath });
+    return withKokoroError(commands.installMod(filePath));
+}
+
+export async function installModFromUrl(url: string, confirmUntrustedCode: boolean): Promise<ModManifest> {
+    return withKokoroError(commands.installModFromUrl(url, confirmUntrustedCode));
+}
+
+export async function removeMod(modId: string): Promise<void> {
+    await withKokoroError(commands.removeMod(modId));
 }
 
 export type RegistryModInstallRequest = {
@@ -726,19 +544,15 @@ export type RegistryModInstallRequest = {
 export async function installModFromRegistry(
     request: Readonly<RegistryModInstallRequest>,
 ): Promise<ModManifest> {
-    return invoke<ModManifest>("install_mod_from_registry", {
-        entry: request.entry,
-        registryUrl: request.registryUrl ?? null,
-        permissionConfirmed: request.permissionConfirmed,
-    });
+    return withKokoroError(commands.installModFromRegistry(request.entry, request.registryUrl ?? null, request.permissionConfirmed));
 }
 
 export async function getModTheme(): Promise<ModThemeJson | null> {
-    return invoke("get_mod_theme");
+    return withKokoroError(commands.getModTheme());
 }
 
 export async function getModLayout(): Promise<unknown | null> {
-    return invoke("get_mod_layout");
+    return withKokoroError(commands.getModLayout());
 }
 
 // ── Mod Events ─────────────────────────────────────
@@ -746,104 +560,103 @@ export async function getModLayout(): Promise<unknown | null> {
 export async function onModThemeOverride(
     callback: (theme: ModThemeJson) => void
 ): Promise<UnlistenFn> {
-    return listen<ModThemeJson>("mod:theme-override", (event) => callback(event.payload));
+    return events.modThemeOverride.listen((event) => callback(event.payload));
 }
 
 export async function onModLayoutOverride(
     callback: (layout: unknown) => void
 ): Promise<UnlistenFn> {
-    return listen<unknown>("mod:layout-override", (event) => callback(event.payload));
+    return events.modLayoutOverride.listen((event) => callback(event.payload));
 }
 
 export async function onModComponentsRegister(
     callback: (components: Record<string, string>) => void
 ): Promise<UnlistenFn> {
-    return listen<Record<string, string>>("mod:components-register", (event) => callback(event.payload));
+    return events.modComponentsRegister.listen((event) => callback(event.payload));
 }
 
 export async function onModUiMessage(
     callback: (data: { component: string; payload: unknown }) => void
 ): Promise<UnlistenFn> {
-    return listen<{ component: string; payload: unknown }>("mod:ui-message", (event) => callback(event.payload));
+    return events.modUiMessage.listen((event) => callback(event.payload));
 }
 
 export async function dispatchModEvent(event: string, payload: unknown): Promise<void> {
-    return invoke("dispatch_mod_event", { event, payload });
+    await withKokoroError(commands.dispatchModEvent(event, toIpcJson(payload)));
+}
+
+export function toIpcJson(value: unknown): JsonValue {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new TypeError("IPC requires a JSON payload");
+    const decoded: unknown = JSON.parse(encoded);
+    if (!isJsonValue(decoded)) throw new TypeError("IPC requires a JSON payload");
+    return decoded;
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+    if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return true;
+    if (Array.isArray(value)) return value.every(isJsonValue);
+    return isRecord(value) && Object.values(value).every(isJsonValue);
 }
 
 export async function unloadMod(): Promise<void> {
-    return invoke("unload_mod");
+    await withKokoroError(commands.unloadMod());
 }
 
 export async function onModUnload(callback: () => void): Promise<UnlistenFn> {
-    return listen<void>("mod:unload", () => callback());
+    return events.modUnload.listen(() => callback());
 }
 
 export async function onModScriptEvent(
     callback: (data: { event: string; payload: unknown }) => void
 ): Promise<UnlistenFn> {
-    return listen<{ event: string; payload: unknown }>("mod:script-event", (e) => callback(e.payload));
+    return events.modScriptEvent.listen((e) => callback(e.payload));
 }
 
 // ── Live2D Model Import ─────────────────────────────
 
-export interface Live2dModelInfo {
-    name: string;
-    path: string;
-}
+export type Live2dModelInfo = IpcResponse<"listLive2dModels">[number];
 
-export interface Live2dCueBinding {
-    expression?: string | null;
-    motion_group?: string | null;
-    exclude_from_prompt?: boolean;
-}
+export type Live2dCueBinding = NonNullable<Live2dModelProfile["cue_map"][string]>;
 
 export const BUILTIN_LIVE2D_MODEL_PATH = "__builtin__/hiyori/hiyori_pro_t11.model3.json";
 
-export interface Live2dModelProfile {
-    version: number;
-    model_path: string;
-    available_expressions: string[];
-    available_motion_groups: Record<string, number>;
-    available_hit_areas: string[];
-    cue_map: Record<string, Live2dCueBinding>;
-    semantic_cue_map: Record<string, string>;
-}
+export type Live2dModelProfile = IpcResponse<"getLive2dModelProfile">;
 
 export async function importLive2dZip(zipPath: string): Promise<string> {
-    return invoke<string>("import_live2d_zip", { zipPath });
+    return withKokoroError(commands.importLive2dZip(zipPath));
 }
 
 export async function importLive2dFolder(modelJsonPath: string): Promise<string> {
-    return invoke<string>("import_live2d_folder", { modelJsonPath });
+    return withKokoroError(commands.importLive2dFolder(modelJsonPath));
 }
 
 export async function exportLive2dModel(modelPath: string, exportPath: string): Promise<string> {
-    return invoke<string>("export_live2d_model", { modelPath, exportPath });
+    return withKokoroError(commands.exportLive2dModel(modelPath, exportPath));
 }
 
 export async function listLive2dModels(): Promise<Live2dModelInfo[]> {
-    return invoke<Live2dModelInfo[]>("list_live2d_models");
+    return withKokoroError(commands.listLive2dModels());
 }
 
 export async function deleteLive2dModel(modelName: string): Promise<void> {
-    return invoke("delete_live2d_model", { modelName });
+    await withKokoroError(commands.deleteLive2dModel(modelName));
 }
 
 export async function renameLive2dModel(modelPath: string, newName: string): Promise<string> {
-    return invoke<string>("rename_live2d_model", { modelPath, newName });
+    return withKokoroError(commands.renameLive2dModel(modelPath, newName));
 }
 
 export async function getLive2dModelProfile(modelPath: string): Promise<Live2dModelProfile> {
-    return invoke<Live2dModelProfile>("get_live2d_model_profile", { modelPath });
+    return withKokoroError(commands.getLive2dModelProfile(modelPath));
 }
 
 export async function saveLive2dModelProfile(profile: Live2dModelProfile): Promise<Live2dModelProfile> {
-    return invoke<Live2dModelProfile>("save_live2d_model_profile", { profile });
+    return withKokoroError(commands.saveLive2dModelProfile(profile));
 }
 
 export async function setActiveLive2dModel(modelPath: string | null): Promise<void> {
-    return invoke("set_active_live2d_model", { modelPath });
+    await withKokoroError(commands.setActiveLive2dModel(modelPath));
 }
 
 // ── TTS ────────────────────────────────────────────
@@ -859,7 +672,7 @@ export async function synthesize(text: string, config: TtsConfig): Promise<void>
             detail: { request_id: requestId, replaced_request_id: replacedRequestId },
         }));
     }
-    return invoke("synthesize", { text, config: { ...config, request_id: requestId } });
+    await withKokoroError(commands.synthesize(text, { ...config, request_id: requestId }));
 }
 
 export function getLatestTtsRequestId(): string | null {
@@ -874,216 +687,144 @@ function createTtsRequestId(): string {
 }
 
 export async function cancelTts(requestId?: string | null): Promise<void> {
-    return invoke("cancel_tts", { requestId: requestId ?? null });
+    await withKokoroError(commands.cancelTts(requestId ?? null));
 }
 
 /** Automatic speech follows this view until selection changes. Turn identity stays immutable. */
-export interface ChatPlaybackScope {
-  client_request_id: string;
-  turn_id: string;
-  character_id: string;
-  conversation_id: string;
-  selection_generation: number;
-}
+export type ChatPlaybackScope = NonNullable<IpcEventPayload<typeof events.ttsStart>["chat_scope"]>;
 
-export interface TtsPlaybackErrorEvent {
-    request_id: string;
-    error: string;
-}
+export type TtsPlaybackErrorEvent = IpcEventPayload<typeof events.ttsPlaybackError>;
 
 export async function onTtsPlaybackError(
     callback: (event: TtsPlaybackErrorEvent) => void,
 ): Promise<UnlistenFn> {
-    return listen<TtsPlaybackErrorEvent>("tts:playback-error", event => callback(event.payload));
+    return events.ttsPlaybackError.listen(event => callback(event.payload));
 }
 
 export async function listTtsProviders(): Promise<ProviderStatus[]> {
-    return invoke<ProviderStatus[]>("list_tts_providers");
+    return withKokoroError(commands.listTtsProviders());
 }
 
 export async function listTtsVoices(): Promise<VoiceProfile[]> {
-    return invoke<VoiceProfile[]>("list_tts_voices");
+    return withKokoroError(commands.listTtsVoices());
 }
 
 export async function listOpenAITtsModels(
     config: TtsSystemConfig["providers"][number],
 ): Promise<Array<string>> {
-    return invoke<Array<string>>("list_openai_tts_models", { config });
+    return withKokoroError(commands.listOpenaiTtsModels(config));
 }
 
 export async function getTtsProviderStatus(providerId: string): Promise<ProviderStatus | null> {
-    return invoke<ProviderStatus | null>("get_tts_provider_status", { providerId });
+    return withKokoroError(commands.getTtsProviderStatus(providerId));
 }
 
 export async function clearTtsCache(): Promise<void> {
-    return invoke("clear_tts_cache");
+    await withKokoroError(commands.clearTtsCache());
 }
 
 export async function getTtsConfig(): Promise<TtsSystemConfig> {
-    return invoke<TtsSystemConfig>("get_tts_config");
+    return withKokoroError(commands.getTtsConfig());
 }
 
 export async function saveTtsConfig(config: TtsSystemConfig): Promise<void> {
-    return invoke("save_tts_config", { config });
+    await withKokoroError(commands.saveTtsConfig(config));
 }
 
-export interface GptSovitsModels {
-    gpt_models: string[];
-    sovits_models: string[];
-}
+export type GptSovitsModels = IpcResponse<"listGptSovitsModels">;
 
 export async function listGptSovitsModels(installPath: string): Promise<GptSovitsModels> {
-    return invoke<GptSovitsModels>("list_gpt_sovits_models", { installPath });
+    return withKokoroError(commands.listGptSovitsModels(installPath));
 }
 
 // ── Image Generation ───────────────────────────────
 
-export interface ImageGenResult {
-    conversation_generation?: number;
-    image_url: string;
-    prompt: string;
-    provider_id: string;
-    character_id?: string;
-    conversation_id?: string;
-    client_request_id?: string;
-    turn_id?: string;
-}
+export type ImageGenResult = IpcResponse<"generateImage">;
+export type ImageGenDone = IpcEventPayload<typeof events.imagegenDone>;
 
-export interface ImageGenProviderConfig {
-    id: string;
-    provider_type: "openai" | "stable_diffusion" | string;
-    enabled: boolean;
-    api_key?: string;
-    api_key_env?: string;
-    base_url?: string;
-    model?: string;
-    size?: string;
-    quality?: string;
-    style?: string;
-    prompt_prefix?: string;
-    negative_prompt?: string;
-    extra?: Record<string, any>;
-}
+type WireImageGenSystemConfig = Parameters<typeof commands.saveImagegenConfig>[0];
+type WireImageGenProviderConfig = NonNullable<WireImageGenSystemConfig["providers"]>[number];
 
-export interface ImageGenSystemConfig {
-    default_provider?: string;
-    enabled: boolean;
+export type ImageGenProviderConfig = PresentFields<WireImageGenProviderConfig, "enabled">;
+export type ImageGenSystemConfig = Omit<PresentFields<WireImageGenSystemConfig, "enabled">, "providers"> & {
     providers: ImageGenProviderConfig[];
-}
+};
 
 export async function generateImage(prompt: string, providerId?: string): Promise<ImageGenResult> {
-    return invoke("generate_image", { prompt, providerId });
+    return withKokoroError(commands.generateImage(prompt, providerId ?? null, null));
 }
 
 export async function getImageGenConfig(): Promise<ImageGenSystemConfig> {
-    return invoke("get_imagegen_config");
+    return withKokoroError(commands.getImagegenConfig());
 }
 
 export async function saveImageGenConfig(config: ImageGenSystemConfig): Promise<void> {
-    return invoke("save_imagegen_config", { config });
+    await withKokoroError(commands.saveImagegenConfig(config));
 }
 
 export async function testSdConnection(baseUrl: string): Promise<string[]> {
-    return invoke<string[]>("test_sd_connection", { baseUrl });
+    return withKokoroError(commands.testSdConnection(baseUrl));
 }
 
 // ── Image Gen Events ──────────────────────────────
 
-export interface ChatImageGenEvent {
-    conversation_generation?: number;
-    character_id?: string;
-    conversation_id?: string;
-    client_request_id?: string;
-    turn_id?: string;
-    prompt: string;
-}
+export type ChatImageGenEvent = IpcEventPayload<typeof events.chatImagegen>;
 
 export async function onChatImageGen(callback: (event: ChatImageGenEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatImageGenEvent>("chat-imagegen", (e) => callback(e.payload));
+    return events.chatImagegen.listen((e) => callback(e.payload));
 }
 
-export async function onImageGenDone(callback: (event: ImageGenResult) => void): Promise<UnlistenFn> {
-    return listen<ImageGenResult>("imagegen:done", (e) => callback(e.payload));
+export async function onImageGenDone(callback: (event: ImageGenDone) => void): Promise<UnlistenFn> {
+    return events.imagegenDone.listen((e) => callback(e.payload));
 }
 
-export interface ChatImageGenError extends Omit<ChatImageGenEvent, "prompt"> { message: string }
+export type ChatImageGenError = IpcEventPayload<typeof events.chatImagegenError>;
 export async function onChatImageGenError(callback: (event: ChatImageGenError) => void): Promise<UnlistenFn> {
-    return listen<ChatImageGenError>("chat-imagegen-error", event => callback(event.payload));
+    return events.chatImagegenError.listen(event => callback(event.payload));
 }
 
 export async function onImageGenError(callback: (error: string) => void): Promise<UnlistenFn> {
-    return listen<string>("imagegen:error", (e) => callback(e.payload));
+    return events.imagegenError.listen((e) => callback(e.payload));
 }
 
 // ── Vision Upload ──────────────────────────────────
 
 export async function uploadVisionImage(fileBytes: number[], filename: string): Promise<string> {
-    return invoke<string>("upload_vision_image", { fileBytes, filename });
+    return withKokoroError(commands.uploadVisionImage(fileBytes, filename));
 }
 
 // ── Vision Config & Watcher ────────────────────────
 
-export interface VisionConfig {
-    vlm_enabled: boolean;
-    auto_vision_enabled: boolean;
-    vision_context_history_mode: "latest" | "full";
-    capture_interval_secs: number;
-    change_threshold: number;
-    display_id?: string | null;
-    vlm_region?: {
-        x: number;
-        y: number;
-        width: number;
-        height: number;
-    } | null;
-    proactive_vision_enabled: boolean;
-    vlm_provider: string;
-    vlm_base_url: string | null;
-    vlm_model: string;
-    vlm_api_key: string | null;
-    camera_enabled: boolean;
-    camera_device_id: string | null;
-}
+export type VisionConfig = IpcResponse<"getVisionConfig">;
 
-export interface VisionScreenInfo {
-    display_id: string;
-    label: string;
-    is_primary: boolean;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    scale_factor: number;
-}
+export type VisionScreenInfo = IpcResponse<"listVisionScreens">[number];
 
 export async function getVisionConfig(): Promise<VisionConfig> {
-    return invoke<VisionConfig>("get_vision_config");
+    return withKokoroError(commands.getVisionConfig());
 }
 
 export async function listVisionScreens(): Promise<VisionScreenInfo[]> {
-    return invoke<VisionScreenInfo[]>("list_vision_screens");
+    return withKokoroError(commands.listVisionScreens());
 }
 
 export async function saveVisionConfig(config: VisionConfig): Promise<void> {
-    return invoke("save_vision_config", { config });
+    await withKokoroError(commands.saveVisionConfig(config));
 }
 
 export async function setVisionTextInputFocused(focused: boolean): Promise<void> {
-    return invoke("set_vision_text_input_focused", { focused });
+    await withKokoroError(commands.setVisionTextInputFocused(focused));
 }
 
 export async function captureScreenNow(): Promise<string> {
-    return invoke<string>("capture_screen_now");
+    return withKokoroError(commands.captureScreenNow());
 }
 
-export interface VisionObservationEvent {
-    summary: string;
-    captured_at?: string;
-    source?: string;
-}
+type VisionObservationPayload = IpcEventPayload<typeof events.visionObservation>;
+export type VisionObservationEvent = Pick<VisionObservationPayload, "summary">
+    & Partial<Omit<VisionObservationPayload, "summary">>;
 
 export async function onVisionObservation(callback: (event: VisionObservationEvent) => void): Promise<UnlistenFn> {
-    return listen<string | VisionObservationEvent>("vision-observation", (event) => {
+    return events.visionObservation.listen((event) => {
         if (typeof event.payload === "string") {
             callback({ summary: event.payload });
         } else {
@@ -1093,235 +834,103 @@ export async function onVisionObservation(callback: (event: VisionObservationEve
 }
 
 export async function onCameraObservation(callback: (desc: string) => void): Promise<UnlistenFn> {
-    return listen<string>("camera-observation", (event) => callback(event.payload));
+    return events.cameraObservation.listen((event) => callback(event.payload));
 }
 
 // ── Memory Management ──────────────────────────────
 
-export interface MemoryRecord {
-    id: number;
-    content: string;
-    created_at: number;
-    importance: number;
-    tier: string;
-    memory_type: string;
-    entity_key: string | null;
-    status: string;
-    confidence: number;
-    first_seen_at: number;
-    last_seen_at: number;
-    evidence_count: number;
-}
+export type MemoryRecord = ListMemoriesResponse["memories"][number];
 
-export interface ListMemoriesResponse {
-    memories: MemoryRecord[];
-    total: number;
-}
+export type ListMemoriesResponse = IpcResponse<"listMemories">;
 
-export type MemoryUpgradeConfig = {
-    readonly observability_enabled: boolean;
-    readonly event_trigger_enabled: boolean;
-    readonly event_cooldown_secs: number;
-    readonly structured_memory_enabled: boolean;
-    readonly intent_routing_enabled: boolean;
-    readonly retrieval_eval_enabled: boolean;
-    readonly dreaming_enabled: boolean;
-    readonly dream_auto_apply_level: "conservative" | "review_only" | "aggressive" | string;
-    readonly dream_daily_hour: number;
-    readonly dream_review_required_for_conflicts: boolean;
-};
+export type MemoryUpgradeConfig = IpcResponse<"getMemoryUpgradeConfig">;
 
-export type MemoryObservabilitySummary = {
-    readonly write_event_count: number;
-    readonly retrieval_log_count: number;
-};
+export type MemoryObservabilitySummary = IpcResponse<"getMemoryObservabilitySummary">;
 
-export type MemoryWriteEventRecord = {
-    readonly source: string;
-    readonly trigger: string;
-    readonly extracted_count: number;
-    readonly stored_count: number;
-    readonly deduplicated_count: number;
-    readonly invalidated_count: number;
-    readonly duration_ms: number;
-};
+export type MemoryWriteEventRecord = NonNullable<IpcResponse<"getLatestMemoryWriteEvent">>;
 
-export type MemoryRetrievalLogRecord = {
-    readonly query: string;
-    readonly semantic_candidates: number;
-    readonly bm25_candidates: number;
-    readonly fused_candidates: number;
-    readonly injected_count: number;
-    readonly overlap_count: number | null;
-    readonly semantic_only_count: number | null;
-    readonly bm25_only_count: number | null;
-    readonly filtered_out_count: number | null;
-};
+export type MemoryRetrievalLogRecord = NonNullable<IpcResponse<"getLatestMemoryRetrievalLog">>;
 
-export type MemoryRetrievalEvalSummary = {
-    readonly retrieval_eval_enabled: boolean;
-    readonly query_length: number;
-    readonly candidate_efficiency_pct: number;
-};
+export type MemoryRetrievalEvalSummary = NonNullable<IpcResponse<"getLatestMemoryRetrievalEvalSummary">>;
 
-export type MemoryDreamJobRecord = {
-    readonly id: number;
-    readonly character_id: string;
-    readonly phase: string;
-    readonly status: string;
-    readonly trigger: string;
-    readonly started_at: number;
-    readonly finished_at: number | null;
-    readonly auto_applied_count: number;
-    readonly proposal_count: number;
-    readonly error: string | null;
-};
+export type MemoryDreamJobRecord = IpcResponse<"listDreamJobs">[number];
 
-export type MemoryDreamSourceRecord = {
-    readonly id: number;
-    readonly content: string;
-    readonly created_at: number;
-    readonly updated_at: number;
-    readonly importance: number;
-    readonly tier: string;
-    readonly memory_type: string;
-    readonly entity_key: string | null;
-    readonly status: string;
-};
+export type MemoryDreamSourceRecord = MemoryDreamProposalRecord["source_memories"][number];
 
-export type MemoryDreamProposalRecord = {
-    readonly id: number;
-    readonly character_id: string;
-    readonly proposal_type: string;
-    readonly status: string;
-    readonly confidence: number;
-    readonly title: string;
-    readonly rationale: string;
-    readonly source_memory_ids: string;
-    readonly source_memories: MemoryDreamSourceRecord[];
-    readonly target_memory_id: number | null;
-    readonly proposed_content: string | null;
-    readonly proposed_memory_type: string | null;
-    readonly proposed_entity_key: string | null;
-    readonly impact: string;
-    readonly created_at: number;
-    readonly updated_at: number;
-    readonly applied_at: number | null;
-};
+export type MemoryDreamProposalRecord = IpcResponse<"listDreamProposals">[number];
 
-export type MemoryDreamingSummary = {
-    readonly latest_job: MemoryDreamJobRecord | null;
-    readonly pending_proposal_count: number;
-    readonly auto_applied_proposal_count: number;
-};
+export type MemoryDreamingSummary = IpcResponse<"getDreamingSummary">;
 
-export type MemoryDreamRunResult = {
-    readonly job: MemoryDreamJobRecord;
-    readonly auto_applied_count: number;
-    readonly proposal_count: number;
-};
+export type MemoryDreamRunResult = IpcResponse<"runDreamNow">;
 
-export interface MemoryEmbeddingModelStatus {
-    installed: boolean;
-    repo_id: string;
-    download_url: string;
-    install_dir: string;
-    model_path: string;
-    required_files: string[];
-    missing_files: string[];
-}
+export type MemoryEmbeddingModelStatus = IpcResponse<"getMemoryEmbeddingModelStatus">;
 
-export interface MemoryEmbeddingModelDownloadProgress {
-    stage: "checking" | "downloading" | "complete" | "verifying" | "ready" | string;
-    message: string;
-    current_file: string;
-    file_index: number;
-    file_count: number;
-    downloaded_bytes: number;
-    total_bytes: number | null;
-}
+export type MemoryEmbeddingModelDownloadProgress = IpcEventPayload<typeof events.memoryEmbeddingModelProgress>;
 
 export async function getMemoryEmbeddingModelStatus(): Promise<MemoryEmbeddingModelStatus> {
-    return invoke<MemoryEmbeddingModelStatus>("get_memory_embedding_model_status");
+    return withKokoroError(commands.getMemoryEmbeddingModelStatus());
 }
 
 export async function downloadMemoryEmbeddingModel(): Promise<MemoryEmbeddingModelStatus> {
-    return invoke<MemoryEmbeddingModelStatus>("download_memory_embedding_model");
+    return withKokoroError(commands.downloadMemoryEmbeddingModel());
 }
 
 export async function onMemoryEmbeddingModelProgress(
     callback: (progress: MemoryEmbeddingModelDownloadProgress) => void
 ): Promise<UnlistenFn> {
-    return listen<MemoryEmbeddingModelDownloadProgress>(
-        "memory:embedding-model-progress",
-        (event) => callback(event.payload)
-    );
+    return events.memoryEmbeddingModelProgress.listen((event) => callback(event.payload));
 }
 
 export async function listMemories(characterId: string, limit = 50, offset = 0): Promise<ListMemoriesResponse> {
-    return invoke<ListMemoriesResponse>("list_memories", {
-        request: { character_id: characterId, limit, offset },
-    });
+    return withKokoroError(commands.listMemories({ character_id: characterId, limit, offset }));
 }
 
 export async function updateMemory(characterId: string, id: number, content: string, importance: number): Promise<void> {
-    return invoke("update_memory", {
-        request: { character_id: characterId, id, content, importance },
-    });
+    await withKokoroError(commands.updateMemory({ character_id: characterId, id, content, importance }));
 }
 
 export async function deleteMemory(characterId: string, id: number): Promise<void> {
-    return invoke("delete_memory", {
-        request: { character_id: characterId, id },
-    });
+    await withKokoroError(commands.deleteMemory({ character_id: characterId, id }));
 }
 
 export async function updateMemoryTier(characterId: string, id: number, tier: string): Promise<void> {
-    return invoke("update_memory_tier", {
-        request: { character_id: characterId, id, tier },
-    });
+    await withKokoroError(commands.updateMemoryTier({ character_id: characterId, id, tier }));
 }
 
 export async function getMemoryUpgradeConfig(): Promise<MemoryUpgradeConfig> {
-    return invoke<MemoryUpgradeConfig>("get_memory_upgrade_config");
+    return withKokoroError(commands.getMemoryUpgradeConfig());
 }
 
 export async function setMemoryUpgradeConfig(config: Readonly<MemoryUpgradeConfig>): Promise<void> {
-    return invoke("set_memory_upgrade_config", { config });
+    await withKokoroError(commands.setMemoryUpgradeConfig(config));
 }
 
 export async function getMemoryObservabilitySummary(): Promise<MemoryObservabilitySummary> {
-    return invoke<MemoryObservabilitySummary>("get_memory_observability_summary");
+    return withKokoroError(commands.getMemoryObservabilitySummary());
 }
 
 export async function getLatestMemoryWriteEvent(): Promise<MemoryWriteEventRecord | null> {
-    return invoke<MemoryWriteEventRecord | null>("get_latest_memory_write_event");
+    return withKokoroError(commands.getLatestMemoryWriteEvent());
 }
 
 export async function getLatestMemoryRetrievalLog(): Promise<MemoryRetrievalLogRecord | null> {
-    return invoke<MemoryRetrievalLogRecord | null>("get_latest_memory_retrieval_log");
+    return withKokoroError(commands.getLatestMemoryRetrievalLog());
 }
 
 export async function getLatestMemoryRetrievalEvalSummary(): Promise<MemoryRetrievalEvalSummary | null> {
-    return invoke<MemoryRetrievalEvalSummary | null>("get_latest_memory_retrieval_eval_summary");
+    return withKokoroError(commands.getLatestMemoryRetrievalEvalSummary());
 }
 
 export async function runDreamNow(characterId: string): Promise<MemoryDreamRunResult> {
-    return invoke<MemoryDreamRunResult>("run_dream_now", {
-        request: { character_id: characterId },
-    });
+    return withKokoroError(commands.runDreamNow({ character_id: characterId }));
 }
 
 export async function getDreamingSummary(characterId: string): Promise<MemoryDreamingSummary> {
-    return invoke<MemoryDreamingSummary>("get_dreaming_summary", {
-        request: { character_id: characterId },
-    });
+    return withKokoroError(commands.getDreamingSummary({ character_id: characterId }));
 }
 
 export async function listDreamJobs(characterId: string, limit = 20): Promise<MemoryDreamJobRecord[]> {
-    return invoke<MemoryDreamJobRecord[]>("list_dream_jobs", {
-        request: { character_id: characterId, limit },
-    });
+    return withKokoroError(commands.listDreamJobs({ character_id: characterId, limit }));
 }
 
 export async function listDreamProposals(
@@ -1329,274 +938,157 @@ export async function listDreamProposals(
     status = "pending",
     limit = 50,
 ): Promise<MemoryDreamProposalRecord[]> {
-    return invoke<MemoryDreamProposalRecord[]>("list_dream_proposals", {
-        request: { character_id: characterId, status, limit },
-    });
+    return withKokoroError(commands.listDreamProposals({ character_id: characterId, status, limit }));
 }
 
 export async function approveDreamProposal(id: number): Promise<void> {
-    return invoke("approve_dream_proposal", {
-        request: { id },
-    });
+    await withKokoroError(commands.approveDreamProposal({ id }));
 }
 
 export async function rejectDreamProposal(id: number): Promise<void> {
-    return invoke("reject_dream_proposal", {
-        request: { id },
-    });
+    await withKokoroError(commands.rejectDreamProposal({ id }));
 }
 
 // ── STT (Speech-to-Text) ──────────────────────────────
 
-export interface SttProviderConfig {
-    id: string;
-    provider_type: string;
-    enabled: boolean;
-    api_key?: string;
-    api_key_env?: string;
-    base_url?: string;
-    model?: string;
-    // sensevoice_local fields
-    model_path?: string;
-    tokens_path?: string;
-    num_threads?: number;
-    use_itn?: boolean;
-}
-
-export interface SttConfig {
-    active_provider: string;
-    language?: string;
-    auto_send: boolean;
-    continuous_listening: boolean;
-    wake_word_enabled: boolean;
-    wake_word?: string;
+type WireSttConfig = Parameters<typeof commands.saveSttConfig>[0];
+type WireSttProviderConfig = NonNullable<WireSttConfig["providers"]>[number];
+export type SttProviderConfig = PresentFields<WireSttProviderConfig, "enabled">;
+export type SttConfig = Omit<PresentFields<WireSttConfig, "active_provider" | "auto_send" | "wake_word_enabled" | "continuous_listening">, "providers"> & {
     providers: SttProviderConfig[];
-}
+};
 
-export interface SenseVoiceLocalModelStatus {
-    installed: boolean;
-    download_instructions_url: string;
-    recommended_model_id: string;
-    download_url: string;
-    install_dir: string;
-    model_path: string;
-    tokens_path: string;
-}
+export type SenseVoiceLocalModelStatus = IpcResponse<"getSensevoiceLocalStatus">;
 
-export interface SenseVoiceLocalDownloadProgress {
-    stage: "downloading" | "extracting" | "complete" | "ready" | string;
-    message: string;
-    downloaded_bytes: number;
-    total_bytes: number | null;
-}
+export type SenseVoiceLocalDownloadProgress = IpcEventPayload<typeof events.sttSensevoiceLocalProgress>;
 
 export async function transcribeAudio(audioBytes: number[], format: string): Promise<string> {
-    return invoke<string>("transcribe_audio", { audioBytes, format });
+    return withKokoroError(commands.transcribeAudio(audioBytes, format));
 }
 
 export async function getSttConfig(): Promise<SttConfig> {
-    return invoke<SttConfig>("get_stt_config");
+    return withKokoroError(commands.getSttConfig());
 }
 
 export async function saveSttConfig(config: SttConfig): Promise<void> {
-    return invoke("save_stt_config", { config });
+    await withKokoroError(commands.saveSttConfig(config));
 }
 
 export async function getSenseVoiceLocalStatus(): Promise<SenseVoiceLocalModelStatus> {
-    return invoke<SenseVoiceLocalModelStatus>("get_sensevoice_local_status");
+    return withKokoroError(commands.getSensevoiceLocalStatus());
 }
 
 export async function downloadSenseVoiceLocalModel(): Promise<SenseVoiceLocalModelStatus> {
-    return invoke<SenseVoiceLocalModelStatus>("download_sensevoice_local_model");
+    return withKokoroError(commands.downloadSensevoiceLocalModel());
 }
 
 export async function onSenseVoiceLocalProgress(
     callback: (progress: SenseVoiceLocalDownloadProgress) => void
 ): Promise<UnlistenFn> {
-    return listen<SenseVoiceLocalDownloadProgress>(
-        "stt:sensevoice-local-progress",
-        (event) => callback(event.payload)
-    );
+    return events.sttSensevoiceLocalProgress.listen((event) => callback(event.payload));
 }
 
 // ── Actions (Tool Calling) ─────────────────────────────
 
-export interface ActionInfo {
-    id: string;
-    name: string;
-    source: "builtin" | "mcp";
-    server_name?: string;
-    description: string;
-    parameters: { name: string; description: string; required: boolean }[];
-    needs_feedback: boolean;
-    risk_tags: ("read" | "write" | "external" | "sensitive")[];
-    permission_level: "safe" | "elevated";
-}
+export type ActionInfo = IpcResponse<"listActions">[number];
 
-export interface ActionResult {
-    success: boolean;
-    message: string;
-    data?: unknown;
-}
+export type ActionResult = IpcResponse<"executeAction">;
 
-export interface ToolCallEvent {
-    tool: string;
-    tool_id?: string;
-    result?: ActionResult;
-    error?: string;
-}
-
-export interface ToolSettings {
-    max_tool_rounds: number;
-    enabled_tools: Record<string, boolean>;
-    max_permission_level: "safe" | "elevated";
-    blocked_risk_tags: ("read" | "write" | "external" | "sensitive")[];
-}
+export type ToolSettings = IpcResponse<"getToolSettings">;
 
 export async function listActions(): Promise<ActionInfo[]> {
-    return invoke<ActionInfo[]>("list_actions");
+    return withKokoroError(commands.listActions());
 }
 
 export async function listBuiltinTools(): Promise<ActionInfo[]> {
-    return invoke<ActionInfo[]>("list_builtin_tools");
+    return withKokoroError(commands.listBuiltinTools());
 }
 
 export async function executeAction(name: string, args: Record<string, string>, characterId?: string): Promise<ActionResult> {
-    return invoke<ActionResult>("execute_action", { name, args, characterId });
+    return withKokoroError(commands.executeAction(name, args, characterId ?? null));
 }
 
 export async function onChatTurnTool(callback: (event: ChatTurnToolEvent) => void): Promise<UnlistenFn> {
-    return listen<ChatTurnToolEvent>("chat-turn-tool", (event) => callback(event.payload));
+    return events.chatTurnTool.listen((event) => callback(event.payload));
 }
 
 export async function getToolSettings(): Promise<ToolSettings> {
-    return invoke<ToolSettings>("get_tool_settings");
+    return withKokoroError(commands.getToolSettings());
 }
 
 export async function saveToolSettings(settings: ToolSettings): Promise<void> {
-    return invoke("save_tool_settings", { settings });
+    await withKokoroError(commands.saveToolSettings(settings));
 }
 
 export async function approveToolApproval(approvalRequestId: string): Promise<void> {
-    return invoke("approve_tool_approval", { approvalRequestId });
+    await withKokoroError(commands.approveToolApproval(approvalRequestId));
 }
 
 export async function rejectToolApproval(approvalRequestId: string, reason: string | null = null): Promise<void> {
-    return invoke("reject_tool_approval", { approvalRequestId, reason });
+    await withKokoroError(commands.rejectToolApproval(approvalRequestId, reason));
 }
 
 // ── MCP (Model Context Protocol) ──────────────────────────
 
-export interface McpServerConfig {
-    name: string;
-    /** "stdio" (default) or "streamable_http" */
-    type?: string;
-    command?: string;
-    args?: string[];
-    env?: Record<string, string>;
-    /** HTTP endpoint URL (for streamable_http transport) */
-    url?: string;
-    enabled: boolean;
-}
+export type McpServerConfig = NonNullable<Parameters<typeof commands.addMcpServer>[0]>;
 
-export interface McpServerStatus {
-    name: string;
-    enabled: boolean;
-    connected: boolean;
-    tool_count: number;
-    server_version: string | null;
-    status: "connected" | "connecting" | "disconnected";
-    error: string | null;
-}
+export type McpServerStatus = IpcResponse<"listMcpServers">[number];
 
 export async function listMcpServers(): Promise<McpServerStatus[]> {
-    return invoke<McpServerStatus[]>("list_mcp_servers");
+    return withKokoroError(commands.listMcpServers());
 }
 
 export async function addMcpServer(config: McpServerConfig): Promise<void> {
-    return invoke("add_mcp_server", { config });
+    await withKokoroError(commands.addMcpServer(config));
 }
 
 export async function removeMcpServer(name: string): Promise<void> {
-    return invoke("remove_mcp_server", { name });
+    await withKokoroError(commands.removeMcpServer(name));
 }
 
 export async function refreshMcpTools(): Promise<void> {
-    return invoke("refresh_mcp_tools");
+    await withKokoroError(commands.refreshMcpTools());
 }
 
 export async function reconnectMcpServer(name: string): Promise<void> {
-    return invoke("reconnect_mcp_server", { name });
+    await withKokoroError(commands.reconnectMcpServer(name));
 }
 
 export async function toggleMcpServer(name: string, enabled: boolean): Promise<void> {
-    return invoke("toggle_mcp_server", { name, enabled });
+    await withKokoroError(commands.toggleMcpServer(name, enabled));
 }
 
 // ── Conversation History ───────────────────────────────
 
-export interface Conversation {
-    id: string;
-    character_id: string;
-    title: string;
-    topic: string;
-    pinned_state: string;
-    created_at: string;
-    updated_at: string;
-}
+export type Conversation = IpcResponse<"listConversations">[number];
 
-export interface ConversationMessage {
-    id?: number;
-    role: string;
-    content: string;
-    metadata?: string;
-    created_at: string;
-}
+export type ConversationMessage = LoadedConversation["messages"][number];
 
-export interface LoadedConversation {
-    topic: string;
-    pinned_state: string;
-    messages: ConversationMessage[];
-}
+export type LoadedConversation = IpcResponse<"loadConversation">;
 
-export interface EditConversationMessageRequest {
-    conversation_id?: string;
-    conversation_generation?: number;
-    message_id?: number;
-    visible_index?: number;
-    new_content: string;
-}
+export type EditConversationMessageRequest = NonNullable<Parameters<typeof commands.editConversationMessage>[0]>;
 
-export interface EditConversationMessageResponse {
-    message_id: number;
-    updated_content: string;
-}
+export type EditConversationMessageResponse = IpcResponse<"editConversationMessage">;
 
 export async function editConversationMessage(
     request: EditConversationMessageRequest,
 ): Promise<EditConversationMessageResponse> {
-    return invoke<EditConversationMessageResponse>("edit_conversation_message", { request });
+    return withKokoroError(commands.editConversationMessage(request));
 }
 
 export async function listConversations(characterId: string): Promise<Conversation[]> {
-    return invoke<Conversation[]>("list_conversations", {
-        request: { character_id: characterId },
-    });
+    return withKokoroError(commands.listConversations({ character_id: characterId }));
 }
 
 export async function loadConversation(id: string): Promise<LoadedConversation> {
-    return invoke<LoadedConversation>("load_conversation", {
-        request: { id },
-    });
+    return withKokoroError(commands.loadConversation({ id }));
 }
 
 export async function updateConversationState(
     id: string,
     patch: { topic?: string; pinned_state?: string }
 ): Promise<void> {
-    return invoke("update_conversation_state", {
-        request: { id, ...patch },
-    });
+    await withKokoroError(commands.updateConversationState({ id, ...patch }));
 }
 
 export function hasPinnedConversationState(pinnedState: string): boolean {
@@ -1621,108 +1113,49 @@ export function getConversationDisplayTitle(conversation: Conversation): string 
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-    return invoke("delete_conversation", {
-        request: { id },
-    });
+    await withKokoroError(commands.deleteConversation({ id }));
 }
 
 export async function createConversation(): Promise<string> {
-    return invoke<string>("create_conversation");
+    return withKokoroError(commands.createConversation());
 }
 
 export async function renameConversation(id: string, title: string): Promise<void> {
-    return invoke("rename_conversation", {
-        request: { id, title },
-    });
+    await withKokoroError(commands.renameConversation({ id, title }));
 }
 
 // ── Bot Integrations ───────────────────────────────
 
-export type BotPlatformId = "telegram" | "qq" | "discord" | "line" | "webhook";
+export type BotPlatformId = keyof BotStatus;
 
-export type QQBotConfig = {
-    enabled: boolean;
-    app_id?: string;
-    app_id_env?: string;
-    app_secret?: string;
-    app_secret_env?: string;
-    allow_c2c: boolean;
-    allowed_user_openids: Array<string>;
-    allowed_group_openids: Array<string>;
-    character_id?: string;
-};
+type WireBotConfig = Parameters<typeof commands.saveBotConfig>[0];
 
-export type QQAuthorizationRequest = {
-    request_id: string;
-    user_openid: string;
-    conversation_kind: "c2c" | "group";
-    group_openid?: string;
-};
+export type QQBotConfig = PresentFields<NonNullable<WireBotConfig["qq"]>,
+    "enabled" | "allow_c2c" | "allowed_user_openids" | "allowed_group_openids">;
 
-export type QQAuthorizationResponse = {
-    user_openid: string;
-    group_openid?: string;
-    approved_user_openid?: string;
-    approved_group_openid?: string;
-    revision: number;
-};
+export type QQAuthorizationRequest = IpcEventPayload<typeof events.qqAuthorizationRequest>;
 
-export interface DiscordBotConfig {
-    enabled: boolean;
-    bot_token?: string;
-    bot_token_env?: string;
-    allowed_channel_ids: string[];
-    allow_direct_messages: boolean;
-    send_voice_reply: boolean;
-    character_id?: string;
-}
+export type QQAuthorizationResponse = IpcResponse<"respondQqAuthorization">;
 
-export interface LineBotConfig {
-    enabled: boolean;
-    channel_access_token?: string;
-    channel_access_token_env?: string;
-    channel_secret?: string;
-    channel_secret_env?: string;
-    webhook_path: string;
-    allowed_user_ids: string[];
-    character_id?: string;
-}
+export type DiscordBotConfig = PresentFields<NonNullable<WireBotConfig["discord"]>,
+    "enabled" | "allowed_channel_ids" | "allow_direct_messages" | "send_voice_reply">;
 
-export interface WebhookBotConfig {
-    enabled: boolean;
-    bind_host: string;
-    port: number;
-    endpoint_path: string;
-    bearer_token?: string;
-    bearer_token_env?: string;
-    send_voice_reply: boolean;
-    character_id?: string;
-}
+export type LineBotConfig = PresentFields<NonNullable<WireBotConfig["line"]>, "enabled" | "webhook_path" | "allowed_user_ids">;
 
-export interface BotConfig {
-    revision: number;
-    selected_platform: BotPlatformId;
+export type WebhookBotConfig = PresentFields<NonNullable<WireBotConfig["webhook"]>,
+    "enabled" | "bind_host" | "port" | "endpoint_path" | "send_voice_reply">;
+
+export type BotConfig = PresentFields<WireBotConfig, "revision" | "selected_platform"> & {
     telegram: TelegramConfig;
     qq: QQBotConfig;
     discord: DiscordBotConfig;
     line: LineBotConfig;
     webhook: WebhookBotConfig;
-}
+};
 
-export interface BotPlatformStatus {
-    enabled: boolean;
-    configured: boolean;
-    running: boolean;
-    connected: boolean;
-}
+export type BotPlatformStatus = BotStatus["qq"];
 
-export interface BotStatus {
-    telegram: BotPlatformStatus;
-    qq: BotPlatformStatus;
-    discord: BotPlatformStatus;
-    line: BotPlatformStatus;
-    webhook: BotPlatformStatus;
-}
+export type BotStatus = IpcResponse<"getBotStatus">;
 
 function withFixedBotEnv(config: BotConfig): BotConfig {
     return {
@@ -1753,440 +1186,210 @@ function withFixedBotEnv(config: BotConfig): BotConfig {
 }
 
 export async function getBotConfig(): Promise<BotConfig> {
-    return invoke<BotConfig>("get_bot_config");
+    return withKokoroError(commands.getBotConfig());
 }
 
 export async function saveBotConfig(config: BotConfig): Promise<BotConfig> {
-    return invoke<BotConfig>("save_bot_config", { config: withFixedBotEnv(config) });
+    return withKokoroError(commands.saveBotConfig(withFixedBotEnv(config)));
 }
 
 export async function respondQQAuthorization(
     request: Readonly<QQAuthorizationRequest>,
     approved: boolean,
 ): Promise<QQAuthorizationResponse> {
-    return invoke<QQAuthorizationResponse>("respond_qq_authorization", {
-        requestId: request.request_id,
-        userOpenid: request.user_openid,
-        groupOpenid: request.group_openid ?? null,
-        approved,
-    });
+    return withKokoroError(commands.respondQqAuthorization(request.request_id, request.user_openid, request.group_openid ?? null, approved));
 }
 
 export async function startBotPlatform(platform: Exclude<BotPlatformId, "telegram">): Promise<void> {
-    return invoke("start_bot_platform", { platform });
+    await withKokoroError(commands.startBotPlatform(platform));
 }
 
 export async function stopBotPlatform(platform: Exclude<BotPlatformId, "telegram">): Promise<void> {
-    return invoke("stop_bot_platform", { platform });
+    await withKokoroError(commands.stopBotPlatform(platform));
 }
 
 export async function getBotStatus(): Promise<BotStatus> {
-    return invoke<BotStatus>("get_bot_status");
+    return withKokoroError(commands.getBotStatus());
 }
 
 // ── Telegram Bot ──────────────────────────────────
 
-export interface TelegramConfig {
-    enabled: boolean;
-    bot_token?: string;
-    bot_token_env?: string;
-    /** Exact chat IDs (signed for groups), not sender IDs. Empty denies all. */
-    allowed_chat_ids: number[];
-    send_voice_reply: boolean;
-    character_id?: string;
-}
+type WireTelegramConfig = Parameters<typeof commands.saveTelegramConfig>[0];
+export type TelegramConfig = PresentFields<WireTelegramConfig, "enabled" | "allowed_chat_ids" | "send_voice_reply">;
 
-export interface TelegramStatus {
-    running: boolean;
-    enabled: boolean;
-    has_token: boolean;
-}
+export type TelegramStatus = IpcResponse<"getTelegramStatus">;
 
 /** @deprecated Partial character updates are rejected by the backend. */
 export async function setActiveCharacterId(id: string): Promise<void> {
-    return invoke("set_active_character_id", { id });
+    await withKokoroError(commands.setActiveCharacterId(id));
 }
 
 export async function listCharacterIds(): Promise<string[]> {
-    return invoke<string[]>("list_character_ids");
+    return withKokoroError(commands.listCharacterIds());
 }
 
 export async function getTelegramConfig(): Promise<TelegramConfig> {
-    return invoke<TelegramConfig>("get_telegram_config");
+    return withKokoroError(commands.getTelegramConfig());
 }
 
 export async function saveTelegramConfig(config: TelegramConfig): Promise<void> {
-    return invoke("save_telegram_config", { config });
+    await withKokoroError(commands.saveTelegramConfig(config));
 }
 
 export async function startTelegramBot(): Promise<void> {
-    return invoke("start_telegram_bot");
+    await withKokoroError(commands.startTelegramBot());
 }
 
 export async function stopTelegramBot(): Promise<void> {
-    return invoke("stop_telegram_bot");
+    await withKokoroError(commands.stopTelegramBot());
 }
 
 export async function getTelegramStatus(): Promise<TelegramStatus> {
-    return invoke<TelegramStatus>("get_telegram_status");
+    return withKokoroError(commands.getTelegramStatus());
 }
 
-export interface TelegramChatSync {
-    role: string;
-    text: string;
-    translation?: string;
-}
+export type TelegramChatSync = IpcEventPayload<typeof events.telegramChatSync>;
 
 export async function onTelegramChatSync(callback: (data: TelegramChatSync) => void): Promise<UnlistenFn> {
-    return listen<TelegramChatSync>("telegram:chat-sync", (event) => callback(event.payload));
+    return events.telegramChatSync.listen((event) => callback(event.payload));
 }
 
 // ── Backup / Restore ──────────────────────────────
 
-export interface BackupStats {
-    memories: number;
-    conversations: number;
-    messages: number;
-    configs: number;
-}
+export type BackupStats = ExportResult["stats"];
 
-export interface ExportResult {
-    path: string;
-    size_bytes: number;
-    stats: BackupStats;
-}
+export type ExportResult = IpcResponse<"exportData">;
 
-export interface BackupManifest {
-    version: string;
-    created_at: string;
-    app_version: string;
-    includes_character_resources: boolean;
-}
+export type BackupManifest = ImportPreview["manifest"];
 
 /** One character instance stored inside a backup. */
-export interface BackupCharacterSummary {
-    id: string;
-    name: string;
-    memory_count: number;
-    conversation_count: number;
-}
+export type BackupCharacterSummary = ImportPreview["characters"][number];
 
-export interface ImportPreview {
-    manifest: BackupManifest;
-    has_database: boolean;
-    has_configs: boolean;
-    config_files: string[];
-    stats: BackupStats;
-    /** Empty when the backup predates the SQLite character table. */
-    characters: BackupCharacterSummary[];
-}
+export type ImportPreview = IpcResponse<"previewImport">;
 
 /** Routes the rows of one imported character into an existing local character. */
-export interface CharacterMerge {
-    imported_id: string;
-    target_id: string;
-}
+export type CharacterMerge = NonNullable<ImportOptions["character_merges"]>[number];
 
-export interface ImportOptions {
-    import_database: boolean;
-    import_configs: boolean;
-    conflict_strategy: "skip" | "overwrite";
-    /** Characters to merge into a local instance; the rest are imported as new. */
-    character_merges?: CharacterMerge[];
-    /** Characters to leave out of the restore entirely. */
-    ignored_characters?: string[];
-}
+export type ImportOptions = NonNullable<Parameters<typeof commands.importData>[1]>;
 
-export interface ImportResult {
-    imported_memories: number;
-    imported_conversations: number;
-    imported_configs: number;
-    imported_characters: number;
-    merged_characters?: number;
-    ignored_characters?: number;
-    characters_json?: string;
-    /** Imported memories dropped by the skip strategy because they violate the local schema. */
-    skipped_memories?: number;
-    debug_log?: string[];
-}
+export type ImportResult = IpcResponse<"importData">;
 
-export type ManualBackupExportOptions = {
-    readonly include_character_resources: boolean;
-};
+export type ManualBackupExportOptions = NonNullable<Parameters<typeof commands.exportData>[2]>;
 
 export async function exportData(
     exportPath: string,
     options: Readonly<ManualBackupExportOptions>,
 ): Promise<ExportResult> {
-    return invoke<ExportResult>("export_data", { exportPath, options });
+    return withKokoroError(commands.exportData(exportPath, null, options));
 }
 
 export async function previewImport(filePath: string): Promise<ImportPreview> {
-    return invoke<ImportPreview>("preview_import", { filePath });
+    return withKokoroError(commands.previewImport(filePath));
 }
 
 export async function importData(filePath: string, options: ImportOptions): Promise<ImportResult> {
-    return invoke<ImportResult>("import_data", { filePath, options });
+    return withKokoroError(commands.importData(filePath, options));
 }
 
 // ── Character CRUD (SQLite-backed) ────────────────
 
-export type CharacterRecord = {
-    readonly id: string;
-    readonly name: string;
-    readonly persona: string;
-    readonly user_nickname: string;
-    readonly source_format: string;
-    readonly created_at: number;
-    readonly updated_at: number;
-    readonly template_id?: string | null;
-    readonly template_version?: string | null;
-    readonly template_snapshot_json?: string | null;
-    readonly description?: string;
-    readonly avatar_path?: string | null;
-    readonly greeting?: string;
-    readonly greeting_consumed_at?: number | null;
-    readonly greeting_message_id?: number | null;
-    readonly example_dialogue?: string;
-    readonly runtime_profile_json?: string;
-    readonly user_modified_at?: number | null;
-};
+export type CharacterRecord = IpcResponse<"listCharacters">[number];
 
-export type CharacterRuntimeProfile = {
-    readonly live2d_model?: string | null;
-    readonly background?: string | null;
-    readonly cue_profile?: string | null;
-    readonly tts?: Readonly<Record<string, unknown>> | null;
-    readonly response_language?: string | null;
-    readonly proactive_enabled?: boolean | null;
-};
+export type CharacterRuntimeProfile = CharacterTemplateManifest["runtime"];
 
-export type ResolvedTtsMode =
-    | "configured_provider"
-    | "local_preset_confirmation"
-    | "browser"
-    | "text_only";
+export type ResolvedTtsMode = ResolvedCharacterTts["mode"];
 
-export type ResolvedCharacterTts = {
-    readonly mode: ResolvedTtsMode;
-    readonly provider_id: string | null;
-    readonly provider_type: string | null;
-    readonly local_preset: string | null;
-    readonly endpoint: string | null;
-    readonly voice: string | null;
-    readonly speed: number | null;
-    readonly pitch: number | null;
-    readonly requires_save_confirmation: boolean;
-};
+export type ResolvedCharacterTts = BackendCharacterRuntime["tts"];
 
-export type PackageAssetReference = {
-    readonly source: "package";
-    readonly template_id: string;
-    readonly template_version: string;
-    readonly path: string;
-} | {
-    readonly source: "library";
-    readonly model_id: string;
-};
+export type PackageAssetReference = NonNullable<BackendCharacterRuntime["live2d_model"]>;
 
-export type BackendCharacterRuntime = {
-    readonly character_id: string;
-    readonly character_name: string;
-    readonly user_name: string;
-    readonly system_prompt: string;
-    readonly response_language: string;
-    readonly proactive_enabled: boolean;
-    readonly current_conversation_id: string | null;
-    readonly live2d_model: PackageAssetReference | null;
-    readonly background: PackageAssetReference | null;
-    readonly cue_profile: PackageAssetReference | null;
-    readonly tts: ResolvedCharacterTts;
-};
+export type BackendCharacterRuntime = CommittedCharacterRuntime["runtime"];
 
-export type CharacterActivationToken = {
-    readonly revision: number;
-    readonly nonce: string;
-    readonly character_updated_at: number;
-    readonly previous_committed: BackendCharacterRuntime;
-    readonly resolved_runtime: BackendCharacterRuntime;
-    readonly prompt: {
-        readonly character_name: string;
-        readonly user_name: string;
-        readonly persona: string;
-        readonly example_dialogue: string;
-    };
-    readonly target_conversation_id: string | null;
-    readonly greeting_action:
-        | "none"
-        | "consume_without_emit"
-        | { readonly emit: { readonly content: string } };
-    readonly recommendations: {
-        readonly vision: boolean | null;
-        readonly memory: boolean | null;
-        readonly mcp_servers: ReadonlyArray<string>;
-        readonly bot_platforms: ReadonlyArray<string>;
-    };
-};
+export type CharacterActivationToken = IpcResponse<"prepareCharacterActivation">;
 
-export type CommittedCharacterRuntime = {
-    readonly revision: number;
-    readonly runtime: BackendCharacterRuntime;
-    readonly target_conversation_id: string;
-};
+export type CommittedCharacterRuntime = IpcResponse<"commitCharacterActivation">;
 
 export type PrepareCharacterActivationOptions = {
     readonly allowLocalPreset: boolean;
 };
 
-export type CharacterTemplateManifest = {
-    readonly schema_version: number;
-    readonly engine_version: string;
-    readonly id: string;
-    readonly version: string;
-    readonly name: string;
-    readonly description: string;
-    readonly author: string;
-    readonly license: string;
-    readonly locale: string | null;
-    readonly avatar: string | null;
-    readonly persona: string;
-    readonly greeting: string;
-    readonly example_dialogue: string | null;
-    readonly assets: Readonly<Record<string, string | null>> | null;
-    readonly runtime: CharacterRuntimeProfile | null;
-    readonly recommendations: Readonly<Record<string, unknown>> | null;
-};
+export type CharacterTemplateManifest = IpcResponse<"listCharacterTemplates">[number];
 
-export type DuplicateCharacterRequest = {
-    readonly source_id: string;
-    readonly new_id: string;
-    readonly new_name?: string | null;
-    readonly created_at: number;
-    readonly updated_at: number;
-};
+export type DuplicateCharacterRequest = NonNullable<Parameters<typeof commands.duplicateCharacter>[0]>;
 
-export type RestoreCharacterDefaultsRequest = {
-    readonly id: string;
-    readonly updated_at: number;
-};
+export type RestoreCharacterDefaultsRequest = NonNullable<Parameters<typeof commands.restoreCharacterDefaults>[0]>;
 
-export type InstantiateCharacterTemplateRequest = {
-    readonly template_id: string;
-    readonly template_version: string;
-    readonly instance_id: string;
-    readonly user_nickname: string;
-    readonly created_at: number;
-    readonly updated_at: number;
-};
+export type InstantiateCharacterTemplateRequest = NonNullable<Parameters<typeof commands.instantiateCharacterTemplate>[0]>;
 
-export type ReconcileCharacterTemplateRequest = {
-    readonly instance_id: string;
-    readonly template_version: string;
-};
+export type ReconcileCharacterTemplateRequest = NonNullable<Parameters<typeof commands.reconcileCharacterTemplate>[0]>;
 
-export type ReconcileConflict = {
-    readonly field: string;
-    readonly old_value: unknown;
-    readonly user_value: unknown;
-    readonly new_value: unknown;
-};
+export type ReconcileConflict = ReconcileCharacterTemplatePreview["conflicts"][number];
 
-export type CharacterTemplateFields = {
-    readonly name: string;
-    readonly description: string;
-    readonly avatar: string | null;
-    readonly persona: string;
-    readonly greeting: string;
-    readonly example_dialogue: string | null;
-    readonly assets: Readonly<Record<string, string | null>> | null;
-    readonly runtime: CharacterRuntimeProfile | null;
-};
+export type CharacterTemplateFields = ReconcileCharacterTemplatePreview["merged"];
 
-export type ReconcileCharacterTemplatePreview = {
-    readonly instance_id: string;
-    readonly template_id: string;
-    readonly current_template_version: string;
-    readonly available_template_version: string;
-    readonly merged: CharacterTemplateFields;
-    readonly conflicts: ReadonlyArray<ReconcileConflict>;
-};
+export type ReconcileCharacterTemplatePreview = IpcResponse<"reconcileCharacterTemplate">;
 
-export type ApplyCharacterTemplateReconciliationRequest = {
-    readonly instance_id: string;
-    readonly expected_current_template_version: string;
-    readonly expected_new_template_version: string;
-    readonly selected: CharacterTemplateFields;
-    readonly updated_at: number;
-};
+export type ApplyCharacterTemplateReconciliationRequest = NonNullable<Parameters<typeof commands.applyCharacterTemplateReconciliation>[0]>;
 
 export async function listCharacters(): Promise<CharacterRecord[]> {
-    return invoke<CharacterRecord[]>("list_characters");
+    return withKokoroError(commands.listCharacters());
 }
 
-export async function createCharacter(record: CharacterRecord): Promise<void> {
-    return invoke("create_character", { request: record });
+export async function createCharacter(record: Parameters<typeof commands.createCharacter>[0]): Promise<void> {
+    await withKokoroError(commands.createCharacter(record));
 }
 
 export async function prepareCharacterActivation(
     characterId: string,
     options?: Readonly<PrepareCharacterActivationOptions>,
 ): Promise<CharacterActivationToken> {
-    return invoke<CharacterActivationToken>("prepare_character_activation", {
-        characterId,
-        allowLocalPreset: options?.allowLocalPreset ?? null,
-    });
+    return withKokoroError(commands.prepareCharacterActivation(characterId, options?.allowLocalPreset ?? null));
 }
 
 export async function commitCharacterActivation(
     token: Readonly<CharacterActivationToken>,
 ): Promise<CommittedCharacterRuntime> {
-    return invoke<CommittedCharacterRuntime>("commit_character_activation", { token });
+    return withKokoroError(commands.commitCharacterActivation(token));
 }
 
 export async function getCommittedCharacterRuntime(): Promise<CommittedCharacterRuntime | null> {
-    return invoke<CommittedCharacterRuntime | null>("get_committed_character_runtime");
+    return withKokoroError(commands.getCommittedCharacterRuntime());
 }
 
 export async function createCharacterWithAvatar(
-    record: CharacterRecord,
+    record: Parameters<typeof commands.createCharacterWithAvatar>[0],
     bytes: Uint8Array,
 ): Promise<void> {
-    return invoke("create_character_with_avatar", {
-        request: record,
-        avatarBytes: Array.from(bytes),
-    });
+    await withKokoroError(commands.createCharacterWithAvatar(record, Array.from(bytes)));
 }
 
 export async function updateCharacterWithAvatar(
-    record: Omit<CharacterRecord, "created_at">,
+    record: Parameters<typeof commands.updateCharacterWithAvatar>[0],
     bytes: Uint8Array,
 ): Promise<void> {
-    return invoke("update_character_with_avatar", {
-        request: record,
-        avatarBytes: Array.from(bytes),
-    });
+    await withKokoroError(commands.updateCharacterWithAvatar(record, Array.from(bytes)));
 }
 
-export async function updateCharacter(record: Omit<CharacterRecord, "created_at">): Promise<void> {
-    return invoke("update_character", { request: record });
+export async function updateCharacter(record: Parameters<typeof commands.updateCharacter>[0]): Promise<void> {
+    await withKokoroError(commands.updateCharacter(record));
 }
 
 export async function deleteCharacter(id: string): Promise<void> {
-    return invoke("delete_character", { id });
+    await withKokoroError(commands.deleteCharacter(id));
 }
 
 export async function duplicateCharacter(request: Readonly<DuplicateCharacterRequest>): Promise<void> {
-    return invoke("duplicate_character", { request });
+    await withKokoroError(commands.duplicateCharacter(request));
 }
 
 export async function restoreCharacterDefaults(
     request: Readonly<RestoreCharacterDefaultsRequest>,
 ): Promise<void> {
-    return invoke("restore_character_defaults", { request });
+    await withKokoroError(commands.restoreCharacterDefaults(request));
 }
 
 export async function listCharacterTemplates(): Promise<Array<CharacterTemplateManifest>> {
-    return invoke<Array<CharacterTemplateManifest>>("list_character_templates");
+    return withKokoroError(commands.listCharacterTemplates());
 }
 
 export type InstalledContentPackage = {
@@ -2214,72 +1417,35 @@ export async function listInstalledContent(): Promise<Array<InstalledContentPack
 export async function instantiateCharacterTemplate(
     request: Readonly<InstantiateCharacterTemplateRequest>,
 ): Promise<void> {
-    return invoke("instantiate_character_template", { request });
+    await withKokoroError(commands.instantiateCharacterTemplate(request));
 }
 
 export async function reconcileCharacterTemplate(
     request: Readonly<ReconcileCharacterTemplateRequest>,
 ): Promise<ReconcileCharacterTemplatePreview> {
-    return invoke<ReconcileCharacterTemplatePreview>("reconcile_character_template", { request });
+    return withKokoroError(commands.reconcileCharacterTemplate(request));
 }
 
 export async function applyCharacterTemplateReconciliation(
     request: Readonly<ApplyCharacterTemplateReconciliationRequest>,
 ): Promise<void> {
-    return invoke("apply_character_template_reconciliation", { request });
+    await withKokoroError(commands.applyCharacterTemplateReconciliation(request));
 }
 
 // ── Content Registry ───────────────────────────────────────────────────────
 
-export interface RegistryRecommendations {
-    vision: boolean;
-    memory: boolean;
-    mcp_servers: string[];
-    bot_platforms: string[];
-}
+export type RegistryRecommendations = NonNullable<RegistryEntry["recommendations"]>;
 
-export interface RegistryEntry {
-    content_type: "character" | "mod";
-    id: string;
-    name: string;
-    version: string;
-    author: string;
-    description: string;
-    preview: string[];
-    engine_version: string;
-    download_url: string;
-    archive_size: number;
-    sha256: string;
-    trust: "official" | "community" | "unverified" | string;
-    trust_source: string;
-    registry_identity?: string;
-    permissions: string[];
-    recommendations: RegistryRecommendations;
-}
+export type RegistryEntry = RegistryIndex["entries"][number];
 
-export interface RegistryIndex {
-    schema_version: number;
-    registry_version: number;
-    generated_at?: string;
-    entries: RegistryEntry[];
-}
+export type RegistryIndex = IpcResponse<"listRegistryEntries">;
 
-export interface InstalledCharacterPackage {
-    id: string;
-    version: string;
-    name: string;
-    trust: string;
-    package_dir: string;
-}
+export type InstalledCharacterPackage = IpcResponse<"installCharacterFromRegistry">;
 
-export interface CharacterPackageRemoval {
-    id: string;
-    version: string;
-    active_fallback?: string;
-}
+export type CharacterPackageRemoval = IpcResponse<"removeCharacterPackage">;
 
 export async function listRegistryEntries(registryUrl?: string): Promise<RegistryIndex> {
-    return invoke<RegistryIndex>("list_registry_entries", { registryUrl });
+    return withKokoroError(commands.listRegistryEntries(registryUrl ?? null));
 }
 
 export async function installCharacterFromRegistry(
@@ -2287,47 +1453,34 @@ export async function installCharacterFromRegistry(
     version: string,
     registryUrl?: string,
 ): Promise<InstalledCharacterPackage> {
-    return invoke<InstalledCharacterPackage>("install_character_from_registry", {
-        characterId,
-        version,
-        registryUrl,
-    });
+    return withKokoroError(commands.installCharacterFromRegistry(characterId, version, registryUrl ?? null));
 }
 
 export async function installCharacterFromUrl(url: string): Promise<InstalledCharacterPackage> {
-    return invoke<InstalledCharacterPackage>("install_character_from_url", { url });
+    return withKokoroError(commands.installCharacterFromUrl(url));
 }
 
 export async function removeCharacterPackage(
     characterId: string,
     version: string,
 ): Promise<CharacterPackageRemoval> {
-    return invoke<CharacterPackageRemoval>("remove_character_package", {
-        characterId,
-        version,
-    });
+    return withKokoroError(commands.removeCharacterPackage(characterId, version));
 }
 
 // ── Auto Backup ────────────────────────────────────
 
-export interface AutoBackupConfig {
-    enabled: boolean;
-    backup_dir: string;
-    interval_days: number;
-    auto_cleanup: boolean;
-    keep_days: number;
-}
+export type AutoBackupConfig = IpcResponse<"getAutoBackupConfig">;
 
 export async function getAutoBackupConfig(): Promise<AutoBackupConfig> {
-    return invoke<AutoBackupConfig>("get_auto_backup_config");
+    return withKokoroError(commands.getAutoBackupConfig());
 }
 
 export async function saveAutoBackupConfig(config: AutoBackupConfig): Promise<void> {
-    return invoke("save_auto_backup_config", { config });
+    await withKokoroError(commands.saveAutoBackupConfig(config));
 }
 
 export async function runAutoBackupNow(): Promise<string> {
-    return invoke<string>("run_auto_backup_now");
+    return withKokoroError(commands.runAutoBackupNow());
 }
 
 // ── Error Handling ──────────────────────────────────
@@ -2433,17 +1586,6 @@ export function parseKokoroError(error: unknown): KokoroErrorObject | string {
 }
 
 /**
- * 安全的 invoke 包装，自动处理错误解析
- *
- * @param cmd - 命令名称
- * @param args - 命令参数
- * @returns Promise，错误时拒绝并包含结构化错误信息
- */
-export async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    return invoke<T>(cmd, args);
-}
-
-/**
  * 检查错误是否为特定类型（TypeScript 类型收窄谓词）
  *
  * @param error - 错误对象
@@ -2454,8 +1596,5 @@ export function isKokoroErrorCode(
     error: unknown,
     code: KokoroErrorObject["code"]
 ): error is KokoroErrorObject {
-    if (typeof error === "object" && error !== null && "code" in error) {
-        return (error as KokoroErrorObject).code === code;
-    }
-    return false;
+    return isRecord(error) && error.code === code && typeof error.message === "string";
 }

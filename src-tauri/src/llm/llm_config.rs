@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct LlmProviderConfig {
     pub id: String,
     /// "openai" | "openai_responses" | "anthropic" | "ollama" | "llama_cpp" | "codex_runtime"
@@ -19,13 +19,18 @@ pub struct LlmProviderConfig {
     #[serde(default = "default_true")]
     pub supports_native_tools: bool,
 
+    #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
     pub api_key_env: Option<String>,
+    #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
 
     /// Catch-all for provider-specific config.
     #[serde(default)]
+    #[specta(type = std::collections::HashMap<String, crate::ipc::wire::JsonValue>)]
     pub extra: HashMap<String, Value>,
 }
 
@@ -39,17 +44,19 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct LlmPreset {
     pub id: String,
     pub name: String,
     pub active_provider: String,
+    #[serde(default)]
     pub system_provider: Option<String>,
+    #[serde(default)]
     pub system_model: Option<String>,
     pub providers: Vec<LlmProviderConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct LlmConfig {
     /// ID of the active provider (must match one of `providers[].id`).
     #[serde(default = "default_active_provider")]
@@ -57,9 +64,11 @@ pub struct LlmConfig {
 
     /// Optional: Separate provider for system tasks (Intent Parsing).
     /// If None, uses `active_provider`.
+    #[serde(default)]
     pub system_provider: Option<String>,
 
     /// Optional: Override model for system tasks.
+    #[serde(default)]
     pub system_model: Option<String>,
 
     #[serde(default = "default_providers")]

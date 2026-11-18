@@ -1,6 +1,7 @@
 use crate::chat::runtime::ChatRuntimeState;
+use crate::ipc::wire::emit_to;
 use std::sync::{Arc, OnceLock};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use super::{TtsPlayback, TtsPlaybackEvent};
 
@@ -31,20 +32,19 @@ impl TtsPlayback for TauriTtsPlayback {
                 if let Some(runtime) = &self.runtime {
                     runtime.begin_playback(&event.request_id, window);
                 }
-                let result = self.app.emit_to(window, "tts:start", &event);
+                let request_id = event.request_id.clone();
+                let result = emit_to(&self.app, window, event);
                 if result.is_err() {
                     if let Some(runtime) = &self.runtime {
-                        runtime.finish_playback(&event.request_id, window, None);
+                        runtime.finish_playback(&request_id, window, None);
                     }
                 }
                 result
             }
-            TtsPlaybackEvent::Audio(event) => self.app.emit_to(window, "tts:audio", event),
-            TtsPlaybackEvent::End(event) => self.app.emit_to(window, "tts:end", event),
-            TtsPlaybackEvent::Error(event) => self.app.emit_to(window, "tts:error", event),
-            TtsPlaybackEvent::BrowserDelegate(event) => {
-                self.app.emit_to(window, "tts:browser-delegate", event)
-            }
+            TtsPlaybackEvent::Audio(event) => emit_to(&self.app, window, event),
+            TtsPlaybackEvent::End(event) => emit_to(&self.app, window, event),
+            TtsPlaybackEvent::Error(event) => emit_to(&self.app, window, event),
+            TtsPlaybackEvent::BrowserDelegate(event) => emit_to(&self.app, window, event),
         };
         result.map_err(|error| error.to_string())
     }

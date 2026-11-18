@@ -1,8 +1,9 @@
 pub mod bridge;
-pub mod client;
+mod client;
 pub mod manager;
-pub mod transport;
+mod transport;
 
-pub use client::McpClient;
 pub use manager::{McpManager, McpServerConfig};
-pub use transport::{McpTransport, StdioTransport};
+
+#[cfg(test)]
+mod tests;

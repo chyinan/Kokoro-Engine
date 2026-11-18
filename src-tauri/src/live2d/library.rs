@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use zip::write::SimpleFileOptions;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct Live2dModelInfo {
     /// Human-friendly name (top-level folder name)
     pub name: String,

@@ -85,6 +85,12 @@ fn main() {
     // Windows NSIS bundles only configured resources; include the runtime DLL
     // before Tauri codegen resolves the platform-specific bundle resources.
     tauri_build::build();
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // Tauri embeds the application manifest in the desktop binary. The
+        // export example also links Common Controls and needs its own manifest.
+        println!("cargo:rustc-link-arg-examples=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-examples=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
+    }
     copy_to_binary_dir(&dest, lib_name);
 }
 

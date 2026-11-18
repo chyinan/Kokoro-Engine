@@ -12,6 +12,7 @@ const GITHUB_LATEST_RELEASE_URL: &str =
 use crate::imagegen::WindowSizeState;
 
 #[command]
+#[specta::specta]
 pub async fn set_window_size(
     state: State<'_, WindowSizeState>,
     width: u32,
@@ -21,14 +22,14 @@ pub async fn set_window_size(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct EngineInfo {
     pub name: String,
     pub version: String,
     pub platform: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct ReleaseUpdateInfo {
     pub current_version: String,
     pub latest_version: String,
@@ -42,7 +43,7 @@ struct GitHubReleaseResponse {
     html_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct SystemStatus {
     pub engine_running: bool,
     pub active_modules: Vec<String>,
@@ -51,6 +52,7 @@ pub struct SystemStatus {
 
 /// Returns basic engine metadata for the frontend to display.
 #[tauri::command]
+#[specta::specta]
 pub fn get_engine_info() -> EngineInfo {
     EngineInfo {
         name: "Kokoro Engine".to_string(),
@@ -60,6 +62,7 @@ pub fn get_engine_info() -> EngineInfo {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn check_latest_release() -> Result<ReleaseUpdateInfo, KokoroError> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let client = reqwest::Client::builder()
@@ -92,6 +95,7 @@ pub async fn check_latest_release() -> Result<ReleaseUpdateInfo, KokoroError> {
 
 /// Returns the current system status including active modules.
 #[tauri::command]
+#[specta::specta]
 pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>) -> SystemStatus {
     let mut active_modules = Vec::new();
 

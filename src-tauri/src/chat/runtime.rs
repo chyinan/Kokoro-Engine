@@ -12,39 +12,42 @@ use tokio::sync::watch;
 
 const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "chat-runtime-changed")]
 pub struct ChatTurnSnapshot {
     pub revision: u64,
     // Later speech updates must not make the reply look newer than its history.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_revision: Option<u64>,
     pub client_request_id: String,
     pub turn_id: Option<String>,
     pub character_id: Option<String>,
     pub conversation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_generation: Option<u64>,
     pub user_message_id: Option<i64>,
     pub assistant_message_id: Option<i64>,
     pub message: String,
     pub images: Vec<String>,
     pub hidden: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reusing_saved_prompt: bool,
+    #[specta(type = crate::chat::event_payloads::ChatTurnStatus)]
     pub status: String,
     pub text: String,
     pub translation: Option<String>,
+    #[specta(type = Vec<crate::chat::event_payloads::ChatTurnToolEvent>)]
     pub tools: Vec<Value>,
     pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<&'static str>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub user_save_failed: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub persistence_retryable: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preparation_timed_out: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speech_error: Option<String>,
 }
 
@@ -795,7 +798,7 @@ pub(crate) fn relay_chat_event(
     snapshot
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, specta::Type)]
 pub struct ChatViewVersion {
     pub revision: u64,
     pub history_revision: i64,
@@ -803,16 +806,17 @@ pub struct ChatViewVersion {
     pub busy: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, specta::Type)]
 pub struct ConversationMessage {
     pub id: i64,
     pub role: String,
     pub content: String,
+    #[serde(default)]
     pub metadata: Option<String>,
     pub created_at: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct ChatViewSnapshot {
     #[serde(flatten)]
     pub version: ChatViewVersion,
@@ -896,7 +900,7 @@ pub async fn get_chat_view(
 }
 
 /// Automatic playback is a revocable view effect, separate from the saved turn.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, specta::Type)]
 pub(crate) struct ChatPlaybackScope {
     pub client_request_id: String,
     pub turn_id: String,
@@ -1018,7 +1022,7 @@ pub(crate) async fn speak_completed_turn(
                 .runtime
                 .record_speech_error(&client_request_id, error.to_string())
             {
-                events.notify(ChatEvent::RuntimeChanged, snapshot);
+                events.notify(ChatEvent::RuntimeChanged(snapshot));
             }
         }
     });

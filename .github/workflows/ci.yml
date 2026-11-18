@@ -28,8 +28,8 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
-      - name: Check IPC contract
-        run: npm run check:ipc
+      - name: Check frontend IPC transport usage
+        run: node scripts/check-ipc-contract.mjs
 
       - name: Run tests
         run: npm run test
@@ -110,6 +110,9 @@ jobs:
 
       - name: Run tests
         run: cd src-tauri && cargo test --verbose
+
+      - name: Check generated IPC bindings
+        run: cargo run --locked --manifest-path src-tauri/Cargo.toml --example export-ipc -- --check
 
       - name: Run clippy
         run: cd src-tauri && cargo clippy -- -D warnings -A clippy::double_must_use

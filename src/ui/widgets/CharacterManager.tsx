@@ -13,6 +13,7 @@ import { parseCharacterCard } from "../../lib/character-card-parser";
 import { migrateLegacyCharactersToSqlite } from "../../lib/legacy-character-migration";
 import { getKokoroErrorMessage, setUserName, setUserPersona, getProactiveEnabled, listCharacters, createCharacter, createCharacterWithAvatar, updateCharacter, updateCharacterWithAvatar, deleteCharacter } from "../../lib/kokoro-bridge";
 import type { CharacterRecord } from "../../lib/kokoro-bridge";
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 import { isCharacterEditDirty, isUserProfileDirty } from "./settings-dirty-check";
 export { isCharacterEditDirty, isUserProfileDirty };
 import {
@@ -87,6 +88,7 @@ const DEFAULT_PERSONA = "You are a friendly, warm companion character. Respond w
 
 function makeDefaultCharacter(): CharacterRecord {
     return {
+        ...emptyCharacterDetails,
         id: crypto.randomUUID(),
         name: "Kokoro",
         persona: DEFAULT_PERSONA,
@@ -536,6 +538,7 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
     const handleCreate = async () => {
         const now = Date.now();
         const newChar: CharacterRecord = {
+            ...emptyCharacterDetails,
             id: crypto.randomUUID(),
             name: "New Character",
             persona: "",
@@ -737,7 +740,8 @@ const CharacterManager = forwardRef<CharacterManagerRef, CharacterManagerProps>(
                 const avatarPath = profile.avatar_bytes
                     ? `character-instance-resource://${id}/avatar.png`
                     : profile.avatar_path;
-                const newChar = {
+                const newChar: CharacterRecord = {
+                    ...emptyCharacterDetails,
                     id,
                     name: profile.name,
                     persona: profile.persona,

@@ -11,6 +11,7 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 #[tauri::command]
+#[specta::specta]
 pub async fn upload_vision_image(
     state: State<'_, Arc<Mutex<VisionServer>>>,
     file_bytes: Vec<u8>,
@@ -23,6 +24,7 @@ pub async fn upload_vision_image(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_vision_config(
     state: State<'_, VisionWatcher>,
 ) -> Result<VisionConfig, KokoroError> {
@@ -31,11 +33,13 @@ pub async fn get_vision_config(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_vision_screens() -> Result<Vec<ScreenInfo>, KokoroError> {
     list_screens().map_err(KokoroError::ExternalService)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn save_vision_config(
     app_handle: AppHandle,
     state: State<'_, VisionWatcher>,
@@ -63,6 +67,7 @@ pub async fn save_vision_config(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn start_vision_watcher(
     app_handle: AppHandle,
     state: State<'_, VisionWatcher>,
@@ -72,12 +77,14 @@ pub async fn start_vision_watcher(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn stop_vision_watcher(state: State<'_, VisionWatcher>) -> Result<(), KokoroError> {
     state.stop();
     Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_vision_text_input_focused(
     state: State<'_, VisionWatcher>,
     focused: bool,
@@ -87,6 +94,7 @@ pub async fn set_vision_text_input_focused(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn capture_screen_now(
     state: State<'_, VisionWatcher>,
     llm_service: State<'_, crate::llm::service::LlmService>,

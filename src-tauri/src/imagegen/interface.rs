@@ -35,13 +35,18 @@ impl From<ImageGenError> for String {
 
 // ── Generation Parameters ──────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ImageGenParams {
     pub prompt: String,
+    #[serde(default)]
     pub prompt_prefix: Option<String>,
+    #[serde(default)]
     pub negative_prompt: Option<String>,
+    #[serde(default)]
     pub size: Option<String>,    // e.g. "1024x1024"
+    #[serde(default)]
     pub quality: Option<String>, // e.g. "standard", "hd"
+    #[serde(default)]
     pub style: Option<String>,   // e.g. "vivid", "natural"
     pub n: usize,                // Number of images to generate (default 1)
 }

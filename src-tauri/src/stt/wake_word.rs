@@ -1,3 +1,4 @@
+use crate::ipc::events::{SttWakeWordDetected, SttWakeWordError};
 use crate::stt::mic::create_voice_activity_detector;
 use crate::stt::stream::SAMPLE_RATE;
 use crate::stt::{AudioChunk, AudioSource, SttService};
@@ -8,7 +9,8 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
+use tauri_specta::Event;
 use tokio::sync::mpsc as tokio_mpsc;
 
 const DETECTION_COOLDOWN: Duration = Duration::from_secs(2);
@@ -218,7 +220,7 @@ impl WakeWordTranscriber {
             let text = result.text.trim().to_string();
             if !text.is_empty() {
                 self.last_detection_at = Some(Instant::now());
-                let _ = self.app.emit("stt:wake-word-detected", text);
+                let _ = SttWakeWordDetected(text).emit(&self.app);
             }
             return Ok(());
         }
@@ -230,7 +232,7 @@ impl WakeWordTranscriber {
         let normalized = normalize_text(&result.text);
         if normalized.contains(&self.wake_word_normalized) {
             self.last_detection_at = Some(Instant::now());
-            let _ = self.app.emit("stt:wake-word-detected", result.text);
+            let _ = SttWakeWordDetected(result.text).emit(&self.app);
         }
 
         Ok(())
@@ -530,10 +532,7 @@ where
             },
             move |err| {
                 tracing::error!(target: "stt", "[WakeWord][native] microphone stream error: {err}");
-                let _ = err_app.emit(
-                    "stt:wake-word-error",
-                    format!("Native wake word stream error: {err}"),
-                );
+                let _ = SttWakeWordError(format!("Native wake word stream error: {err}")).emit(&err_app);
             },
             None,
         )
