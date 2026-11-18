@@ -1,8 +1,10 @@
+import { commands, events, type TranscriptionSegment } from "@/lib/generated/ipc";
 import { useState, useRef, useCallback, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { isTauriEnvironment } from "../../utils/env";
 import { startNativeMic } from "../../lib/kokoro-bridge";
+
+export type { TranscriptionSegment } from "@/lib/generated/ipc";
 
 const SNAPSHOT_INTERVAL = 2000; // 2s: ultra-fast provisional feedback
 const FLUSH_WINDOW = 25000;      // 25s: force commit
@@ -12,29 +14,12 @@ const SILENCE_MS_TO_STOP = 2500;
 const SPEECH_RMS_THRESHOLD = 0.02;
 type CaptureTransport = "web" | "native";
 
-interface NativeMicVolumeEvent {
-    volume: number;
-    rms: number;
-}
-
 export enum VoiceState {
     Idle = "idle",
     Listening = "listening", // Active, streaming audio
     Processing = "processing", // Performing transient update
     Speaking = "speaking", // TTS active (used by UI for visualization)
     Error = "error"
-}
-
-export interface TranscriptionSegment {
-    start: number;
-    end: number;
-    text: string;
-}
-
-interface TranscriptionResult {
-    text: string;
-    segments: TranscriptionSegment[];
-    processing_time: any;
 }
 
 export function useVoiceInput(
@@ -114,7 +99,7 @@ export function useVoiceInput(
         handleSpeechActivity(rms > SPEECH_RMS_THRESHOLD);
 
         // 3. Send to Backend
-        invoke("process_audio_chunk", { chunk: Array.from(inputData) })
+        commands.processAudioChunk(Array.from(inputData))
             .catch(err => console.warn("Audio drop:", err));
     }, [handleSpeechActivity]);
 
@@ -148,7 +133,7 @@ export function useVoiceInput(
     const stopCapture = useCallback(async () => {
         if (captureTransport.current === "native") {
             try {
-                await invoke("stop_native_mic");
+                await commands.stopNativeMic();
             } finally {
                 await cleanupNativeCapture();
             }
@@ -190,11 +175,11 @@ export function useVoiceInput(
 
     const startNativeCapture = useCallback(async (onlyWhenChatIdle: boolean, canStart?: () => boolean) => {
         try {
-            nativeAutoStopUnlisten.current = await listen("stt:mic-auto-stop", () => {
+            nativeAutoStopUnlisten.current = await events.sttMicAutoStop.listen(() => {
                 if (!isRunning.current || !autoStopRef.current) return;
                 setTimeout(() => stopRef.current?.(), 0);
             });
-            nativeVolumeUnlisten.current = await listen<NativeMicVolumeEvent | number>("stt:mic-volume", (event) => {
+            nativeVolumeUnlisten.current = await events.sttMicVolume.listen((event) => {
                 const payload = event.payload;
                 const nextVolume =
                     typeof payload === "number"
@@ -225,7 +210,7 @@ export function useVoiceInput(
 
         try {
             // Get partial result
-            const result = await invoke<TranscriptionResult>("snapshot_audio_stream");
+            const result = await commands.snapshotAudioStream();
 
             // Merge logic:
             // 1. We have existing `segmentsRef.current`.
@@ -237,11 +222,11 @@ export function useVoiceInput(
 
             if (result.segments.length > 0) {
                 const newSegments = result.segments;
-                const firstNewStart = newSegments[0].start;
+                const firstNewStart = newSegments[0].start ?? 0;
 
                 // Keep history that ends *before* the new segments start
                 // (Give a small margin for float precision / overlap adjustment if needed)
-                const keepHistory = segmentsRef.current.filter(s => s.end < firstNewStart + 0.05);
+                const keepHistory = segmentsRef.current.filter(s => (s.end ?? 0) < firstNewStart + 0.05);
 
                 // Concatenate
                 segmentsRef.current = [...keepHistory, ...newSegments];
@@ -272,7 +257,7 @@ export function useVoiceInput(
                 // Time to prune backend!
                 // We DON'T clear our local segmentsRef, because we need to accumulate text.
                 // We just tell backend to discard old raw audio to save RAM.
-                await invoke("prune_audio_buffer", { keepSeconds: OVERLAP_SECONDS });
+                await commands.pruneAudioBuffer(OVERLAP_SECONDS);
                 lastFlushTime.current = now;
             }
 
@@ -299,7 +284,7 @@ export function useVoiceInput(
                 if (!isTauriEnvironment() || !interrupt.isAllowed()
                     || !await startNativeCapture(true, interrupt.isAllowed)) return;
             } else {
-                await invoke("discard_audio_stream");
+                await commands.discardAudioStream();
                 if (!mounted.current) return;
                 if (isTauriEnvironment()) {
                     try {
@@ -363,13 +348,13 @@ export function useVoiceInput(
 
         // Finalize: get last bit
         try {
-            const result = await invoke<TranscriptionResult>("complete_audio_stream");
+            const result = await commands.completeAudioStream();
 
             // Same merge logic one last time
             if (result.segments.length > 0) {
                 const newSegments = result.segments;
-                const firstNewStart = newSegments[0].start;
-                const keepHistory = segmentsRef.current.filter(s => s.end < firstNewStart + 0.05);
+                const firstNewStart = newSegments[0].start ?? 0;
+                const keepHistory = segmentsRef.current.filter(s => (s.end ?? 0) < firstNewStart + 0.05);
                 segmentsRef.current = [...keepHistory, ...newSegments];
             }
 

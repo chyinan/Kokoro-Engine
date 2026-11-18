@@ -1,5 +1,5 @@
+import { events } from "@/lib/generated/ipc";
 import { useChatTextReveal } from "./chat/use-chat-text-reveal";
-import { listen } from "@tauri-apps/api/event";
 // Display adapter: drafts, voice input, layout and rendering only.
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredValue, useSyncExternalStore, useMemo, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import { motion, AnimatePresence, useIsPresent } from "framer-motion";
@@ -479,7 +479,7 @@ export default function ChatPanel({
 
     useEffect(() => {
         let mounted = true;
-        const unlisten = listen("voice-interrupt-stt", () => {
+        const unlisten = events.voiceInterruptStt.listen(() => {
             const { character_id, conversation_id, generation } = chatApplication.getSnapshot();
             const isAllowed = () => {
                 const current = chatApplication.getSnapshot();

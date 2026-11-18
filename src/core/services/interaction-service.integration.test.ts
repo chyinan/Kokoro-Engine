@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { chatReply } from "../../lib/chat/__tests__/wire-fixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ChatViewSnapshot, StreamChatResponse } from "../../lib/kokoro-bridge";
 
@@ -16,7 +17,7 @@ beforeEach(async () => {
   const module = await import("../../lib/chat/application");
   app = module.chatApplication;
   ipc.read.mockResolvedValue({ ...module.emptyChatView } satisfies ChatViewSnapshot);
-  ipc.send.mockResolvedValue({ status: "completed", conversation_id: "conv" } satisfies StreamChatResponse);
+  ipc.send.mockResolvedValue(chatReply({ status: "completed", conversation_id: "conv" }) satisfies StreamChatResponse);
   service = (await import("./interaction-service")).interactionService;
   await vi.advanceTimersByTimeAsync(0);
 });

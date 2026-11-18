@@ -41,7 +41,7 @@ pub(crate) enum BotEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub(crate) struct QqAuthorizationPrompt {
     pub request_id: String,
     pub user_openid: String,
@@ -120,7 +120,7 @@ const LINE_CHANNEL_SECRET_ENV: &str = "LINE_CHANNEL_SECRET";
 const WEBHOOK_BEARER_TOKEN_ENV: &str = "KOKORO_WEBHOOK_TOKEN";
 pub(crate) const MAX_GENERIC_WEBHOOK_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(default)]
 pub struct BotConfig {
     pub revision: u64,
@@ -146,7 +146,7 @@ impl Default for BotConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(default)]
 pub struct DiscordBotConfig {
     pub enabled: bool,
@@ -172,7 +172,7 @@ impl Default for DiscordBotConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(default)]
 pub struct LineBotConfig {
     pub enabled: bool,
@@ -200,7 +200,7 @@ impl Default for LineBotConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(default)]
 pub struct WebhookBotConfig {
     pub enabled: bool,
@@ -567,7 +567,7 @@ impl BotRuntimeService {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct BotStatus {
     pub telegram: BotPlatformStatus,
     pub qq: BotPlatformStatus,
@@ -576,7 +576,7 @@ pub struct BotStatus {
     pub webhook: BotPlatformStatus,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct BotPlatformStatus {
     pub enabled: bool,
     pub configured: bool,

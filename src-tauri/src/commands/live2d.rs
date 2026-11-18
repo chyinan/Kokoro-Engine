@@ -1,9 +1,11 @@
 use crate::error::KokoroError;
+use crate::ipc::{events::Live2dProfileUpdated, wire::{emit, Response}};
 use crate::live2d::{Live2dModelInfo, Live2dModelProfile, Live2dStore};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 #[tauri::command]
+#[specta::specta]
 pub async fn import_live2d_zip(app: AppHandle, zip_path: String) -> Result<String, KokoroError> {
     model_store(&app)
         .map_err(KokoroError::Internal)?
@@ -11,6 +13,7 @@ pub async fn import_live2d_zip(app: AppHandle, zip_path: String) -> Result<Strin
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_live2d_models(app: AppHandle) -> Result<Vec<Live2dModelInfo>, KokoroError> {
     model_store(&app)
         .map_err(KokoroError::Internal)?
@@ -18,6 +21,7 @@ pub async fn list_live2d_models(app: AppHandle) -> Result<Vec<Live2dModelInfo>, 
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_live2d_model(app: AppHandle, model_name: String) -> Result<(), KokoroError> {
     model_store(&app)
         .map_err(KokoroError::Internal)?
@@ -25,6 +29,7 @@ pub async fn delete_live2d_model(app: AppHandle, model_name: String) -> Result<(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn rename_live2d_model(
     app: AppHandle,
     model_path: String,
@@ -34,6 +39,7 @@ pub async fn rename_live2d_model(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn import_live2d_folder(
     app: AppHandle,
     model_json_path: String,
@@ -44,6 +50,7 @@ pub async fn import_live2d_folder(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn export_live2d_model(
     app: AppHandle,
     model_path: String,
@@ -53,24 +60,28 @@ pub async fn export_live2d_model(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_live2d_model_profile(
     app: AppHandle,
     model_path: String,
-) -> Result<Live2dModelProfile, String> {
+) -> Result<Response<Live2dModelProfile>, String> {
     model_store(&app)?.profile(&model_path)
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn save_live2d_model_profile(
     app: AppHandle,
     profile: Live2dModelProfile,
-) -> Result<Live2dModelProfile, String> {
+) -> Result<Response<Live2dModelProfile>, String> {
     let merged = model_store(&app)?.save_profile(profile)?;
-    let _ = app.emit("live2d-profile-updated", &merged);
-    Ok(merged)
+    let _ = emit(&app, Live2dProfileUpdated(merged.clone()));
+    Ok(Response(merged))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn set_active_live2d_model(
     app: AppHandle,
     model_path: Option<String>,

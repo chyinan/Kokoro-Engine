@@ -3,16 +3,10 @@ import { LipSyncProcessor } from "./LipSyncProcessor";
 import { audioPlayer } from "../../core/services";
 import type { AudioAnalysis } from "../../lib/audio-player";
 import { getLive2dModelProfile, type Live2dModelProfile } from "../../lib/kokoro-bridge";
+import type { IdleBehavior } from "@/lib/generated/ipc";
 
 export type AnimationState = "Idle" | "Speaking" | "Interactive";
 export type CueName = string;
-
-export type IdleBehavior =
-    | { type: "look_around"; params: { direction: number; duration_ms: number } }
-    | { type: "stretch"; params: Record<string, never> }
-    | { type: "hum"; params: { melody_seed: number } }
-    | { type: "sigh"; params: Record<string, never> }
-    | { type: "fidget"; params: Record<string, never> };
 
 export interface Live2DControllerConfig {
     autoIdle: boolean;

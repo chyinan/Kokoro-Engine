@@ -1,3 +1,4 @@
+import { chatReply } from "./wire-fixtures";
 import { vi } from "vitest";
 import { ChatApplication, emptyChatView, type ChatTransport } from "../application";
 import type { ChatTurnSnapshot, ChatViewSnapshot, StreamChatResponse } from "../../kokoro-bridge";
@@ -17,7 +18,7 @@ export function harness() {
   const io: ChatTransport = {
     read: vi.fn(async () => structuredClone(view)),
     listen: vi.fn(async callback => { callbacks.add(callback); return () => { callbacks.delete(callback); }; }),
-    send: vi.fn(async request => ({ status: "completed", conversation_id: "conversation-a", client_request_id: request.client_request_id, text: "answer" })),
+    send: vi.fn(async request => (chatReply({ status: "completed", conversation_id: "conversation-a", client_request_id: request.client_request_id, text: "answer" }))),
     cancel: vi.fn(async () => {}),
   };
   const app = new ChatApplication(io);

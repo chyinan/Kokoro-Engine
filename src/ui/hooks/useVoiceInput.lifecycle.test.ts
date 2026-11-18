@@ -71,7 +71,7 @@ describe("useVoiceInput recovery", () => {
         vi.mocked(invoke).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
 
         await act(async () => { await hookState?.start(options); });
-        expect(invoke).toHaveBeenCalledExactlyOnceWith("start_native_mic", { autoStopOnSilence: true, onlyWhenChatIdle: true });
+        expect(invoke).toHaveBeenCalledExactlyOnceWith("start_native_mic", { autoStopOnSilence: true, onlyWhenChatIdle: true }, undefined);
         expect(hookState?.state).toBe("idle");
         expect(onStarted).not.toHaveBeenCalled();
         expect(getUserMedia).not.toHaveBeenCalled();
@@ -95,11 +95,11 @@ describe("useVoiceInput recovery", () => {
         await act(async () => {
             starting = hookState?.start({ voiceInterrupt: { isAllowed: () => autoSend, onStarted } });
         });
-        expect(invoke).toHaveBeenCalledWith("start_native_mic", expect.objectContaining({ onlyWhenChatIdle: true }));
+        expect(invoke).toHaveBeenCalledWith("start_native_mic", expect.objectContaining({ onlyWhenChatIdle: true }), undefined);
 
         autoSend = false;
         await act(async () => { nativeStart.resolve(true); await starting; });
-        expect(invoke).toHaveBeenLastCalledWith("stop_native_mic");
+        expect(invoke).toHaveBeenLastCalledWith("stop_native_mic", undefined, undefined);
         expect(hookState?.state).toBe("idle");
         expect(onStarted).not.toHaveBeenCalled();
         expect(getUserMedia).not.toHaveBeenCalled();

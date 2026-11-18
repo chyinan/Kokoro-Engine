@@ -8,11 +8,13 @@ use crate::actions::executor::{
 use crate::actions::permission::{
     decision_reason, evaluate_permission_decision, PermissionDecision,
 };
+use crate::actions::registry::{dispatch_handler, ActionHandler};
 use crate::actions::tool_settings::ToolSettings;
 use crate::actions::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
 use crate::error::KokoroError;
 use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{HookEvent, HookOutcome, HookRuntime};
+use crate::ipc::wire::Response;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{command, AppHandle, Manager, State};
@@ -387,6 +389,80 @@ mod tests {
         assert_eq!(invocation.name, "get_time");
         assert_eq!(invocation.args.get("tz"), Some(&"UTC".to_string()));
     }
+
+    #[tokio::test]
+    async fn direct_invocation_dispatches_the_handler_selected_before_policy_checks() {
+        struct ProbeAction(&'static str);
+
+        #[async_trait::async_trait]
+        impl ActionHandler for ProbeAction {
+            fn name(&self) -> &str {
+                "probe"
+            }
+
+            fn description(&self) -> &str {
+                self.0
+            }
+
+            fn parameters(&self) -> Vec<crate::actions::registry::ActionParam> {
+                Vec::new()
+            }
+
+            async fn execute(
+                &self,
+                _args: HashMap<String, String>,
+                _ctx: ActionContext,
+            ) -> Result<ActionResult, crate::actions::registry::ActionError> {
+                Ok(ActionResult::ok(self.0))
+            }
+        }
+
+        let registry = RwLock::new(ActionRegistry::new());
+        registry
+            .write()
+            .await
+            .register_mcp("server", ProbeAction("original"));
+        let (action, handler) = resolve_action_at_boundary(&registry, "probe")
+            .await
+            .unwrap();
+
+        registry
+            .write()
+            .await
+            .register_mcp("server", ProbeAction("replacement"));
+        let (current, _) = resolve_action_at_boundary(&registry, &action.id)
+            .await
+            .unwrap();
+        assert_eq!(current.description, "replacement");
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ActionContext {
+            memory_scope: None,
+            cue_names: None,
+            request_id: None,
+            turn_id: None,
+            services: Arc::new(crate::actions::registry::ActionServices {
+                state: None,
+                vision: crate::vision::watcher::VisionWatcher::new(Default::default()),
+                capture_screen: |_| unreachable!("probe does not capture screens"),
+                imagegen: None,
+                window_size: None,
+                live2d: Arc::new(crate::live2d::Live2dStore::new(dir.path().to_path_buf())),
+                events: crate::chat::events::ChatEvents {
+                    runtime: Default::default(),
+                    desktop: None,
+                    mods: None,
+                },
+                notification: None,
+            }),
+            character_id: "probe".into(),
+            conversation_id: None,
+            source: Some("direct_execute".into()),
+        };
+        let result = dispatch_handler(handler.as_ref(), HashMap::new(), ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.message, "original");
+    }
 }
 
 fn deny_hook_validation_error(reason: &str) -> KokoroError {
@@ -509,13 +585,13 @@ fn build_resolved_direct_invocation(
 #[cfg(test)]
 use crate::actions::executor::build_tool_invocation_from_input;
 
-async fn resolve_action_id_at_boundary(
-    registry_state: &State<'_, Arc<RwLock<ActionRegistry>>>,
+async fn resolve_action_at_boundary(
+    registry_state: &RwLock<ActionRegistry>,
     input: &str,
-) -> Result<String, KokoroError> {
+) -> Result<(ActionInfo, Arc<dyn ActionHandler>), KokoroError> {
     let registry = registry_state.read().await;
     registry
-        .resolve_action_id_for_input(input)
+        .resolve_action_for_execution(input)
         .map_err(|error| KokoroError::Validation(error.0))
 }
 
@@ -564,6 +640,7 @@ async fn modify_direct_action_args(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_actions(
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
     vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
@@ -574,6 +651,7 @@ pub async fn list_actions(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_builtin_tools(
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
     vision_watcher: State<'_, crate::vision::watcher::VisionWatcher>,
@@ -584,6 +662,7 @@ pub async fn list_builtin_tools(
 }
 
 #[command]
+#[specta::specta]
 pub async fn execute_action(
     app: AppHandle,
     registry_state: State<'_, Arc<RwLock<ActionRegistry>>>,
@@ -591,7 +670,7 @@ pub async fn execute_action(
     name: String,
     args: HashMap<String, String>,
     character_id: Option<String>,
-) -> Result<ActionResult, KokoroError> {
+) -> Result<Response<ActionResult>, KokoroError> {
     let character_id = character_id.unwrap_or_else(|| "default".to_string());
     let raw_invocation = build_direct_invocation(&name, &args);
 
@@ -607,8 +686,8 @@ pub async fn execute_action(
         return Err(error);
     }
 
-    let action_id = match resolve_action_id_at_boundary(&registry_state, &name).await {
-        Ok(action_id) => action_id,
+    let (action, handler) = match resolve_action_at_boundary(&registry_state, &name).await {
+        Ok(resolved) => resolved,
         Err(error) => {
             emit_after_action_hook(
                 &app,
@@ -621,28 +700,7 @@ pub async fn execute_action(
             return Err(error);
         }
     };
-    let invocation = build_resolved_direct_invocation(&action_id, &args);
-
-    let action = {
-        let registry = registry_state.read().await;
-        registry
-            .resolve_action(&action_id)
-            .map_err(|e| KokoroError::Validation(e.to_string()))
-    };
-    let action = match action {
-        Ok(action) => action,
-        Err(error) => {
-            emit_after_action_hook(
-                &app,
-                &character_id,
-                &raw_invocation,
-                None,
-                &Err(error.clone()),
-            )
-            .await;
-            return Err(error);
-        }
-    };
+    let invocation = build_resolved_direct_invocation(&action.id, &args);
 
     let enabled = {
         let tool_settings = tool_settings_state.read().await;
@@ -693,14 +751,12 @@ pub async fn execute_action(
         conversation_id: None,
         source: Some("direct_execute".to_string()),
     };
-    let result = {
-        let registry = registry_state.read().await;
-        registry
-            .execute(&action.id, effective_args, ctx)
-            .await
-            .map_err(|e| KokoroError::Internal(e.to_string()))
-    };
+    // Run the same handler whose metadata passed policy and the hooks. An MCP
+    // handler checks its captured connection/catalog before issuing remote I/O.
+    let result = dispatch_handler(handler.as_ref(), effective_args, ctx)
+        .await
+        .map_err(|e| KokoroError::Internal(e.to_string()));
 
     emit_after_action_hook(&app, &character_id, &raw_invocation, Some(&action), &result).await;
-    result
+    result.map(Response)
 }

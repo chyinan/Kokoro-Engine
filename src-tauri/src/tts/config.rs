@@ -5,7 +5,7 @@ use std::path::Path;
 
 // ── Provider Config ────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ProviderConfig {
     pub id: String,
     pub provider_type: String, // "openai", "edge_tts", "local_vits", "gpt_sovits", "omnivoice", "azure", "elevenlabs", "browser"
@@ -13,16 +13,24 @@ pub struct ProviderConfig {
     pub enabled: bool,
 
     // Common fields (optional, provider-specific)
+    #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
     pub api_key_env: Option<String>,
+    #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
     pub default_voice: Option<String>,
+    #[serde(default)]
     pub model_path: Option<String>,
 
     /// Catch-all for provider-specific config
     #[serde(default)]
+    #[specta(type = std::collections::HashMap<String, crate::ipc::wire::JsonValue>)]
     pub extra: HashMap<String, serde_json::Value>,
 }
 
@@ -39,7 +47,7 @@ fn default_true() -> bool {
 
 // ── Cache Config ───────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct CacheConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -68,7 +76,7 @@ fn default_ttl_secs() -> u64 {
 
 // ── Queue Config ───────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct QueueConfig {
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
@@ -86,7 +94,7 @@ fn default_max_concurrent() -> usize {
 
 // ── Top-Level System Config ────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct TtsSystemConfig {
     #[serde(default)]
     pub default_provider: Option<String>,

@@ -1,10 +1,11 @@
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::State;
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct ConversationInfo {
     pub id: String,
     pub character_id: String,
@@ -17,42 +18,45 @@ pub struct ConversationInfo {
 
 pub use crate::chat::runtime::ConversationMessage;
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct LoadedConversation {
     pub topic: String,
     pub pinned_state: String,
     pub messages: Vec<ConversationMessage>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct ListConversationsRequest {
     pub character_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct LoadConversationRequest {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct DeleteConversationRequest {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct RenameConversationRequest {
     pub id: String,
     pub title: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct UpdateConversationStateRequest {
     pub id: String,
+    #[serde(default)]
     pub topic: Option<String>,
+    #[serde(default)]
     pub pinned_state: Option<String>,
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_conversations(
     request: ListConversationsRequest,
     state: State<'_, AIOrchestrator>,
@@ -209,10 +213,11 @@ pub async fn load_conversation_inner(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn load_conversation(
     request: LoadConversationRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<LoadedConversation, KokoroError> {
+) -> Result<Response<LoadedConversation>, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let max_chars = *state.max_message_chars.lock().await;
     load_conversation_inner(
@@ -226,6 +231,7 @@ pub async fn load_conversation(
         true,
     )
     .await
+        .map(Response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -289,6 +295,7 @@ pub async fn delete_conversation_inner(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_conversation(
     request: DeleteConversationRequest,
     state: State<'_, AIOrchestrator>,
@@ -313,6 +320,7 @@ pub async fn delete_conversation(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_character_ids(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Vec<String>, KokoroError> {
@@ -330,6 +338,7 @@ pub async fn list_character_ids(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     state.clear_history().await;
@@ -337,6 +346,7 @@ pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<Str
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn rename_conversation(
     request: RenameConversationRequest,
     state: State<'_, AIOrchestrator>,
@@ -352,6 +362,7 @@ pub async fn rename_conversation(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_conversation_state(
     request: UpdateConversationStateRequest,
     state: State<'_, AIOrchestrator>,
@@ -382,16 +393,20 @@ pub async fn update_conversation_state(
     Ok(())
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, specta::Type)]
 pub struct EditConversationMessageRequest {
+    #[serde(default)]
     pub conversation_id: Option<String>,
+    #[serde(default)]
     pub conversation_generation: Option<u64>,
+    #[serde(default)]
     pub message_id: Option<i64>,
+    #[serde(default)]
     pub visible_index: Option<usize>,
     pub new_content: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, specta::Type)]
 pub struct EditConversationMessageResponse {
     pub message_id: i64,
     pub updated_content: String,
@@ -557,10 +572,11 @@ pub async fn edit_conversation_message_inner(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn edit_conversation_message(
     request: EditConversationMessageRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<EditConversationMessageResponse, KokoroError> {
+) -> Result<Response<EditConversationMessageResponse>, KokoroError> {
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let _history_guard = state
         .try_acquire_chat_turn("history_mutation")
@@ -578,6 +594,7 @@ pub async fn edit_conversation_message(
         &state.selection.conversation_generation,
     )
     .await
+        .map(Response)
 }
 
 #[cfg(test)]

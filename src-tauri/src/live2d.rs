@@ -15,7 +15,7 @@ const LEGACY_BUILTIN_HARU_MODEL_PATH: &str = "__builtin__/haru/haru_greeter_t03.
 
 pub(crate) type Live2dCueMap = HashMap<String, Live2dCueBinding>;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, specta::Type)]
 pub struct Live2dCueBinding {
     #[serde(default)]
     pub expression: Option<String>,
@@ -25,7 +25,7 @@ pub struct Live2dCueBinding {
     pub exclude_from_prompt: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
 pub struct Live2dModelProfile {
     pub version: u32,
     pub model_path: String,

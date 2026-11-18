@@ -446,7 +446,7 @@ function SecretField({
     onValueChange,
 }: {
     label: string;
-    value?: string;
+    value?: string | null;
     placeholder: string;
     fallbackEnv?: string;
     onValueChange: (value?: string) => void;
@@ -566,7 +566,7 @@ function CharacterSelect({
     options,
     onChange,
 }: {
-    value?: string;
+    value?: string | null;
     options: Array<{ value: string; label: string }>;
     onChange: (value?: string) => void;
 }) {

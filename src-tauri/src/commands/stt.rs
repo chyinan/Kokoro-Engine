@@ -1,4 +1,5 @@
 use crate::error::KokoroError;
+use crate::ipc::wire::emit;
 use crate::stt::{
     AudioChunk, AudioSource, NativeMicState, NativeWakeWordState, SenseVoiceLocalModelStatus,
     SttConfig, SttService,
@@ -9,6 +10,7 @@ use tauri::{command, AppHandle, Manager};
 
 /// Transcribe audio bytes to text using the active STT provider.
 #[command]
+#[specta::specta]
 pub async fn transcribe_audio(
     state: State<'_, SttService>,
     audio_bytes: Vec<u8>,
@@ -28,6 +30,7 @@ pub async fn transcribe_audio(
 /// Return the current STT config from disk.
 /// Automatically merges any missing default providers so the UI always shows all options.
 #[command]
+#[specta::specta]
 pub async fn get_stt_config(state: State<'_, SttService>) -> Result<SttConfig, KokoroError> {
     let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -38,6 +41,7 @@ pub async fn get_stt_config(state: State<'_, SttService>) -> Result<SttConfig, K
 
 /// Save STT config to disk and hot-reload providers.
 #[command]
+#[specta::specta]
 pub async fn save_stt_config(
     state: State<'_, SttService>,
     config: SttConfig,
@@ -52,6 +56,7 @@ pub async fn save_stt_config(
 /// Transcribe a short raw PCM audio clip (float32, 16kHz mono) for wake word detection.
 /// Does NOT use the streaming buffer — fire-and-forget one-shot transcription.
 #[command]
+#[specta::specta]
 pub async fn transcribe_wake_word_audio(
     state: State<'_, SttService>,
     samples: Vec<f32>,
@@ -71,6 +76,7 @@ pub async fn transcribe_wake_word_audio(
 }
 
 #[command]
+#[specta::specta]
 pub async fn start_native_mic(
     app: AppHandle,
     auto_stop_on_silence: Option<bool>,
@@ -90,6 +96,7 @@ pub async fn start_native_mic(
 }
 
 #[command]
+#[specta::specta]
 pub async fn stop_native_mic(app: AppHandle) -> Result<(), KokoroError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::stt::mic::stop_native_mic(&app, app.state::<NativeMicState>().inner())
@@ -100,6 +107,7 @@ pub async fn stop_native_mic(app: AppHandle) -> Result<(), KokoroError> {
 }
 
 #[command]
+#[specta::specta]
 pub async fn start_native_wake_word(
     app: AppHandle,
     wake_word_state: State<'_, NativeWakeWordState>,
@@ -118,6 +126,7 @@ pub async fn start_native_wake_word(
 }
 
 #[command]
+#[specta::specta]
 pub async fn stop_native_wake_word(
     app: AppHandle,
     wake_word_state: State<'_, NativeWakeWordState>,
@@ -128,18 +137,18 @@ pub async fn stop_native_wake_word(
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_sensevoice_local_status() -> Result<SenseVoiceLocalModelStatus, KokoroError> {
     Ok(crate::stt::sensevoice_local::recommended_model_status())
 }
 
 #[command]
+#[specta::specta]
 pub async fn download_sensevoice_local_model(
     app: tauri::AppHandle,
 ) -> Result<SenseVoiceLocalModelStatus, KokoroError> {
-    use tauri::Emitter;
     crate::stt::sensevoice_local::download_recommended_model(move |progress| {
-        app.emit("stt:sensevoice-local-progress", &progress)
-            .map_err(|e| e.to_string())
+        emit(&app, progress).map_err(|e| e.to_string())
     })
     .await
     .map_err(KokoroError::Stt)

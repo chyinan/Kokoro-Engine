@@ -59,7 +59,7 @@ pub enum RegistryManifestError {
     InvalidRecommendation(String),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryIndex {
     pub schema_version: u32,
@@ -69,7 +69,7 @@ pub struct RegistryIndex {
     pub entries: Vec<RegistryEntry>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryEntry {
     pub content_type: String,
@@ -93,7 +93,7 @@ pub struct RegistryEntry {
     pub recommendations: RegistryRecommendations,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryRecommendations {
     pub vision: bool,

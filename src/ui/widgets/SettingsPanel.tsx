@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
+import { events } from "@/lib/generated/ipc";
 import { useState, useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Eye, Server, Bot, Shield, HardDrive, Ghost, Info } from "lucide-react";
@@ -507,11 +507,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     useEffect(() => {
         let aborted = false;
         let cleanup: (() => void) | null = null;
-        void listen<{
-            approved_user_openid?: string;
-            approved_group_openid?: string;
-            revision: number;
-        }>("qq-authorization-approved", event => {
+        void events.qqAuthorizationApproved.listen(event => {
             if (aborted) return;
             setLocalBotConfig(current => {
                 if (!current) {

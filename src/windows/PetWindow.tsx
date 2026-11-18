@@ -1,9 +1,9 @@
+import { commands, events } from "@/lib/generated/ipc";
 import { ttsService } from "../core/services";
 // pattern: Imperative Shell
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import Live2DViewer from "../features/live2d/Live2DViewerLoader";
 import PetContextMenu from "../features/pet/PetContextMenu";
@@ -12,30 +12,10 @@ import type { Live2DViewerHandle } from "../features/live2d/Live2DViewer";
 import "../ui/i18n";
 import { live2dUrl } from "../lib/utils";
 import { getCommittedCharacterRuntime, BUILTIN_LIVE2D_MODEL_PATH } from "../lib/kokoro-bridge";
-import type { CommittedCharacterRuntime } from "../lib/kokoro-bridge";
 import { mapLive2dModelUrl } from "../features/live2d/live2d-model-url";
 import { selectPetModelSelection } from "./pet-runtime-selection";
 
 type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West";
-
-interface PetConfig {
-    enabled: boolean;
-    position_x: number;
-    position_y: number;
-    shortcut: string;
-    model_url: string | null;
-    window_width: number;
-    window_height: number;
-    model_scale?: number;
-    render_fps?: number;
-}
-
-interface Live2dSelectionEvent {
-    modelPath: string;
-    customModelPath: string | null;
-    modelUrl: string;
-    modelSource?: "user" | "package" | "builtin" | "none";
-}
 
 export default function PetWindow() {
     useEffect(() => { void ttsService.init(); return () => ttsService.cleanup(); }, []);
@@ -74,14 +54,14 @@ export default function PetWindow() {
     }, []);
 
     useEffect(() => {
-        const unlisten = listen<Live2dSelectionEvent>("live2d-model-selection-updated", (event) => {
+        const unlisten = events.live2dModelSelectionUpdated.listen((event) => {
             setModelSelection({
                 modelPath: event.payload.modelPath,
                 modelUrl: event.payload.modelUrl,
                 modelSource: event.payload.modelSource ?? (event.payload.customModelPath ? "user" : "builtin"),
             });
         });
-        const unlistenCommitted = listen<CommittedCharacterRuntime>("character-runtime-committed", (event) => {
+        const unlistenCommitted = events.characterRuntimeCommitted.listen((event) => {
             const next = selectPetModelSelection(event.payload, BUILTIN_LIVE2D_MODEL_PATH);
             setModelSelection({
                 modelPath: next.modelPath,
@@ -117,11 +97,12 @@ export default function PetWindow() {
 
     // On mount: restore saved window size from config
     useEffect(() => {
-        invoke<PetConfig>("get_pet_config").then(cfg => {
-            if (cfg.window_width >= 100 && cfg.window_height >= 100) {
+        commands.getPetConfig().then(cfg => {
+            if (typeof cfg.window_width === "number" && cfg.window_width >= 100
+                && typeof cfg.window_height === "number" && cfg.window_height >= 100) {
                 hasSavedSizeRef.current = true;
                 setCanvasSize({ width: cfg.window_width, height: cfg.window_height });
-                invoke("resize_pet_window", { width: cfg.window_width, height: cfg.window_height }).catch(console.error);
+                commands.resizePetWindow(cfg.window_width, cfg.window_height).catch(console.error);
             }
             const savedMultiplier = cfg.model_scale && cfg.model_scale > 0 ? cfg.model_scale : 1;
             userScaleMultiplierRef.current = savedMultiplier;
@@ -134,7 +115,7 @@ export default function PetWindow() {
     }, []);
 
     useEffect(() => {
-        const unlisten = listen<PetConfig>("pet-config-updated", (event) => {
+        const unlisten = events.petConfigUpdated.listen((event) => {
             const cfg = event.payload;
 
             if (typeof cfg.model_scale === "number" && cfg.model_scale > 0) {
@@ -170,10 +151,10 @@ export default function PetWindow() {
         setCanvasSize({ width: newWidth, height: newHeight });
 
         try {
-            await invoke("resize_pet_window", { width: newWidth, height: newHeight });
+            await commands.resizePetWindow(newWidth, newHeight);
             // Save initial size
-            invoke<PetConfig>("get_pet_config").then(cfg => {
-                invoke("save_pet_config", { config: { ...cfg, window_width: newWidth, window_height: newHeight } }).catch(console.error);
+            commands.getPetConfig().then(cfg => {
+                commands.savePetConfig({ ...cfg, window_width: newWidth, window_height: newHeight }).catch(console.error);
             }).catch(console.error);
         } catch (e) {
             console.error("[PetWindow] Failed to resize window:", e);
@@ -267,10 +248,8 @@ export default function PetWindow() {
                 userScaleMultiplierRef.current = nextMultiplier;
                 setScaleMultiplier(nextMultiplier);
 
-                invoke<PetConfig>("get_pet_config").then(cfg => {
-                    invoke("save_pet_config", {
-                        config: { ...cfg, model_scale: nextMultiplier }
-                    }).catch(console.error);
+                commands.getPetConfig().then(cfg => {
+                    commands.savePetConfig({ ...cfg, model_scale: nextMultiplier }).catch(console.error);
                 }).catch(console.error);
             }
         };
@@ -310,10 +289,8 @@ export default function PetWindow() {
                 setCanvasSize(nextSize);
                 if (saveTimer) clearTimeout(saveTimer);
                 saveTimer = setTimeout(() => {
-                    invoke<PetConfig>("get_pet_config").then(cfg => {
-                        invoke("save_pet_config", {
-                            config: { ...cfg, window_width: nextSize.width, window_height: nextSize.height }
-                        }).catch(console.error);
+                    commands.getPetConfig().then(cfg => {
+                        commands.savePetConfig({ ...cfg, window_width: nextSize.width, window_height: nextSize.height }).catch(console.error);
                     }).catch(console.error);
                 }, 150);
             }).catch((error) => {
@@ -433,10 +410,8 @@ export default function PetWindow() {
                         console.error("[PetWindow] Failed to finalize position:", err);
                     }
 
-                    invoke<PetConfig>("get_pet_config").then(cfg => {
-                        invoke("save_pet_config", {
-                            config: { ...cfg, position_x: finalX, position_y: finalY }
-                        }).catch(console.error);
+                    commands.getPetConfig().then(cfg => {
+                        commands.savePetConfig({ ...cfg, position_x: finalX, position_y: finalY }).catch(console.error);
                     }).catch(console.error);
                 }
 
@@ -518,7 +493,7 @@ export default function PetWindow() {
 
     // Listen for toggle-chat-input from global shortcut
     useEffect(() => {
-        const unlisten = listen("toggle-chat-input", () => {
+        const unlisten = events.toggleChatInput.listen(() => {
             setChatInputVisible(v => !v);
             setTimeout(() => inputRef.current?.focus(), 50);
         });
@@ -547,10 +522,10 @@ export default function PetWindow() {
                 setContextMenu(m => ({ ...m, visible: false }));
             }
         },
-        { label: "隐藏悬浮模型", onClick: () => invoke("hide_pet_window").catch(console.error) },
+        { label: "隐藏悬浮模型", onClick: () => commands.hidePetWindow().catch(console.error) },
         {
             label: "打开主界面",
-            onClick: () => getCurrentWindow().emit("show-main-window", {}).catch(console.error),
+            onClick: () => events.showMainWindow.emit().catch(console.error),
         },
     ], [isResizeMode]);
 

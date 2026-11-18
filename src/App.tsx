@@ -1,3 +1,4 @@
+import { commands, events } from "@/lib/generated/ipc";
 import { OnboardingChat } from "./features/onboarding/onboarding-chat";
 import { chatApplication, submitChat } from "./lib/chat/application";
 import { createImageEventHandlers } from "./lib/chat/image-events";
@@ -6,10 +7,9 @@ import { createImageEventHandlers } from "./lib/chat/image-events";
 import { useState, useEffect, useMemo, useSyncExternalStore, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { Settings } from "lucide-react";
-import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { LayoutRenderer } from "./ui/layout/LayoutRenderer";
-import { LayoutConfig } from "./ui/layout/types";
+import { LayoutConfig, type ModMotionAnimation } from "./ui/layout/types";
 import { ThemeProvider } from "./ui/theme/ThemeContext";
 import { defaultTheme } from "./ui/theme/default";
 import { registry } from "./ui/registry/ComponentRegistry";
@@ -226,7 +226,7 @@ function parseMcpJson(raw: string): McpServerConfig[] {
   return configs;
 }
 
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   onImageGenDone,
   onModThemeOverride,
@@ -376,10 +376,6 @@ const _subscribeFn = (cb: () => void) => {
 };
 const _getSnap = () => _regSnap;
 
-interface PetConfig {
-  render_fps?: number;
-}
-
 type ModActionData = Record<string, any>;
 type LegacyModActionEnvelope = ModActionEnvelope & {
   data?: ModActionData;
@@ -387,6 +383,15 @@ type LegacyModActionEnvelope = ModActionEnvelope & {
 
 const ONBOARDING_STATUS_KEY = "kokoro_onboarding_status";
 const ONBOARDING_DRAFT_KEY = "kokoro_onboarding_draft";
+
+function readModThemeAnimations(animations: ModThemeJson["animations"]): Record<string, ModMotionAnimation> | undefined {
+  if (!animations) return undefined;
+  const entries: [string, ModMotionAnimation][] = [];
+  for (const [name, raw] of Object.entries(animations)) {
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) entries.push([name, raw]);
+  }
+  return Object.fromEntries(entries);
+}
 
 const ONBOARDING_LANGUAGE_NAMES: Record<OnboardingLanguageCode, string> = {
   en: "English",
@@ -662,7 +667,7 @@ function App() {
         window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
           detail: runtime,
         }));
-        void emit("character-runtime-committed", runtime).catch((error) => {
+        void events.characterRuntimeCommitted.emit(runtime).catch((error) => {
           console.warn("[CharacterActivation] failed to notify auxiliary windows", error);
         });
       },
@@ -691,7 +696,7 @@ function App() {
         const id = resolved.local_preset;
         const providerType = resolved.provider_type;
         const endpoint = resolved.endpoint;
-        if (id === null || providerType === null || endpoint === null) return;
+        if (id == null || providerType == null || endpoint == null) return;
         const config = await getTtsConfig();
         const existing = config.providers.find((provider) => provider.id === id);
         const nextConfig: TtsSystemConfig = {
@@ -847,7 +852,7 @@ function App() {
     setActiveLive2dModel(backendModelPath).catch((err) => {
       console.error("[App] Failed to sync active Live2D model:", err);
     });
-    emit("live2d-model-selection-updated", {
+    events.live2dModelSelectionUpdated.emit({
       modelPath: activeLive2dModelPath,
       customModelPath,
       modelUrl,
@@ -899,10 +904,10 @@ function App() {
     setRenderFps(fps);
 
     try {
-      const cfg = await invoke<PetConfig>("get_pet_config");
+      const cfg = await commands.getPetConfig();
       const nextConfig = { ...cfg, render_fps: fps };
-      await invoke("save_pet_config", { config: nextConfig });
-      await emit("pet-config-updated", nextConfig);
+      await commands.savePetConfig(nextConfig);
+      await events.petConfigUpdated.emit(nextConfig);
     } catch (e) {
       console.error("[App] Failed to persist render FPS:", e);
     }
@@ -1152,7 +1157,7 @@ function App() {
   useEffect(() => {
     let aborted = false;
     let cleanup: (() => void) | null = null;
-    void listen<QQAuthorizationRequest>("qq-authorization-expired", event => {
+    void events.qqAuthorizationExpired.listen(event => {
       if (aborted) return;
       setQQAuthorizationQueue(current => current.filter(
         request => request.request_id !== event.payload.request_id,
@@ -1174,7 +1179,7 @@ function App() {
   useEffect(() => {
     let aborted = false;
     let cleanup: (() => void) | null = null;
-    void listen<QQAuthorizationRequest>("qq-authorization-request", event => {
+    void events.qqAuthorizationRequest.listen(event => {
       if (aborted) return;
       setQQAuthorizationError(null);
       setQQAuthorizationQueue(current => {
@@ -1221,22 +1226,19 @@ function App() {
 
   // Listen for pet window requesting main window to show
   useEffect(() => {
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-        const unlisten = listen("show-main-window", async () => {
-          const win = getCurrentWindow();
-          await win.unminimize().catch(console.error);
-          await win.setFocus().catch(console.error);
-        });
-        return unlisten;
-      });
-    });
+    const unlisten = events.showMainWindow.listen(async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const win = getCurrentWindow();
+      await win.unminimize().catch(console.error);
+      await win.setFocus().catch(console.error);
+    }).catch(console.error);
+    return () => { void unlisten.then(stop => stop?.()); };
   }, []);
 
   useEffect(() => {
     ttsService.init();
 
-    invoke<PetConfig>("get_pet_config")
+    commands.getPetConfig()
       .then((cfg) => setRenderFps(typeof cfg.render_fps === "number" ? cfg.render_fps : 60))
       .catch(err => console.error("[App] Failed to load pet config:", err));
 
@@ -1344,11 +1346,11 @@ function App() {
         name: modTheme.name || "Mod Theme",
         variables: modTheme.variables,
         assets: modTheme.assets ? {
-          fonts: modTheme.assets.fonts,
-          background: modTheme.assets.background,
-          noise_texture: modTheme.assets.noise_texture,
+          fonts: modTheme.assets.fonts ?? undefined,
+          background: modTheme.assets.background ?? undefined,
+          noise_texture: modTheme.assets.noise_texture ?? undefined,
         } : undefined,
-        animations: modTheme.animations,
+        animations: readModThemeAnimations(modTheme.animations),
       };
       // Apply the theme (ThemeProvider listens for setTheme calls)
       // We need to access setTheme from context — handled via event

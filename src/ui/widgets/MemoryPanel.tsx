@@ -1,5 +1,6 @@
 // pattern: Mixed (unavoidable)
 // Reason: React 组件同时承载展示逻辑、事件订阅、状态更新与 IPC 调用，当前阶段只做最小前端接线。
+import { events } from "@/lib/generated/ipc";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
@@ -31,7 +32,6 @@ import type {
     MemoryDreamJobRecord,
     MemoryDreamProposalRecord,
 } from "../../lib/kokoro-bridge";
-import { listen } from "@tauri-apps/api/event";
 import { MemoryTimeline } from "./memory/MemoryTimeline";
 import { MemoryGraph } from "./memory/MemoryGraph";
 import {
@@ -268,7 +268,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
     const fetchMemoriesRef = useRef(fetchMemories);
     useEffect(() => { fetchMemoriesRef.current = fetchMemories; }, [fetchMemories]);
     useEffect(() => {
-        const unlisten = listen<string>("memory:updated", (event) => {
+        const unlisten = events.memoryUpdated.listen((event) => {
             // Only refresh if the updated character matches the currently viewed one
             if (!event.payload || event.payload === selectedCharId) {
                 fetchMemoriesRef.current();
@@ -289,7 +289,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
         setEditingId(mem.id);
         setEditContent(parsedContent.text);
         setEditContentPrefix(parsedContent.prefix);
-        setEditImportance(mem.importance);
+        setEditImportance(mem.importance ?? 0);
     };
 
     const saveEdit = async () => {
@@ -682,7 +682,7 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                                                         {translateDreamCode("proposal_types", proposal.proposal_type)}
                                                     </span>
                                                     <span className="rounded border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[10px] text-[var(--color-accent)]">
-                                                        {formatConfidence(proposal.confidence)}
+                                                        {formatConfidence(proposal.confidence ?? 0)}
                                                     </span>
                                                 </div>
                                                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
@@ -934,10 +934,10 @@ export default function MemoryPanel({ characterId }: MemoryPanelProps) {
                                                     <span
                                                         className={clsx(
                                                             "text-[9px] font-mono px-1.5 py-0.5 rounded border",
-                                                            getImportanceColor(mem.importance)
+                                                            getImportanceColor(mem.importance ?? 0)
                                                         )}
                                                     >
-                                                        {getImportanceLabel(mem.importance)}
+                                                        {getImportanceLabel(mem.importance ?? 0)}
                                                     </span>
                                                     <span className="text-[10px] text-[var(--color-text-muted)]">
                                                         {getTimeAgo(mem.created_at)}

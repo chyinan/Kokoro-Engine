@@ -41,6 +41,8 @@ function loaded(content: string) {
     topic: "",
     pinned_state: "{}",
     messages: [{
+      metadata: null,
+      id: 1,
       role: "assistant",
       content,
       created_at: "2026-07-14T00:00:00Z",
@@ -112,7 +114,7 @@ describe("character conversation synchronization", () => {
     expect(applyVisibleConversation).toHaveBeenCalledWith({
       characterId: "pico",
       conversationId: "pico-chat",
-      messages: [{ role: "kokoro", text: "pico history" }],
+      messages: [{ id: 1, role: "kokoro", text: "pico history" }],
     });
   });
 

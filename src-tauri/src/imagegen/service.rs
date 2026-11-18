@@ -6,7 +6,7 @@ use super::google::GoogleImageGenProvider;
 use super::interface::{ImageGenError, ImageGenParams, ImageGenProvider};
 use super::openai::OpenAIImageGenProvider;
 use super::stable_diffusion::StableDiffusionProvider;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize, specta::Type)]
 pub struct ImageGenResult {
     pub image_url: String, // file:// path
     pub prompt: String,

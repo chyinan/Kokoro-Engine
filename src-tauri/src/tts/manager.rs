@@ -43,15 +43,17 @@ pub(crate) enum TtsPlaybackEvent {
     BrowserDelegate(TtsBrowserDelegateEvent),
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:start")]
 pub(crate) struct TtsStartEvent {
     pub(crate) request_id: String,
     text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     chat_scope: Option<ChatPlaybackScope>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:audio")]
 pub(crate) struct TtsAudioEvent {
     request_id: String,
     sentence_id: usize,
@@ -61,14 +63,15 @@ pub(crate) struct TtsAudioEvent {
     data: Vec<u8>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:end")]
 pub(crate) struct TtsEndEvent {
     request_id: String,
     text: String,
     status: TtsFinishStatus,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 enum TtsFinishStatus {
     Completed,
@@ -76,13 +79,15 @@ enum TtsFinishStatus {
     Error,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:error")]
 pub(crate) struct TtsErrorEvent {
     request_id: String,
     error: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:browser-delegate")]
 pub(crate) struct TtsBrowserDelegateEvent {
     request_id: String,
     sentence_id: usize,
@@ -94,7 +99,7 @@ pub(crate) struct TtsBrowserDelegateEvent {
 
 // ── Provider Status (for frontend queries) ─────────────
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 pub struct ProviderStatus {
     pub id: String,
     pub available: bool,

@@ -35,6 +35,11 @@ use crate::hooks::{
 };
 use crate::imagegen::ImageGenService;
 use crate::imagegen::WindowSizeState;
+use crate::chat::event_payloads::{
+    ChatTurnAcknowledgedEvent, ChatTurnBoundEvent, CueEvent, ChatTurnFinishEvent, ChatTurnStartEvent, ChatTurnTextCompleteEvent, ChatTurnTranslationEvent, ChatWarningEvent,
+    ChatEventScope, ChatFailure, ChatFinishStatus, ChatTurnDeltaEvent, ChatTurnToolEvent,
+    ChatTypingEvent, ToolApprovalStatus, ToolDenyKind,
+};
 use crate::live2d::Live2dStore;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, history_message_to_llm_chat_message,
@@ -163,7 +168,7 @@ async fn emit_and_persist_failure_event(
     keep_through_message_id: Option<i64>,
     scope: &crate::chat::ownership::MemoryWriteScope,
 ) {
-    policy.emit(chat, ChatEvent::Failure, failure_event.clone());
+    policy.emit(chat, ChatEvent::Failure(ChatFailure(failure_event.clone())));
 
     if let Err(error) = persist_failure_event_to_conversation(
         state,
@@ -310,18 +315,6 @@ impl TurnCancellationState {
             return Err(TURN_CANCELLED_BY_USER_MESSAGE.to_string());
         }
         Ok(())
-    }
-
-    async fn build_turn_delta_payload_if_not_cancelled(
-        &self,
-        turn_id: &str,
-        delta: String,
-    ) -> Result<serde_json::Value, String> {
-        self.ensure_turn_not_cancelled(turn_id).await?;
-        Ok(serde_json::json!({
-            "turn_id": turn_id,
-            "delta": delta,
-        }))
     }
 
     async fn cancel_turn(&self, target_id: &str, reason: Option<String>) -> Result<(), String> {
@@ -650,14 +643,16 @@ async fn build_turn_delta_payload_if_not_cancelled(
     turn_id: &str,
     delta: String,
     client_request_id: Option<&str>,
-) -> Result<serde_json::Value, String> {
-    let mut payload = state
-        .build_turn_delta_payload_if_not_cancelled(turn_id, delta)
-        .await?;
-    if let Some(client_request_id) = client_request_id {
-        payload["client_request_id"] = serde_json::Value::String(client_request_id.to_string());
-    }
-    Ok(payload)
+) -> Result<ChatTurnDeltaEvent, String> {
+    state.ensure_turn_not_cancelled(turn_id).await?;
+    Ok(ChatTurnDeltaEvent {
+        scope: ChatEventScope {
+            client_request_id: client_request_id.map(|id| Some(id.to_owned())),
+            ..Default::default()
+        },
+        turn_id: turn_id.to_owned(),
+        delta,
+    })
 }
 
 fn is_turn_cancelled_error_message(message: &str) -> bool {
@@ -1123,8 +1118,8 @@ impl ChatPolicy {
         }
     }
 
-    fn emit(self, chat: &ChatService, event: ChatEvent, payload: impl Serialize) {
-        chat.events.publish(self.is_desktop(), event, payload);
+    fn emit(self, chat: &ChatService, event: ChatEvent) {
+        chat.events.publish(self.is_desktop(), event);
     }
 }
 
@@ -1132,7 +1127,7 @@ pub(crate) fn channel_id(namespace: &str, owner: &str, id: &str) -> String {
     crate::chat::persistence::external_identity(namespace, &[owner, id])
 }
 
-#[derive(Default, serde::Deserialize, serde::Serialize, Clone)]
+#[derive(Default, serde::Deserialize, serde::Serialize, Clone, specta::Type)]
 pub struct ChatRequest {
     #[cfg(test)]
     #[serde(skip)]
@@ -1145,17 +1140,24 @@ pub struct ChatRequest {
     #[serde(skip)]
     pub(crate) admission_fingerprint: Option<String>,
     pub message: String,
+    #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
     pub allow_image_gen: Option<bool>,
+    #[serde(default)]
     pub images: Option<Vec<String>>,
     /// Trusted adapters submit the original audio before admission. Include it in
     /// the request fingerprint, but never accept it through desktop IPC.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[specta(skip)]
     pub(crate) audio: Option<ChatAudioInput>,
     /// Original transport text, separate from fallible media preparation.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[specta(skip)]
     pub(crate) external_input_text: Option<String>,
     /// Compatibility identities calculated by trusted transport adapters only.
     #[serde(skip)]
@@ -1165,7 +1167,9 @@ pub struct ChatRequest {
     #[serde(skip)]
     pub(crate) require_saved_external_reply: bool,
     /// One-shot vision context, excluded from the journal and history previews.
+    #[serde(default)]
     pub camera_frame: Option<String>,
+    #[serde(default)]
     pub character_id: Option<String>,
     /// If true, the user instruction is hidden. Non-empty assistant replies may
     /// still be saved, while proactive no-op responses persist nothing.
@@ -1179,8 +1183,10 @@ pub struct ChatRequest {
     #[serde(default)]
     pub regenerate: bool,
     /// Validate and truncate the failed turn under this request's execution guard.
+    #[serde(default)]
     pub retry_failure: Option<FailureRetry>,
     /// Validate and replace a saved assistant reply under the same execution guard.
+    #[serde(default)]
     pub regenerate_reply: Option<ReplyRegeneration>,
     /// Optional target conversation ID. If specified, backend strictly validates that this request
     /// belongs to this conversation; if unspecified, it binds to the active conversation at entry.
@@ -1264,13 +1270,14 @@ fn tool_only_completion_notice(language: &str) -> Result<String, KokoroError> {
     tool_completion_notice_from_catalog(catalog)
 }
 
-#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, specta::Type)]
 pub struct StreamChatResponse {
     #[serde(skip)]
     pub(crate) speech_snapshot: Option<Arc<crate::tts::manager::TtsExecutionSnapshot>>,
     #[serde(default)]
     pub text: String,
     pub conversation_id: String,
+    #[serde(default)]
     pub user_message_id: Option<i64>,
     #[serde(default)]
     pub assistant_message_id: Option<i64>,
@@ -1294,12 +1301,6 @@ pub struct StreamChatResponse {
 pub(crate) struct ChatImage {
     pub prompt: String,
     pub path: String,
-}
-
-#[derive(Serialize, Clone)]
-#[allow(dead_code)]
-struct ChatImageGenEvent {
-    prompt: String,
 }
 
 fn build_chat_error_event(
@@ -1489,30 +1490,30 @@ fn plain_llm_message(
     message.into()
 }
 
-fn deny_kind_for_tool_error(error: &str) -> &'static str {
+fn deny_kind_for_tool_error(error: &str) -> ToolDenyKind {
     if error.starts_with("Denied pending approval:") {
-        "pending_approval"
+        ToolDenyKind::PendingApproval
     } else if error.starts_with("Denied by fail-closed policy:") {
-        "fail_closed"
+        ToolDenyKind::FailClosed
     } else if error.starts_with("Denied by policy:") {
-        "policy_denied"
+        ToolDenyKind::PolicyDenied
     } else if error.starts_with("Denied by hook:") {
-        "hook_denied"
+        ToolDenyKind::HookDenied
     } else {
-        "execution_error"
+        ToolDenyKind::ExecutionError
     }
 }
 
 fn deny_kind_for_outcome(
     outcome: &crate::actions::ToolExecutionOutcome,
     error: &str,
-) -> &'static str {
-    if let Some(decision) = outcome.permission_decision.as_ref() {
-        if let Some(kind) = crate::actions::permission::deny_kind(decision) {
-            return kind;
-        }
+) -> ToolDenyKind {
+    match &outcome.permission_decision {
+        Some(PermissionDecision::DenyPolicy { .. }) => ToolDenyKind::PolicyDenied,
+        Some(PermissionDecision::DenyPendingApproval { .. }) => ToolDenyKind::PendingApproval,
+        Some(PermissionDecision::DenyFailClosed { .. }) => ToolDenyKind::FailClosed,
+        _ => deny_kind_for_tool_error(error),
     }
-    deny_kind_for_tool_error(error)
 }
 
 #[cfg(test)]
@@ -1528,39 +1529,42 @@ fn tool_error_payload_for_test(tool: &str, turn_id: &str, error: &str) -> serde_
 fn base_tool_trace_payload(
     outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "turn_id": turn_id,
-        "tool": outcome.tool_name(),
-        "tool_id": outcome.tool_id(),
-        "source": outcome.tool_source(),
-        "server_name": outcome.tool_server_name(),
-        "needs_feedback": outcome.tool_needs_feedback(),
-        "permission_level": outcome.tool_permission_level(),
-        "risk_tags": outcome.tool_risk_tags(),
-    })
+) -> ChatTurnToolEvent {
+    let action = outcome.action.as_ref();
+    ChatTurnToolEvent {
+        turn_id: turn_id.to_owned(),
+        tool: outcome.tool_name().to_owned(),
+        tool_id: Some(outcome.tool_id().to_owned()),
+        source: Some(action.map(|action| action.source)),
+        server_name: Some(outcome.tool_server_name().map(str::to_owned)),
+        needs_feedback: Some(outcome.tool_needs_feedback()),
+        permission_level: Some(action.map(|action| action.permission_level)),
+        risk_tags: Some(action.map(|action| action.risk_tags.clone()).unwrap_or_default()),
+        ..Default::default()
+    }
 }
 
 fn tool_error_payload(
     outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
     error: &str,
-) -> serde_json::Value {
-    let mut payload = base_tool_trace_payload(outcome, turn_id);
-    payload["error"] = serde_json::Value::String(error.to_string());
-    payload["deny_kind"] =
-        serde_json::Value::String(deny_kind_for_outcome(outcome, error).to_string());
-    payload
+) -> ChatTurnToolEvent {
+    ChatTurnToolEvent {
+        error: Some(error.to_owned()),
+        deny_kind: Some(deny_kind_for_outcome(outcome, error)),
+        ..base_tool_trace_payload(outcome, turn_id)
+    }
 }
 
 fn tool_success_payload(
     outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    result: &crate::actions::ActionResult,
-) -> serde_json::Value {
-    let mut payload = base_tool_trace_payload(outcome, turn_id);
-    payload["result"] = serde_json::to_value(result).expect("action result should serialize");
-    payload
+    result: &ActionResult,
+) -> ChatTurnToolEvent {
+    ChatTurnToolEvent {
+        result: Some(result.clone()),
+        ..base_tool_trace_payload(outcome, turn_id)
+    }
 }
 
 fn pending_tool_trace_payload(
@@ -1568,23 +1572,25 @@ fn pending_tool_trace_payload(
     turn_id: &str,
     error: &str,
     approval_request_id: &str,
-) -> serde_json::Value {
-    let mut payload = tool_error_payload(outcome, turn_id, error);
-    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
-    payload["approval_status"] = serde_json::Value::String("requested".to_string());
-    payload
+) -> ChatTurnToolEvent {
+    ChatTurnToolEvent {
+        approval_request_id: Some(approval_request_id.to_owned()),
+        approval_status: Some(ToolApprovalStatus::Requested),
+        ..tool_error_payload(outcome, turn_id, error)
+    }
 }
 
 fn approved_tool_trace_payload(
     outcome: &crate::actions::ToolExecutionOutcome,
     turn_id: &str,
-    result: &crate::actions::ActionResult,
+    result: &ActionResult,
     approval_request_id: &str,
-) -> serde_json::Value {
-    let mut payload = tool_success_payload(outcome, turn_id, result);
-    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
-    payload["approval_status"] = serde_json::Value::String("approved".to_string());
-    payload
+) -> ChatTurnToolEvent {
+    ChatTurnToolEvent {
+        approval_request_id: Some(approval_request_id.to_owned()),
+        approval_status: Some(ToolApprovalStatus::Approved),
+        ..tool_success_payload(outcome, turn_id, result)
+    }
 }
 
 fn rejected_tool_trace_payload(
@@ -1592,11 +1598,12 @@ fn rejected_tool_trace_payload(
     turn_id: &str,
     error: &str,
     approval_request_id: &str,
-) -> serde_json::Value {
-    let mut payload = tool_error_payload(outcome, turn_id, error);
-    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
-    payload["approval_status"] = serde_json::Value::String("rejected".to_string());
-    payload
+) -> ChatTurnToolEvent {
+    ChatTurnToolEvent {
+        approval_request_id: Some(approval_request_id.to_owned()),
+        approval_status: Some(ToolApprovalStatus::Rejected),
+        ..tool_error_payload(outcome, turn_id, error)
+    }
 }
 
 #[cfg(test)]
@@ -1606,7 +1613,7 @@ fn pending_tool_trace_payload_for_test(
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    pending_tool_trace_payload(outcome, turn_id, error, approval_request_id)
+    serde_json::to_value(pending_tool_trace_payload(outcome, turn_id, error, approval_request_id)).unwrap()
 }
 
 #[cfg(test)]
@@ -1616,7 +1623,7 @@ fn approved_tool_trace_payload_for_test(
     result: &crate::actions::ActionResult,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    approved_tool_trace_payload(outcome, turn_id, result, approval_request_id)
+    serde_json::to_value(approved_tool_trace_payload(outcome, turn_id, result, approval_request_id)).unwrap()
 }
 
 #[cfg(test)]
@@ -1626,17 +1633,17 @@ fn rejected_tool_trace_payload_for_test(
     error: &str,
     approval_request_id: &str,
 ) -> serde_json::Value {
-    rejected_tool_trace_payload(outcome, turn_id, error, approval_request_id)
+    serde_json::to_value(rejected_tool_trace_payload(outcome, turn_id, error, approval_request_id)).unwrap()
 }
 
 fn emit_tool_trace_event(
     chat: &ChatService,
     policy: ChatPolicy,
     tool_trace_id: &str,
-    mut payload: serde_json::Value,
+    mut payload: ChatTurnToolEvent,
 ) {
-    payload["tool_trace_id"] = serde_json::Value::String(tool_trace_id.to_owned());
-    policy.emit(chat, ChatEvent::Tool, payload);
+    payload.tool_trace_id = Some(tool_trace_id.to_owned());
+    policy.emit(chat, ChatEvent::Tool(payload));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1742,11 +1749,12 @@ fn approved_tool_error_payload(
     turn_id: &str,
     error: &str,
     approval_request_id: &str,
-) -> serde_json::Value {
-    let mut payload = tool_error_payload(outcome, turn_id, error);
-    payload["approval_request_id"] = serde_json::Value::String(approval_request_id.to_string());
-    payload["approval_status"] = serde_json::Value::String("approved".to_string());
-    payload
+) -> ChatTurnToolEvent {
+    ChatTurnToolEvent {
+        approval_request_id: Some(approval_request_id.to_owned()),
+        approval_status: Some(ToolApprovalStatus::Approved),
+        ..tool_error_payload(outcome, turn_id, error)
+    }
 }
 
 async fn wait_for_tool_approval_decision(
@@ -1817,7 +1825,7 @@ async fn wait_for_tool_approval_and_execute(
     ctx: &ToolApprovalExecutionContext<'_>,
     outcome: &crate::actions::ToolExecutionOutcome,
     pending_error: &str,
-) -> Result<(Result<ActionResult, String>, serde_json::Value), KokoroError> {
+) -> Result<(Result<ActionResult, String>, ChatTurnToolEvent), KokoroError> {
     ensure_turn_not_cancelled(ctx.cancel_state, ctx.turn_id)
         .await
         .map_err(KokoroError::Chat)?;
@@ -2027,7 +2035,7 @@ fn tool_trace_success_has_no_deny_kind() -> bool {
         "turn-1",
         &sample_action_result("ok"),
     )
-    .get("deny_kind")
+    .deny_kind
     .is_none()
 }
 
@@ -2038,10 +2046,8 @@ fn tool_trace_success_message() -> Option<String> {
         "turn-1",
         &sample_action_result("ok"),
     )
-    .get("result")
-    .and_then(|value| value.get("message"))
-    .and_then(|value| value.as_str())
-    .map(ToString::to_string)
+    .result
+    .map(|result| result.message)
 }
 
 #[inline]
@@ -2106,7 +2112,7 @@ pub(crate) fn resolve_turn_user_message_id(
     }
 }
 
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatDraftSubmissionStatus {
     Pending,
@@ -2556,23 +2562,27 @@ async fn run_chat_worker(
                 scope.character_id,
                 None,
             );
-            policy.emit(&chat, ChatEvent::Failure, failure);
+            policy.emit(&chat, ChatEvent::Failure(ChatFailure(failure)));
             policy.emit(
                 &chat,
-                ChatEvent::Finished,
-                serde_json::json!({
-                    "turn_id": scope.turn_id,
-                    "client_request_id": request_id,
-                    "conversation_id": scope.conversation_id,
-                    "status": "error",
-                    "stage": "persistence",
-                    "code": KokoroError::CHAT_PERSISTENCE_CODE,
+                ChatEvent::Finished(ChatTurnFinishEvent {
+                    scope: ChatEventScope {
+                        client_request_id: Some(Some(request_id.to_owned())),
+                        conversation_id: Some(scope.conversation_id.clone()),
+                        ..Default::default()
+                    },
+                    turn_id: scope.turn_id.clone(),
+                    status: ChatFinishStatus::Error,
+                    stage: Some("persistence".to_owned()),
+                    code: Some(KokoroError::CHAT_PERSISTENCE_CODE.to_owned()),
+                    assistant_message_id: None,
+                    text: None,
                 }),
             );
         }
     }
     if let Some(snapshot) = runtime.complete(&request_id, result) {
-        chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+        chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
     }
 }
 
@@ -2611,7 +2621,7 @@ impl ChatService {
                     let outcome = runtime
                         .outcome(&client_request_id)
                         .expect("the retried turn is active");
-                    chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+                    chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
                     drop(_retry);
                     let request = pending.request.clone();
                     run_chat_worker(
@@ -2666,7 +2676,7 @@ impl ChatService {
                     if let Some(snapshot) =
                         runtime.retire_save_retry(&client_request_id, error.to_string())
                     {
-                        chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+                        chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
                     }
                     return Err(error);
                 }
@@ -2699,17 +2709,21 @@ impl ChatService {
                 pending
                     .post_commit
                     .dispatch(state.clone(), chat.events.clone());
-                chat.events.notify(ChatEvent::RuntimeChanged, snapshot);
+                chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
                 ChatPolicy::Desktop.emit(
                     &chat,
-                    ChatEvent::Finished,
-                    serde_json::json!({
-                        "turn_id": pending.turn_id,
-                        "client_request_id": client_request_id,
-                        "conversation_id": response.conversation_id,
-                        "assistant_message_id": response.assistant_message_id,
-                        "status": "completed",
-                        "text": response.text,
+                    ChatEvent::Finished(ChatTurnFinishEvent {
+                        scope: ChatEventScope {
+                            client_request_id: Some(Some(client_request_id.to_owned())),
+                            conversation_id: Some(Some(response.conversation_id.to_owned())),
+                            ..Default::default()
+                        },
+                        turn_id: Some(pending.turn_id.to_owned()),
+                        assistant_message_id: Some(response.assistant_message_id),
+                        status: ChatFinishStatus::Completed,
+                        text: Some(response.text.to_owned()),
+                        stage: None,
+                        code: None,
                     }),
                 );
                 if let Some(speech) = pending.speech {
@@ -2877,12 +2891,14 @@ async fn execute_chat_with_pending(
 
     policy.emit(
         chat,
-        ChatEvent::Acknowledged,
-        serde_json::json!({
-            "turn_id": assistant_turn_id,
-            "client_request_id": client_request_id,
-            "character_id": char_id,
-            "conversation_id": request.conversation_id,
+        ChatEvent::Acknowledged(ChatTurnAcknowledgedEvent {
+            scope: ChatEventScope {
+                client_request_id: Some(Some(client_request_id.to_owned())),
+                character_id: Some(char_id.to_owned()),
+                conversation_id: Some(request.conversation_id.clone()),
+                ..Default::default()
+            },
+            turn_id: assistant_turn_id.to_owned(),
         }),
     );
 
@@ -2980,10 +2996,14 @@ async fn execute_chat_with_pending(
                 request.message.chars().count(),
                 is_question,
             );
-            let mut typing_event = serde_json::to_value(&typing_params).unwrap_or_default();
-            typing_event["client_request_id"] = client_request_id.clone().into();
-            typing_event["turn_id"] = assistant_turn_id.clone().into();
-            policy.emit(chat, ChatEvent::Typing, typing_event);
+            policy.emit(chat, ChatEvent::Typing(ChatTypingEvent {
+                scope: ChatEventScope {
+                    client_request_id: Some(Some(client_request_id.clone())),
+                    ..Default::default()
+                },
+                turn_id: assistant_turn_id.clone(),
+                typing: typing_params,
+            }));
         }
 
         // 1. Select current-turn vision context before any user-message persistence.
@@ -3134,9 +3154,16 @@ async fn execute_chat_with_pending(
                 if let Ok(mut guard) = active_conv_id_for_prep.lock() {
                     *guard = Some(cid.clone());
                 }
-                policy.emit(chat, ChatEvent::Bound, serde_json::json!({
-                    "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":char_id,
-                    "conversation_id":cid,"user_message_id":mid,"message":request.message,
+                policy.emit(chat, ChatEvent::Bound(ChatTurnBoundEvent {
+                    scope: ChatEventScope {
+                        client_request_id: Some(Some(client_request_id.to_owned())),
+                        character_id: Some(char_id.to_owned()),
+                        conversation_id: Some(Some(cid.to_owned())),
+                        ..Default::default()
+                    },
+                    turn_id: assistant_turn_id.to_owned(),
+                    user_message_id: Some(mid),
+                    message: Some(request.message.to_owned()),
                 }));
                 external_turn = Some(turn);
                 break 'bind (
@@ -3359,14 +3386,16 @@ async fn execute_chat_with_pending(
             // not project a second optimistic user beside this SQLite row.
             policy.emit(
                 chat,
-                ChatEvent::Bound,
-                serde_json::json!({
-                    "client_request_id": client_request_id,
-                    "turn_id": assistant_turn_id,
-                    "character_id": char_id,
-                    "conversation_id": identity.conversation_id,
-                    "conversation_generation": projection_generation,
-                    "user_message_id": mid,
+                ChatEvent::Bound(ChatTurnBoundEvent {
+                    scope: ChatEventScope {
+                        client_request_id: Some(Some(client_request_id.to_owned())),
+                        character_id: Some(char_id.to_owned()),
+                        conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                        conversation_generation: Some(Some(projection_generation)),
+                    },
+                    turn_id: assistant_turn_id.to_owned(),
+                    user_message_id: mid,
+                    message: None,
                 }),
             );
 
@@ -3522,7 +3551,14 @@ async fn execute_chat_with_pending(
         // 将构建过程中产生的非致命警告（如记忆检索失败）通知前端
         for warning in compose_warnings {
             tracing::warn!("[compose_prompt] {}", warning);
-            policy.emit(chat, ChatEvent::Warning, serde_json::json!({"message":warning,"client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id,"conversation_generation":request.conversation_generation}));
+            policy.emit(chat, ChatEvent::Warning(ChatWarningEvent {
+                message: warning.to_owned(),
+                client_request_id: client_request_id.to_owned(),
+                turn_id: assistant_turn_id.to_owned(),
+                character_id: identity.character_id.to_owned(),
+                conversation_id: identity.conversation_id.to_owned(),
+                conversation_generation: request.conversation_generation,
+            }));
         }
 
         Ok(PreparedChatTurn {
@@ -3563,13 +3599,18 @@ async fn execute_chat_with_pending(
                 .ok()
                 .and_then(|g| g.clone());
             policy.emit(chat,
-                ChatEvent::Finished,
-                serde_json::json!({
-                    "turn_id": assistant_turn_id,
-                    "status": "cancelled",
-                    "client_request_id": client_request_id,
-                    "conversation_id": recorded_conv_id,
-                    "assistant_message_id": serde_json::Value::Null,
+                ChatEvent::Finished(ChatTurnFinishEvent {
+                    scope: ChatEventScope {
+                        client_request_id: Some(Some(client_request_id.to_owned())),
+                        conversation_id: Some(recorded_conv_id.clone()),
+                        ..Default::default()
+                    },
+                    turn_id: Some(assistant_turn_id.to_owned()),
+                    status: ChatFinishStatus::Cancelled,
+                    assistant_message_id: Some(None),
+                    text: None,
+                    stage: None,
+                    code: None,
                 }),
             );
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
@@ -3587,14 +3628,18 @@ async fn execute_chat_with_pending(
                 .ok()
                 .and_then(|g| g.clone());
             policy.emit(chat,
-                ChatEvent::Finished,
-                serde_json::json!({
-                    "turn_id": assistant_turn_id,
-                    "status": "error",
-                    "stage": "preparation_timeout",
-                    "client_request_id": client_request_id,
-                    "conversation_id": recorded_conv_id,
-                    "assistant_message_id": serde_json::Value::Null,
+                ChatEvent::Finished(ChatTurnFinishEvent {
+                    scope: ChatEventScope {
+                        client_request_id: Some(Some(client_request_id.to_owned())),
+                        conversation_id: Some(recorded_conv_id.clone()),
+                        ..Default::default()
+                    },
+                    turn_id: Some(assistant_turn_id.to_owned()),
+                    status: ChatFinishStatus::Error,
+                    stage: Some("preparation_timeout".to_owned()),
+                    assistant_message_id: Some(None),
+                    text: None,
+                    code: None,
                 }),
             );
             return Err(KokoroError::Chat(format!(
@@ -3657,7 +3702,13 @@ async fn execute_chat_with_pending(
                 )
                 .await;
             }
-            policy.emit(chat, ChatEvent::TextComplete, serde_json::json!({"turn_id":assistant_turn_id,"text":displayed_text,"translation":translation}));
+            policy.emit(chat, ChatEvent::TextComplete(ChatTurnTextCompleteEvent {
+                scope: ChatEventScope::default(),
+                turn_id: assistant_turn_id.to_owned(),
+                text: displayed_text.to_owned(),
+                translation: translation.clone(),
+                translation_pending: None,
+            }));
             let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
                 .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
             return Ok(StreamChatResponse {
@@ -3792,12 +3843,14 @@ async fn execute_chat_with_pending(
     }
 
     policy.emit(chat,
-        ChatEvent::Started,
-        serde_json::json!({
-            "turn_id": assistant_turn_id,
-            "client_request_id": request.client_request_id,
-            "conversation_id": identity.conversation_id,
-            "user_message_id": user_message_id,
+        ChatEvent::Started(ChatTurnStartEvent {
+            scope: ChatEventScope {
+                client_request_id: Some(request.client_request_id.clone()),
+                conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                ..Default::default()
+            },
+            turn_id: assistant_turn_id.to_owned(),
+            user_message_id,
         }),
     );
 
@@ -3918,7 +3971,7 @@ async fn execute_chat_with_pending(
                 let payload = build_turn_delta_payload_if_not_cancelled(
                     cancel_state.as_ref(), &assistant_turn_id, text, request.client_request_id.as_deref(),
                 ).await.map_err(KokoroError::Chat)?;
-                policy.emit(chat, ChatEvent::Delta, payload);
+                policy.emit(chat, ChatEvent::Delta(payload));
                 Ok(())
             },
         ).await?;
@@ -3987,7 +4040,7 @@ async fn execute_chat_with_pending(
                 )
                 .await
                 .map_err(KokoroError::Chat)?;
-                policy.emit(chat, ChatEvent::Delta, payload);
+                policy.emit(chat, ChatEvent::Delta(payload));
             }
         }
 
@@ -4408,24 +4461,29 @@ async fn execute_chat_with_pending(
             }
             // Flush typewriter/reveal buffer in frontend
             policy.emit(chat,
-                ChatEvent::TextComplete,
-                serde_json::json!({
-                    "turn_id": assistant_turn_id,
-                    "text": full_response.clone(),
-                    "translation_pending": false,
-                    "translation": serde_json::Value::Null,
+                ChatEvent::TextComplete(ChatTurnTextCompleteEvent {
+                    scope: ChatEventScope::default(),
+                    turn_id: assistant_turn_id.to_owned(),
+                    text: full_response.clone(),
+                    translation_pending: Some(false),
+                    translation: None,
                 }),
             );
         }
 
         policy.emit(chat,
-            ChatEvent::Finished,
-            serde_json::json!({
-                "turn_id": assistant_turn_id,
-                "status": "error",
-                "client_request_id": request.client_request_id,
-                "conversation_id": identity.conversation_id,
-                "assistant_message_id": finish_draft_row_id,
+            ChatEvent::Finished(ChatTurnFinishEvent {
+                scope: ChatEventScope {
+                    client_request_id: Some(request.client_request_id.clone()),
+                    conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                    ..Default::default()
+                },
+                turn_id: Some(assistant_turn_id.to_owned()),
+                status: ChatFinishStatus::Error,
+                assistant_message_id: Some(finish_draft_row_id),
+                text: None,
+                stage: None,
+                code: None,
             }),
         );
 
@@ -4491,22 +4549,27 @@ async fn execute_chat_with_pending(
             }
         }
         policy.emit(chat,
-            ChatEvent::TextComplete,
-            serde_json::json!({
-                "turn_id": assistant_turn_id,
-                "text": "",
-                "translation_pending": false,
-                "translation": serde_json::Value::Null,
+            ChatEvent::TextComplete(ChatTurnTextCompleteEvent {
+                scope: ChatEventScope::default(),
+                turn_id: assistant_turn_id.to_owned(),
+                text: "".to_owned(),
+                translation_pending: Some(false),
+                translation: None,
             }),
         );
         policy.emit(chat,
-            ChatEvent::Finished,
-            serde_json::json!({
-                "turn_id": assistant_turn_id,
-                "status": "completed",
-                "client_request_id": request.client_request_id,
-                "conversation_id": identity.conversation_id,
-                "assistant_message_id": draft_row_id,
+            ChatEvent::Finished(ChatTurnFinishEvent {
+                scope: ChatEventScope {
+                    client_request_id: Some(request.client_request_id.clone()),
+                    conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                    ..Default::default()
+                },
+                turn_id: Some(assistant_turn_id.to_owned()),
+                status: ChatFinishStatus::Completed,
+                assistant_message_id: Some(draft_row_id),
+                text: None,
+                stage: None,
+                code: None,
             }),
         );
         return Ok(None);
@@ -4554,16 +4617,12 @@ async fn execute_chat_with_pending(
         && user_lang != resp_lang;
 
     policy.emit(chat,
-        ChatEvent::TextComplete,
-        serde_json::json!({
-            "turn_id": assistant_turn_id,
-            "text": full_response.clone(),
-            "translation_pending": translation_pending,
-            "translation": if all_translations.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(all_translations.join(" "))
-            },
+        ChatEvent::TextComplete(ChatTurnTextCompleteEvent {
+            scope: ChatEventScope::default(),
+            turn_id: assistant_turn_id.to_owned(),
+            text: full_response.clone(),
+            translation_pending: Some(translation_pending),
+            translation: (!all_translations.is_empty()).then(|| all_translations.join(" ")),
         }),
     );
 
@@ -4685,8 +4744,17 @@ async fn execute_chat_with_pending(
                             if is_valid {
                                 tracing::info!(target: "chat", "[Chat] Fallback cue: {}", trimmed);
                                 policy.emit(chat,
-                                    ChatEvent::Cue,
-                                    serde_json::json!({ "cue": trimmed, "source": "fallback-cue", "client_request_id":client_request_id,"turn_id":assistant_turn_id,"character_id":identity.character_id,"conversation_id":identity.conversation_id }),
+                                    ChatEvent::Cue(CueEvent {
+                                        scope: ChatEventScope {
+                                            client_request_id: Some(Some(client_request_id.to_owned())),
+                                            character_id: Some(identity.character_id.to_owned()),
+                                            conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                                            ..Default::default()
+                                        },
+                                        cue: trimmed.to_owned(),
+                                        source: Some("fallback-cue".to_owned()),
+                                        turn_id: Some(Some(assistant_turn_id.to_owned())),
+                                    }),
                                 );
                             } else {
                                 tracing::info!(target: "chat", "[Chat] Ignoring invalid fallback cue: {}", trimmed);
@@ -4706,10 +4774,10 @@ async fn execute_chat_with_pending(
         let combined_translation = all_translations.join(" ");
         final_translation = Some(combined_translation.clone());
         policy.emit(chat,
-            ChatEvent::Translation,
-            serde_json::json!({
-                "turn_id": assistant_turn_id,
-                "translation": combined_translation,
+            ChatEvent::Translation(ChatTurnTranslationEvent {
+                scope: ChatEventScope::default(),
+                turn_id: assistant_turn_id.to_owned(),
+                translation: combined_translation.to_owned(),
             }),
         );
     }
@@ -4739,7 +4807,19 @@ async fn execute_chat_with_pending(
         super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, system_provider.clone(), &memory_target_language, work, memory_scope.clone()).await;
         let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
             .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
-        policy.emit(chat, ChatEvent::Finished, serde_json::json!({"turn_id":assistant_turn_id,"client_request_id":client_request_id,"conversation_id":turn.target.conversation_id,"assistant_message_id":row,"status":"completed"}));
+        policy.emit(chat, ChatEvent::Finished(ChatTurnFinishEvent {
+            scope: ChatEventScope {
+                client_request_id: Some(Some(client_request_id.to_owned())),
+                conversation_id: Some(Some(turn.target.conversation_id.to_owned())),
+                ..Default::default()
+            },
+            turn_id: Some(assistant_turn_id.to_owned()),
+            assistant_message_id: Some(Some(row)),
+            status: ChatFinishStatus::Completed,
+            text: None,
+            stage: None,
+            code: None,
+        }));
         return Ok(Some(row));
     }
 
@@ -4864,13 +4944,18 @@ async fn execute_chat_with_pending(
     post_commit.dispatch(state.clone(), chat.events.clone());
 
         policy.emit(chat,
-            ChatEvent::Finished,
-            serde_json::json!({
-                "turn_id": assistant_turn_id,
-                "status": "completed",
-                "client_request_id": request.client_request_id,
-                "conversation_id": identity.conversation_id,
-                "assistant_message_id": draft_row_id,
+            ChatEvent::Finished(ChatTurnFinishEvent {
+                scope: ChatEventScope {
+                    client_request_id: Some(request.client_request_id.clone()),
+                    conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                    ..Default::default()
+                },
+                turn_id: Some(assistant_turn_id.to_owned()),
+                status: ChatFinishStatus::Completed,
+                assistant_message_id: Some(draft_row_id),
+                text: None,
+                stage: None,
+                code: None,
             }),
         );
 
@@ -4955,13 +5040,18 @@ async fn execute_chat_with_pending(
             }
             policy.emit(
                 chat,
-                ChatEvent::Finished,
-                serde_json::json!({
-                    "turn_id": assistant_turn_id,
-                    "status": "cancelled",
-                    "client_request_id": request.client_request_id,
-                    "conversation_id": identity.conversation_id,
-                    "assistant_message_id": serde_json::Value::Null,
+                ChatEvent::Finished(ChatTurnFinishEvent {
+                    scope: ChatEventScope {
+                        client_request_id: Some(request.client_request_id.clone()),
+                        conversation_id: Some(Some(identity.conversation_id.to_owned())),
+                        ..Default::default()
+                    },
+                    turn_id: Some(assistant_turn_id.to_owned()),
+                    status: ChatFinishStatus::Cancelled,
+                    assistant_message_id: Some(None),
+                    text: None,
+                    stage: None,
+                    code: None,
                 }),
             );
             Ok(StreamChatResponse {
@@ -5067,7 +5157,7 @@ mod tests {
     }
 
     impl super::super::events::ChatDesktop for TestDesktop {
-        fn emit(&self, _: ChatEvent, _: serde_json::Value) -> Result<(), String> {
+        fn emit(&self, _: &'static str, _: serde_json::Value) -> Result<(), String> {
             if self.disconnected.load(Ordering::SeqCst) {
                 self.failed_events.fetch_add(1, Ordering::SeqCst);
                 Err("fixture desktop disconnected".into())
@@ -5993,19 +6083,19 @@ mod tests {
             deny_kind_for_tool_error(
                 "Denied pending approval: permission level 'elevated' requires approval"
             ),
-            "pending_approval"
+            ToolDenyKind::PendingApproval
         );
         assert_eq!(
             deny_kind_for_tool_error("Denied by fail-closed policy: blocked risk tag 'sensitive'"),
-            "fail_closed"
+            ToolDenyKind::FailClosed
         );
         assert_eq!(
             deny_kind_for_tool_error("Denied by policy: blocked risk tag 'read'"),
-            "policy_denied"
+            ToolDenyKind::PolicyDenied
         );
         assert_eq!(
             deny_kind_for_tool_error("Denied by hook: blocked"),
-            "hook_denied"
+            ToolDenyKind::HookDenied
         );
     }
 
@@ -6013,7 +6103,7 @@ mod tests {
     fn test_deny_kind_for_tool_error_defaults_to_execution_error() {
         assert_eq!(
             deny_kind_for_tool_error("database timeout"),
-            "execution_error"
+            ToolDenyKind::ExecutionError
         );
     }
 
@@ -6037,7 +6127,7 @@ mod tests {
             },
             Err("custom message without prefix".to_string()),
         );
-        let payload = tool_error_payload(&outcome, "turn-1", "custom message without prefix");
+        let payload = serde_json::to_value(tool_error_payload(&outcome, "turn-1", "custom message without prefix")).unwrap();
         assert_eq!(
             payload.get("deny_kind").and_then(|v| v.as_str()),
             Some("fail_closed")
@@ -6052,7 +6142,7 @@ mod tests {
             },
             Err("random message without prefix".to_string()),
         );
-        let payload = tool_error_payload(&outcome, "turn-1", "random message without prefix");
+        let payload = serde_json::to_value(tool_error_payload(&outcome, "turn-1", "random message without prefix")).unwrap();
 
         assert_eq!(
             payload.get("deny_kind").and_then(|v| v.as_str()),
@@ -6264,7 +6354,7 @@ mod tests {
     #[test]
     fn test_tool_trace_payloads_include_identity_and_permission_fields() {
         let outcome = sample_metadata_outcome();
-        let success = tool_success_payload(&outcome, "turn-1", &sample_action_result("ok"));
+        let success = serde_json::to_value(tool_success_payload(&outcome, "turn-1", &sample_action_result("ok"))).unwrap();
         assert_eq!(
             success.get("tool").and_then(|v| v.as_str()),
             Some("read_file")
@@ -6392,7 +6482,7 @@ mod tests {
         );
 
         let approved_error =
-            approved_tool_error_payload(&outcome, "turn-1", "execution failed", "req-1");
+            serde_json::to_value(approved_tool_error_payload(&outcome, "turn-1", "execution failed", "req-1")).unwrap();
         assert_eq!(
             approved_error.get("source").and_then(|v| v.as_str()),
             Some("mcp")

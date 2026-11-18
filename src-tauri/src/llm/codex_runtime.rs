@@ -49,7 +49,7 @@ static NEXT_RUNTIME_CWD_ID: AtomicU64 = AtomicU64::new(1);
 
 type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct CodexRuntimeInfo {
     pub status: String,
     pub binary: String,

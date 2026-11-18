@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 // pattern: Imperative Shell
 
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 import { act, createElement, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { characterDb } from "@/lib/db";
-import type { CharacterRecord } from "@/lib/kokoro-bridge";
+import { listCharacters, type CharacterRecord } from "@/lib/kokoro-bridge";
 import CharacterManager, { type CharacterManagerRef } from "./CharacterManager";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -53,6 +54,7 @@ vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
 });
 
 const char1: CharacterRecord = {
+  ...emptyCharacterDetails,
   id: "char-1",
   name: "Char 1 Baseline",
   user_nickname: "User",
@@ -63,6 +65,7 @@ const char1: CharacterRecord = {
 };
 
 const char2: CharacterRecord = {
+  ...emptyCharacterDetails,
   id: "char-2",
   name: "Char 2 Baseline",
   user_nickname: "User",
@@ -73,6 +76,7 @@ const char2: CharacterRecord = {
 };
 
 const char3: CharacterRecord = {
+  ...emptyCharacterDetails,
   id: "char-3",
   name: "Char 3 Baseline",
   user_nickname: "User",
@@ -166,6 +170,37 @@ describe("CharacterManager lifecycle and draft management", () => {
       expect.any(Uint8Array),
     );
     expect(characterDb.remove).toHaveBeenCalledWith(18);
+  });
+
+  it("writes an explicit null for Remove Avatar", async () => {
+    const character = { ...char1, avatar_path: "character-instance-resource://char-1/avatar.png" };
+    vi.mocked(listCharacters).mockResolvedValueOnce([character]);
+    await act(async () => {
+      root.render(createElement(CharacterManager, {
+        characters: [character],
+        activeCharacterId: character.id,
+        characterToEditId: character.id,
+        onActivateCharacter: vi.fn(async () => undefined),
+        onCharacterRuntimeChange: vi.fn(async () => undefined),
+        responseLanguage: "",
+        onResponseLanguageChange: vi.fn(),
+        userLanguage: "",
+        onUserLanguageChange: vi.fn(),
+      }));
+    });
+
+    const removeAvatar = () => Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "settings.persona.edit.avatar_remove",
+    );
+    const button = removeAvatar();
+    expect(button).toBeDefined();
+    await act(async () => button?.click());
+
+    expect(mockUpdateCharacter).toHaveBeenCalledWith(expect.objectContaining({
+      id: character.id,
+      avatar_path: null,
+    }));
+    expect(removeAvatar()).toBeUndefined();
   });
 
   it("retains failed draft when one write fails in multi-character edits and allows retry", async () => {

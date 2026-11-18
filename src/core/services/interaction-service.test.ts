@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { chatReply } from "../../lib/chat/__tests__/wire-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chatViewFixture as chat } from "../../lib/chat/view-test-fixture";
 import { InteractionService } from "./interaction-service";
@@ -9,7 +10,7 @@ vi.mock("../../lib/chat/application", async () => {
 describe("InteractionService application input adapter", () => {
  let service: InteractionService;
  const controller = { playCue: vi.fn(), resolveInteractionSemanticCue: vi.fn(() => null) };
- beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10000); chat.reset(); localStorage.clear(); service = new InteractionService(); chat.send.mockResolvedValue({ status: "completed", conversation_id: "conv-1", text: "reply" }); });
+ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10000); chat.reset(); localStorage.clear(); service = new InteractionService(); chat.send.mockResolvedValue(chatReply({ status: "completed", conversation_id: "conv-1", text: "reply" })); });
  afterEach(() => { service.destroy(); vi.useRealTimers(); });
  it("submits hidden gestures without a panel acceptance event", async () => {
   await service.handleGesture({ gesture: "tap", hitArea: "Head", consecutiveTaps: 1 }, controller);

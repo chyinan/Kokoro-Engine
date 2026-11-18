@@ -2,7 +2,7 @@ use crate::ai::context::AIOrchestrator;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, specta::Type)]
 pub struct ContextSettings {
     pub strategy: String,
     pub max_message_chars: usize,

@@ -1,10 +1,11 @@
 // pattern: Imperative Shell
 
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
+use crate::ipc::wire::JsonPayload;
 use crate::mods::{ModManager, ModManifest, ModThemeJson};
 use crate::registry::manifest::RegistryEntry;
 use semver::{Version, VersionReq};
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
@@ -563,6 +564,7 @@ fn reject_case_folded_sibling(path: &Path, label: &str) -> Result<(), KokoroErro
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_mods(
     mod_manager: State<'_, Mutex<ModManager>>,
 ) -> Result<Vec<ModManifest>, KokoroError> {
@@ -571,6 +573,7 @@ pub async fn list_mods(
 }
 
 #[command]
+#[specta::specta]
 pub async fn load_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     app_handle: AppHandle,
@@ -584,22 +587,25 @@ pub async fn load_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_mod_theme(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Option<ModThemeJson>, KokoroError> {
+) -> Result<Response<Option<ModThemeJson>>, KokoroError> {
     let manager = mod_manager.lock().await;
-    Ok(manager.get_active_theme().cloned())
+    Ok(Response(manager.get_active_theme().cloned()))
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_mod_layout(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Option<JsonValue>, KokoroError> {
+) -> Result<Response<Option<JsonPayload>>, KokoroError> {
     let manager = mod_manager.lock().await;
-    Ok(manager.get_active_layout().cloned())
+    Ok(Response(manager.get_active_layout().cloned().map(JsonPayload)))
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     file_path: String,
@@ -625,6 +631,7 @@ pub async fn install_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn update_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     mod_id: String,
@@ -656,6 +663,7 @@ pub async fn update_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_mod_from_registry(
     mod_manager: State<'_, Mutex<ModManager>>,
     entry: RegistryEntry,
@@ -709,6 +717,7 @@ pub async fn install_mod_from_registry(
 }
 
 #[command]
+#[specta::specta]
 pub async fn remove_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     mod_id: String,
@@ -721,6 +730,7 @@ pub async fn remove_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_mod_from_url(
     mod_manager: State<'_, Mutex<ModManager>>,
     url: String,
@@ -752,19 +762,21 @@ pub async fn install_mod_from_url(
 }
 
 #[command]
+#[specta::specta]
 pub async fn dispatch_mod_event(
     mod_manager: State<'_, Mutex<ModManager>>,
     event: String,
-    payload: JsonValue,
+    payload: JsonPayload,
 ) -> Result<(), KokoroError> {
     let manager = mod_manager.lock().await;
     manager
-        .dispatch_event(&event, payload)
+        .dispatch_event(&event, payload.0)
         .await
         .map_err(KokoroError::Mod)
 }
 
 #[command]
+#[specta::specta]
 pub async fn unload_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     app_handle: AppHandle,

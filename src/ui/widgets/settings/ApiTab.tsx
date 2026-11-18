@@ -13,6 +13,7 @@ import { motion } from "framer-motion";
 import { inputClasses, labelClasses } from "../../styles/settings-primitives";
 import { Select } from "@/components/ui/select";
 import { useTranslation } from "react-i18next";
+import type { JsonValue } from "@/lib/generated/ipc";
 import {
     getLlmConfig,
     saveLlmConfig,
@@ -180,7 +181,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
             })
             .catch(() => {
                 if (!cancelled) {
-                    setCodexRuntimeInfo({ status: "error", binary: "codex" });
+                    setCodexRuntimeInfo({ status: "error", binary: "codex", version: null });
                 }
             })
             .finally(() => {
@@ -230,7 +231,7 @@ export default function ApiTab({ visionEnabled, onVisionEnabledChange, initialCo
     );
 
     const updateActiveProviderExtra = useCallback(
-        (updates: Record<string, unknown | undefined>) => {
+        (updates: Record<string, JsonValue | undefined>) => {
             if (!activeProvider) return;
             const nextExtra = { ...(activeProvider.extra || {}) };
             for (const [key, value] of Object.entries(updates)) {

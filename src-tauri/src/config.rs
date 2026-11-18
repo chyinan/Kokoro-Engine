@@ -355,7 +355,7 @@ pub fn resolve_api_key(api_key: &Option<String>, api_key_env: &Option<String>) -
     None
 }
 
-#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(default)]
 pub struct MemoryUpgradeConfig {
     pub observability_enabled: bool,

@@ -9,14 +9,14 @@
  * - Hit area click detection with callback
  * - Expression and motion control via ref
  */
+import { events } from "@/lib/generated/ipc";
 import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Live2DModel } from "pixi-live2d-display/cubism4";
-import { Live2DController, type IdleBehavior } from "./Live2DController";
+import { Live2DController } from "./Live2DController";
 import { APP_SETTING_KEYS, readJsonSetting } from "../../lib/app-settings";
 import type { AppliedCharacterCueProfile } from "../characters/character-cue-profile";
 import { drawableHitTest, estimateRegionByY, REGION_DESCRIPTIONS } from "./DrawableHitTest";
-import { onChatCue, type Live2dModelProfile } from "../../lib/kokoro-bridge";
-import { listen } from "@tauri-apps/api/event";
+import { onChatCue } from "../../lib/kokoro-bridge";
 import { chatApplication } from "../../lib/chat/application";
 import { chatEventMatchesView } from "../../lib/chat/projection";
 import { interactionService, type GestureEvent } from "../../core/services/interaction-service";
@@ -176,7 +176,7 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             let unlisten: (() => void) | undefined;
             let disposed = false;
 
-            listen<Live2dModelProfile>("live2d-profile-updated", (event) => {
+            events.live2dProfileUpdated.listen((event) => {
                 const ctrl = getActiveController();
                 if (!ctrl || !modelPath) return;
                 if (event.payload?.model_path !== modelPath) return;
@@ -262,11 +262,11 @@ const Live2DViewer = forwardRef<Live2DViewerHandle, Live2DViewerProps>(
             let unlisten: (() => void) | undefined;
             let disposed = false;
 
-            listen<any>("idle-behavior", (event) => {
+            events.idleBehavior.listen((event) => {
                 if (event.payload?.character_id && event.payload.character_id !== chatApplication.getSnapshot().character_id) return;
                 const ctrl = getActiveController();
                 if (ctrl && event.payload && event.payload.behavior) {
-                    ctrl.playIdleBehavior(event.payload.behavior as IdleBehavior);
+                    ctrl.playIdleBehavior(event.payload.behavior);
                 }
             }).then(fn => {
                 if (disposed) {

@@ -39,7 +39,7 @@ impl AIOrchestrator {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryDeletionTarget {
     generation: u64,

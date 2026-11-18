@@ -63,7 +63,7 @@ export function snapshotFrontendRuntime(
 }
 
 function resolveAsset(
-  reference: PackageAssetReference | null,
+  reference: PackageAssetReference | null | undefined,
   fallbackValue: string | null,
   fallbackSource: FrontendAssetSource | undefined,
   defaultValue: string | null,
@@ -117,8 +117,8 @@ export function resolveFrontendRuntimeProfile(
     tts: {
       enabled: isTtsEnabled,
       mode: runtime.tts.mode,
-      providerId: runtime.tts.provider_id,
-      voice: runtime.tts.voice,
+      providerId: runtime.tts.provider_id ?? null,
+      voice: runtime.tts.voice ?? null,
       speed: runtime.tts.speed ?? 1,
       pitch: runtime.tts.pitch ?? 1,
     },

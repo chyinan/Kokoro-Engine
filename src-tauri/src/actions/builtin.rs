@@ -5,6 +5,7 @@ use super::registry::{
     ActionRiskTag,
 };
 use crate::chat::events::ChatEvent;
+use crate::chat::event_payloads::{ChatEventScope, ChatImageGenEvent, CueEvent, ImageGenDone, MemoryUpdated};
 use crate::vision::capture::CaptureOptions;
 use crate::vision::context::{VisionObservation, VisionObservationSource};
 use async_trait::async_trait;
@@ -198,8 +199,17 @@ impl ActionHandler for PlayCueAction {
 
         ctx.services.events.publish(
             true,
-            ChatEvent::Cue,
-            serde_json::json!({ "cue": cue, "source": "builtin-play-cue", "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }),
+            ChatEvent::Cue(CueEvent {
+                scope: ChatEventScope {
+                    character_id: Some(ctx.character_id.clone()),
+                    conversation_id: Some(ctx.conversation_id.clone()),
+                    client_request_id: Some(ctx.request_id.clone()),
+                    ..Default::default()
+                },
+                turn_id: Some(ctx.turn_id.clone()),
+                cue: cue.to_owned(),
+                source: Some("builtin-play-cue".into()),
+            }),
         );
 
         Ok(ActionResult::ok(format!("Cue triggered: {}", cue)))
@@ -248,8 +258,16 @@ impl ActionHandler for SetBackgroundAction {
         // Emit image gen event (reuses existing infrastructure)
         ctx.services.events.publish(
             true,
-            ChatEvent::ImageGenerationRequested,
-            serde_json::json!({ "prompt": prompt, "character_id":ctx.character_id,"conversation_id":ctx.conversation_id,"client_request_id":ctx.request_id,"turn_id":ctx.turn_id }),
+            ChatEvent::ImageGenerationRequested(ChatImageGenEvent {
+                scope: ChatEventScope {
+                    character_id: Some(ctx.character_id),
+                    conversation_id: Some(ctx.conversation_id),
+                    client_request_id: Some(ctx.request_id),
+                    ..Default::default()
+                },
+                turn_id: Some(ctx.turn_id),
+                prompt: prompt.to_owned(),
+            }),
         );
 
         Ok(ActionResult::ok(format!(
@@ -331,14 +349,19 @@ impl ActionHandler for GenerateImageAction {
             .await
             .map_err(|error| ActionError(format!("Image generation failed: {}", error)))?;
 
-        let mut event = serde_json::to_value(&result).unwrap_or_default();
-        event["character_id"] = ctx.character_id.into();
-        event["conversation_id"] = ctx.conversation_id.into();
-        event["client_request_id"] = ctx.request_id.into();
-        event["turn_id"] = ctx.turn_id.into();
-        ctx.services
-            .events
-            .publish(true, ChatEvent::ImageGenerated, event);
+        ctx.services.events.publish(
+            true,
+            ChatEvent::ImageGenerated(ImageGenDone {
+                result: result.clone(),
+                scope: ChatEventScope {
+                    character_id: Some(ctx.character_id),
+                    conversation_id: Some(ctx.conversation_id),
+                    client_request_id: Some(ctx.request_id),
+                    ..Default::default()
+                },
+                turn_id: Some(ctx.turn_id),
+            }),
+        );
 
         Ok(ActionResult::ok_with_data(
             "Image generated in Kokoro Engine. If the user is chatting from an external bot platform that cannot display local images, tell them to open the Kokoro Engine client to view it.",
@@ -519,7 +542,7 @@ impl ActionHandler for StoreMemoryAction {
         // Notify frontend to refresh memory panel
         ctx.services
             .events
-            .notify(ChatEvent::MemoryUpdated, &char_id);
+            .notify(ChatEvent::MemoryUpdated(MemoryUpdated(char_id)));
 
         Ok(ActionResult::ok(format!(
             "Remembered: \"{}\" (importance: {:.1})",

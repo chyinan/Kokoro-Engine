@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::characters::manifest::{CharacterRuntimeProfile, CharacterTemplateManifest};
 use crate::characters::merge::{merge_character_template, CharacterTemplateFields};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct CharacterRecord {
     pub id: String,
     pub name: String,
@@ -15,20 +15,27 @@ pub struct CharacterRecord {
     pub source_format: String,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
     pub template_id: Option<String>,
+    #[serde(default)]
     pub template_version: Option<String>,
+    #[serde(default)]
     pub template_snapshot_json: Option<String>,
     pub description: String,
+    #[serde(default)]
     pub avatar_path: Option<String>,
     pub greeting: String,
+    #[serde(default)]
     pub greeting_consumed_at: Option<i64>,
+    #[serde(default)]
     pub greeting_message_id: Option<i64>,
     pub example_dialogue: String,
     pub runtime_profile_json: String,
+    #[serde(default)]
     pub user_modified_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct CreateCharacterRequest {
     pub id: String,
     pub name: String,
@@ -37,11 +44,15 @@ pub struct CreateCharacterRequest {
     pub source_format: String,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
     pub template_id: Option<String>,
+    #[serde(default)]
     pub template_version: Option<String>,
+    #[serde(default)]
     pub template_snapshot_json: Option<String>,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub avatar_path: Option<String>,
     #[serde(default)]
     pub greeting: String,
@@ -49,10 +60,11 @@ pub struct CreateCharacterRequest {
     pub example_dialogue: String,
     #[serde(default = "default_runtime_profile_json")]
     pub runtime_profile_json: String,
+    #[serde(default)]
     pub user_modified_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct UpdateCharacterRequest {
     pub id: String,
     pub name: String,
@@ -62,7 +74,8 @@ pub struct UpdateCharacterRequest {
     pub updated_at: i64,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_avatar_update")]
+    #[specta(type = Option<String>)]
     pub avatar_path: Option<Option<String>>,
     #[serde(default)]
     pub greeting: Option<String>,
@@ -74,22 +87,30 @@ pub struct UpdateCharacterRequest {
     pub user_modified_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// Omission leaves the avatar alone, while a JSON null explicitly clears it.
+fn deserialize_avatar_update<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct DuplicateCharacterRequest {
     pub source_id: String,
     pub new_id: String,
+    #[serde(default)]
     pub new_name: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct RestoreCharacterDefaultsRequest {
     pub id: String,
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct InstantiateCharacterTemplateRequest {
     pub template_id: String,
     pub template_version: String,
@@ -99,13 +120,13 @@ pub struct InstantiateCharacterTemplateRequest {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct ReconcileCharacterTemplateRequest {
     pub instance_id: String,
     pub template_version: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 pub struct ApplyCharacterTemplateReconciliationRequest {
     pub instance_id: String,
     pub expected_current_template_version: String,
@@ -114,15 +135,18 @@ pub struct ApplyCharacterTemplateReconciliationRequest {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct ReconcileConflict {
     pub field: String,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     pub old_value: Value,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     pub user_value: Value,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     pub new_value: Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct ReconcileCharacterTemplatePreview {
     pub instance_id: String,
     pub template_id: String,

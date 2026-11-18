@@ -1,13 +1,13 @@
-import { invoke } from "@tauri-apps/api/core";
-import { ModManifest } from "../types/mod";
+import { commands } from "@/lib/generated/ipc";
+import type { ModManifest } from "../types/mod";
 
 export class ModService {
     async listMods(): Promise<ModManifest[]> {
-        return invoke<ModManifest[]>("list_mods");
+        return commands.listMods();
     }
 
     async loadMod(modId: string): Promise<void> {
-        return invoke("load_mod", { modId });
+        await commands.loadMod(modId);
     }
 }
 

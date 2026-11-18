@@ -1,5 +1,6 @@
 use crate::chat::runtime::ChatRuntimeState;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use crate::hooks::HookRuntime;
 use crate::tts::config::{ProviderConfig, TtsSystemConfig};
 use crate::tts::desktop::TauriTtsPlayback;
@@ -9,17 +10,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{command, AppHandle, Manager, State};
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, specta::Type)]
 pub struct TtsConfig {
+    #[serde(default)]
     pub provider_id: Option<String>,
+    #[serde(default)]
     pub request_id: Option<String>,
+    #[serde(default)]
     pub voice: Option<String>,
+    #[serde(default)]
     pub speed: Option<f32>,
+    #[serde(default)]
     pub pitch: Option<f32>,
+    #[serde(default)]
     pub emotion: Option<String>,
 }
 
 #[command]
+#[specta::specta]
 pub async fn synthesize(
     app: AppHandle,
     state: State<'_, TtsService>,
@@ -55,6 +63,7 @@ pub async fn synthesize(
 }
 
 #[command]
+#[specta::specta]
 pub async fn cancel_tts(
     state: State<'_, TtsService>,
     request_id: Option<String>,
@@ -64,6 +73,7 @@ pub async fn cancel_tts(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_tts_providers(
     state: State<'_, TtsService>,
 ) -> Result<Vec<ProviderStatus>, KokoroError> {
@@ -71,6 +81,7 @@ pub async fn list_tts_providers(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_tts_voices(
     state: State<'_, TtsService>,
 ) -> Result<Vec<VoiceProfile>, KokoroError> {
@@ -78,6 +89,7 @@ pub async fn list_tts_voices(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_openai_tts_models(config: ProviderConfig) -> Result<Vec<String>, KokoroError> {
     crate::tts::openai::list_openai_tts_models(&config)
         .await
@@ -85,6 +97,7 @@ pub async fn list_openai_tts_models(config: ProviderConfig) -> Result<Vec<String
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_tts_provider_status(
     state: State<'_, TtsService>,
     provider_id: String,
@@ -93,6 +106,7 @@ pub async fn get_tts_provider_status(
 }
 
 #[command]
+#[specta::specta]
 pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), KokoroError> {
     state.clear_cache().await;
     Ok(())
@@ -100,12 +114,14 @@ pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), KokoroE
 
 /// Return the current TTS config from disk.
 #[command]
-pub async fn get_tts_config() -> Result<TtsSystemConfig, KokoroError> {
-    Ok(crate::tts::load_config(&tts_config_path()))
+#[specta::specta]
+pub async fn get_tts_config() -> Result<Response<TtsSystemConfig>, KokoroError> {
+    Ok(Response(crate::tts::load_config(&tts_config_path())))
 }
 
 /// Save TTS config to disk and hot-reload providers.
 #[command]
+#[specta::specta]
 pub async fn save_tts_config(
     state: State<'_, TtsService>,
     config: TtsSystemConfig,
@@ -123,6 +139,7 @@ fn tts_config_path() -> PathBuf {
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_gpt_sovits_models(install_path: String) -> Result<GptSovitsModels, KokoroError> {
     crate::tts::local_gpt_sovits::list_gpt_sovits_models(std::path::Path::new(&install_path))
 }

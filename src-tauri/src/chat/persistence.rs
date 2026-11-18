@@ -433,7 +433,7 @@ impl PendingChatSave {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub(crate) struct ExternalReplyImage {
     pub prompt: String,
     pub mime_type: String,
@@ -441,7 +441,7 @@ pub(crate) struct ExternalReplyImage {
     pub data_base64: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub(crate) struct ExternalReplyMedia {
     pub images: Vec<ExternalReplyImage>,
     pub image_prompts: Vec<String>,

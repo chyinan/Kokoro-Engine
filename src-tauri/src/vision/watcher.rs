@@ -1,6 +1,7 @@
 // pattern: Imperative Shell
 //! Vision Watcher — background loop that captures screen and analyzes with VLM.
 
+use crate::ipc::{events::{ProactiveTrigger, VisionObservationEvent, VisionStatus, VisionStatusChanged}, wire::emit};
 use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::messages::user_message_with_images;
 use crate::llm::provider::{LlmParams, LlmProvider};
@@ -12,7 +13,7 @@ use crate::vision::context::{AnalysisDispatch, VisionFrame};
 use reqwest::Client;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::RwLock;
 
 /// Shared handle to control the watcher loop.
@@ -72,7 +73,7 @@ impl VisionWatcher {
 
         tokio::spawn(async move {
             tracing::info!(target: "vision", "Watcher started");
-            let _ = app_handle.emit("vision-status", "active");
+            let _ = emit(&app_handle, VisionStatusChanged(VisionStatus::Active));
             let mut prev_screenshot: Option<Vec<u8>> = None;
             let mut last_capture_warning: Option<String> = None;
 
@@ -172,7 +173,7 @@ impl VisionWatcher {
 
             tracing::info!(target: "vision", "Watcher stopped");
             if watcher.is_producer_current(producer_generation) {
-                let _ = app_handle.emit("vision-status", "inactive");
+                let _ = emit(&app_handle, VisionStatusChanged(VisionStatus::Inactive));
             }
         });
     }
@@ -256,13 +257,13 @@ async fn run_analysis_chain(
                 .latest_completed_observation(chrono::Utc::now())
                 .await
             {
-                let _ = app_handle.emit(
-                    "vision-observation",
-                    serde_json::json!({
-                        "summary": observation.summary,
-                        "captured_at": observation.captured_at.to_rfc3339(),
-                        "source": observation.source.as_str(),
-                    }),
+                let _ = emit(
+                    &app_handle,
+                    VisionObservationEvent {
+                        summary: observation.summary,
+                        captured_at: observation.captured_at.to_rfc3339(),
+                        source: observation.source,
+                    },
                 );
             }
         }
@@ -295,13 +296,16 @@ async fn emit_proactive_vision_comment(app_handle: &AppHandle) {
     ) else {
         return;
     };
-    let _ = app_handle.emit(
-        "proactive-trigger",
-        serde_json::json!({
-            "trigger": "vision",
-            "character_id":scope.0,"conversation_id":scope.1,"client_request_id":request_id,
-            "instruction": build_proactive_vision_instruction(),
-        }),
+    let _ = emit(
+        app_handle,
+        ProactiveTrigger {
+            trigger: "vision".into(),
+            character_id: scope.0,
+            conversation_id: scope.1,
+            client_request_id: request_id,
+            instruction: build_proactive_vision_instruction().into(),
+            idle_seconds: None,
+        },
     );
 }
 

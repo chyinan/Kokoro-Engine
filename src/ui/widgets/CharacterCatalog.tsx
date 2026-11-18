@@ -123,7 +123,7 @@ function buildCatalogEntries(
         persona: character.persona,
         greeting: character.greeting ?? template.greeting,
         exampleDialogue: character.example_dialogue ?? template.example_dialogue ?? "",
-        avatarPath: character.avatar_path ?? template.avatar,
+        avatarPath: character.avatar_path ?? template.avatar ?? null,
         source: "instance",
         hasTemplate: true,
         templateVersion: character.template_version ?? null,

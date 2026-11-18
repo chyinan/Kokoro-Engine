@@ -12,6 +12,7 @@ use crate::characters::instance_resource::{
 };
 use crate::characters::manifest::CharacterTemplateManifest;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
@@ -272,20 +273,23 @@ const CHARACTER_COLUMNS: &str =
      runtime_profile_json, user_modified_at";
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_characters(
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<Vec<CharacterRecord>, KokoroError> {
+) -> Result<Response<Vec<CharacterRecord>>, KokoroError> {
     list_characters_from_pool(&orchestrator.db).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn prepare_character_activation(
     character_id: String,
     allow_local_preset: Option<bool>,
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
-) -> Result<CharacterActivationToken, KokoroError> {
+) -> Result<Response<CharacterActivationToken>, KokoroError> {
     let app_data = resolve_app_data(&app)?;
     let tts_config = crate::tts::config::load_config(&app_data.join("tts_config.json"));
     let backend = OrchestratorActivationBackend {
@@ -308,29 +312,33 @@ pub async fn prepare_character_activation(
             &backend,
         )
         .await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn commit_character_activation(
     token: CharacterActivationToken,
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
-) -> Result<CommittedCharacterRuntime, KokoroError> {
+) -> Result<Response<CommittedCharacterRuntime>, KokoroError> {
     let app_data = resolve_app_data(&app)?;
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
         app_data,
     };
     coordinator.commit(&orchestrator.db, token, &backend).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_committed_character_runtime(
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
-) -> Result<Option<CommittedCharacterRuntime>, KokoroError> {
+) -> Result<Response<Option<CommittedCharacterRuntime>>, KokoroError> {
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
         app_data: resolve_app_data(&app)?,
@@ -338,6 +346,7 @@ pub async fn get_committed_character_runtime(
     coordinator
         .recover_committed(&orchestrator.db, &backend)
         .await
+        .map(Response)
 }
 
 pub(crate) async fn recover_committed_character_runtime_for_startup(
@@ -379,6 +388,7 @@ pub(crate) async fn activate_character_for_package_removal(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_character(
     request: CreateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
@@ -387,6 +397,7 @@ pub async fn create_character(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_character_with_avatar(
     request: CreateCharacterRequest,
     avatar_bytes: Vec<u8>,
@@ -398,6 +409,7 @@ pub async fn create_character_with_avatar(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_character_with_avatar(
     request: UpdateCharacterRequest,
     avatar_bytes: Vec<u8>,
@@ -409,6 +421,7 @@ pub async fn update_character_with_avatar(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_character(
     request: UpdateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
@@ -419,6 +432,7 @@ pub async fn update_character(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_character(
     id: String,
     orchestrator: State<'_, AIOrchestrator>,
@@ -433,6 +447,7 @@ pub async fn delete_character(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn duplicate_character(
     request: DuplicateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
@@ -443,6 +458,7 @@ pub async fn duplicate_character(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn restore_character_defaults(
     request: RestoreCharacterDefaultsRequest,
     orchestrator: State<'_, AIOrchestrator>,
@@ -453,6 +469,7 @@ pub async fn restore_character_defaults(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_character_templates(
     catalog: State<'_, CharacterCatalog>,
 ) -> Result<Vec<CharacterTemplateManifest>, KokoroError> {
@@ -460,6 +477,7 @@ pub fn list_character_templates(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn instantiate_character_template(
     request: InstantiateCharacterTemplateRequest,
     orchestrator: State<'_, AIOrchestrator>,
@@ -469,15 +487,18 @@ pub async fn instantiate_character_template(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn reconcile_character_template(
     request: ReconcileCharacterTemplateRequest,
     orchestrator: State<'_, AIOrchestrator>,
     catalog: State<'_, CharacterCatalog>,
-) -> Result<ReconcileCharacterTemplatePreview, KokoroError> {
+) -> Result<Response<ReconcileCharacterTemplatePreview>, KokoroError> {
     reconcile_character_template_from_pool(&orchestrator.db, &catalog, request).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn apply_character_template_reconciliation(
     request: ApplyCharacterTemplateReconciliationRequest,
     orchestrator: State<'_, AIOrchestrator>,

@@ -14,18 +14,20 @@ use std::sync::Arc;
 
 // ── Types ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ActionParam {
     pub name: String,
     pub description: String,
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ActionResult {
     pub success: bool,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[specta(type = Option<crate::ipc::wire::JsonValue>)]
+    #[serde(default)]
     pub data: Option<serde_json::Value>,
 }
 
@@ -112,14 +114,14 @@ pub(crate) async fn dispatch_handler(
     handler.execute(args, ctx).await
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionSource {
     Builtin,
     Mcp,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionRiskTag {
     Read,
@@ -128,7 +130,7 @@ pub enum ActionRiskTag {
     Sensitive,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionPermissionLevel {
     Safe,
@@ -136,12 +138,13 @@ pub enum ActionPermissionLevel {
 }
 
 /// Metadata for a registered action (returned to frontend / LLM prompt).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ActionInfo {
     pub id: String,
     pub name: String,
     pub source: ActionSource,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub server_name: Option<String>,
     pub description: String,
     pub parameters: Vec<ActionParam>,

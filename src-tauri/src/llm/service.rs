@@ -32,14 +32,14 @@ pub struct LlmService {
     config_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct LlmConnectionTestedTarget {
     pub role: String,
     pub provider_id: String,
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct LlmConnectionTestResult {
     pub tested_targets: Vec<LlmConnectionTestedTarget>,
 }

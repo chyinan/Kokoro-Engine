@@ -20,9 +20,11 @@ use crate::llm::provider::{
 
 const DEFAULT_LLAMA_CPP_BASE_URL: &str = "http://127.0.0.1:8080";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 pub struct LlamaCppStatus {
+    #[serde(default)]
     pub current_model: Option<String>,
+    #[serde(default)]
     pub context_length: Option<usize>,
     #[serde(default)]
     pub available_models: Vec<String>,

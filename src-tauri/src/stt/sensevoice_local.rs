@@ -17,7 +17,7 @@ const RECOMMENDED_ARCHIVE_NAME: &str =
     "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2";
 const RECOMMENDED_DOWNLOAD_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct SenseVoiceLocalModelStatus {
     pub installed: bool,
     pub download_instructions_url: String,
@@ -28,11 +28,13 @@ pub struct SenseVoiceLocalModelStatus {
     pub tokens_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "stt:sensevoice-local-progress")]
 pub struct SenseVoiceLocalDownloadProgress {
     pub stage: String,
     pub message: String,
     pub downloaded_bytes: u64,
+    #[serde(default)]
     pub total_bytes: Option<u64>,
 }
 

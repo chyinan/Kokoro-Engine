@@ -8,14 +8,15 @@ use sqlx::SqliteConnection;
 use std::collections::VecDeque;
 use tokio::sync::watch;
 
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize, specta::Type)]
 pub struct FailureRetry {
     pub diagnostic_message_id: i64,
     pub expected_tail_message_id: i64,
+    #[serde(default)]
     pub expected_history_revision: Option<i64>,
 }
 
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize, specta::Type)]
 pub struct ReplyRegeneration {
     pub assistant_message_id: i64,
     pub expected_tail_message_id: i64,

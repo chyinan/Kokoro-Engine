@@ -8,10 +8,11 @@ import {
   installCharacterFromRegistry,
   installCharacterFromUrl,
   installModFromRegistry,
+  installModFromUrl,
   listInstalledContent,
   listRegistryEntries,
   removeCharacterPackage,
-  safeInvoke,
+  removeMod,
   type InstalledCharacterPackage,
   type InstalledContentPackage,
   type ModManifest,
@@ -29,6 +30,7 @@ import {
   reduceContentLibraryState,
   selectRegistryEntries,
   type ContentLibraryEvent,
+  type ContentLibraryEntry,
   type ContentLibraryState,
   type ContentLibraryTab,
   type ContentOperation,
@@ -59,10 +61,10 @@ const defaultDependencies: ContentLibraryDependencies = {
   installCharacter: installCharacterFromRegistry,
   installCharacterFromUrl,
   installMod: async (entry, permissionConfirmed, registryUrl) => installModFromRegistry({ entry, registryUrl, permissionConfirmed }),
-  installModFromUrl: async (url, permissionConfirmed) => safeInvoke<ModManifest>("install_mod_from_url", { url, confirmUntrustedCode: permissionConfirmed }),
+  installModFromUrl,
   update: async (entry, permissionConfirmed, registryUrl) => installModFromRegistry({ entry, registryUrl, permissionConfirmed }),
   removeCharacter: async (entry) => removeCharacterPackage(entry.id, entry.version),
-  remove: async (entry) => safeInvoke<void>("remove_mod", { modId: entry.id }),
+  remove: async (entry) => removeMod(entry.id),
 };
 
 function mergeDependencies(
@@ -88,7 +90,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
   const [loading, setLoading] = useState(false);
   const [url, setUrl] = useState("");
   const [lastAction, setLastAction] = useState<(() => Promise<void>) | null>(null);
-  const [permissionTarget, setPermissionTarget] = useState<{ readonly entry: RegistryEntry; readonly operation: "install" | "update" } | null>(null);
+  const [permissionTarget, setPermissionTarget] = useState<{ readonly entry: ContentLibraryEntry; readonly operation: "install" | "update" } | null>(null);
 
   const dispatch = (event: ContentLibraryEvent) => setState((current) => reduceContentLibraryState(current, event));
 
@@ -139,7 +141,7 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.registryUrl]);
 
-  const runOperation = async (entry: Readonly<RegistryEntry>, operation: ContentOperation, permissionConfirmed = false): Promise<void> => {
+  const runOperation = async (entry: Readonly<ContentLibraryEntry>, operation: ContentOperation, permissionConfirmed = false): Promise<void> => {
     if (entry.content_type === "mod" && (operation === "install" || operation === "update") && !permissionConfirmed) {
       setPermissionTarget({ entry: { ...entry }, operation });
       return;
@@ -254,11 +256,12 @@ export default function ContentLibrary(props: Readonly<ContentLibraryProps>) {
           const pending = state.pending?.key === entryKey;
           const recommendations = recommendationLabels(entry, t);
           const action = versionState === "available" ? "install" : versionState === "update-available" ? "update" : "remove";
+          const previewUrl = getSafePreviewUrl(entry.preview[0] ?? "", entry.download_url);
           return (
             <article key={`${entry.content_type}:${entry.id}`} data-content-entry={entry.id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)]/70 p-3">
               <div className="flex gap-3">
                 <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-[var(--color-border)] bg-black/20">
-                  {getSafePreviewUrl(entry.preview[0] ?? "", entry.download_url) ? <img src={getSafePreviewUrl(entry.preview[0] ?? "", entry.download_url) ?? undefined} alt="" className="h-full w-full object-cover" /> : <div className="grid h-full w-full place-items-center text-[var(--color-text-muted)]"><Package size={20} aria-hidden="true" /></div>}
+                  {previewUrl ? <img src={previewUrl} alt="" className="h-full w-full object-cover" /> : <div className="grid h-full w-full place-items-center text-[var(--color-text-muted)]"><Package size={20} aria-hidden="true" /></div>}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
