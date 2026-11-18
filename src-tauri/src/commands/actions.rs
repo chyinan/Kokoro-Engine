@@ -671,6 +671,7 @@ pub async fn execute_action(
     args: HashMap<String, String>,
     character_id: Option<String>,
 ) -> Result<Response<ActionResult>, KokoroError> {
+    let _action = crate::ipc::admit_operation(&app, "actions", "manual-execution")?;
     let character_id = character_id.unwrap_or_else(|| "default".to_string());
     let raw_invocation = build_direct_invocation(&name, &args);
 

@@ -7,11 +7,13 @@ use crate::chat::persistence::ExternalTurn;
 use crate::chat::persistence::{self, ExternalReplyImage as BotReplyImage};
 use crate::error::KokoroError;
 use crate::imagegen::{ImageGenResult, ImageGenService};
+use crate::lifecycle::TaskScope;
 use crate::stt::{AudioSource, SttService};
 use crate::telegram::TelegramService;
 use crate::tts::TtsService;
 use base64::Engine as _;
-use futures::{SinkExt, StreamExt};
+use bytes::{Buf, BufMut, BytesMut};
+use futures::{SinkExt, Stream, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -20,12 +22,15 @@ use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use warp::{http::StatusCode, Filter, Reply};
+
+pub(crate) mod lifecycle;
+use lifecycle::{BotIngress, BotWorker};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -232,28 +237,42 @@ impl Default for WebhookBotConfig {
 pub struct BotRuntimeService {
     config: Arc<RwLock<BotConfig>>,
     qq_authorization_broker: crate::qqbot::QQAuthorizationBroker,
-    qq_runtime: Arc<Mutex<Option<QQRuntimeHandle>>>,
-    qq_runtime_generation: Arc<AtomicU64>,
-    qq_connected_generation: Arc<AtomicU64>,
-    discord_shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
-    http_shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
-}
-
-struct QQRuntimeHandle {
-    id: u64,
-    shutdown_tx: oneshot::Sender<()>,
+    qq: BotWorker,
+    qq_connected: Arc<AtomicBool>,
+    discord: BotWorker,
+    http: BotWorker,
 }
 
 impl BotRuntimeService {
-    pub fn new(config: BotConfig) -> Self {
+    pub(crate) fn new(config: BotConfig, work: TaskScope, service: TaskScope) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
             qq_authorization_broker: crate::qqbot::QQAuthorizationBroker::default(),
-            qq_runtime: Arc::new(Mutex::new(None)),
-            qq_runtime_generation: Arc::new(AtomicU64::new(0)),
-            qq_connected_generation: Arc::new(AtomicU64::new(0)),
-            discord_shutdown_tx: Arc::new(RwLock::new(None)),
-            http_shutdown_tx: Arc::new(RwLock::new(None)),
+            qq: BotWorker::new("QQ bot", work.clone(), service.clone()),
+            qq_connected: Arc::new(AtomicBool::new(false)),
+            discord: BotWorker::new("Discord bot", work.clone(), service.clone()),
+            http: BotWorker::new("Bot HTTP server", work, service),
+        }
+    }
+
+    pub(crate) fn close_ingress(&self) {
+        self.qq.close_ingress();
+        self.discord.close_ingress();
+        self.http.close_ingress();
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        self.close_ingress();
+        let (qq, discord, http) =
+            tokio::join!(self.qq.stop(), self.discord.stop(), self.http.stop());
+        let errors: Vec<_> = [qq, discord, http]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join(", "))
         }
     }
 
@@ -279,6 +298,7 @@ impl BotRuntimeService {
         group_openid: Option<&str>,
         approved: bool,
     ) -> Result<(u64, Option<String>, Option<String>), String> {
+        let _lease = self.qq.admit_control("QQ authorization decision")?;
         let request_id = request_id.trim();
         let user_openid = user_openid.trim();
         if request_id.is_empty() || request_id.len() > 256 {
@@ -367,25 +387,19 @@ impl BotRuntimeService {
     }
 
     pub async fn is_discord_running(&self) -> bool {
-        self.discord_shutdown_tx.read().await.is_some()
+        self.discord.is_running().await
     }
 
     pub async fn is_qq_started(&self) -> bool {
-        self.qq_runtime.lock().await.is_some()
+        self.qq.is_running().await
     }
 
     pub async fn is_qq_connected(&self) -> bool {
-        let runtime_id = self
-            .qq_runtime
-            .lock()
-            .await
-            .as_ref()
-            .map(|runtime| runtime.id);
-        runtime_id.is_some_and(|id| self.qq_connected_generation.load(Ordering::SeqCst) == id)
+        self.is_qq_started().await && self.qq_connected.load(Ordering::SeqCst)
     }
 
     pub async fn is_http_running(&self) -> bool {
-        self.http_shutdown_tx.read().await.is_some()
+        self.http.is_running().await
     }
 
     pub async fn start_enabled(&self, services: BotChatServices) {
@@ -422,9 +436,9 @@ impl BotRuntimeService {
 
     pub async fn stop_platform(&self, platform: &str) -> Result<(), String> {
         match platform {
-            "qq" => self.stop_qq().await,
-            "discord" => self.stop_discord().await,
-            "line" | "webhook" => self.stop_http().await,
+            "qq" => self.qq.stop().await,
+            "discord" => self.discord.stop().await,
+            "line" | "webhook" => self.http.stop().await,
             other => Err(format!("Unsupported bot platform runtime: {}", other)),
         }
     }
@@ -441,98 +455,37 @@ impl BotRuntimeService {
             return Err("No QQ AppSecret configured".to_string());
         }
 
-        let mut runtime_guard = self.qq_runtime.lock().await;
-        if runtime_guard.is_some() {
-            return Err("QQ bot is already running or connecting".to_string());
-        }
-        let runtime_id = self
-            .qq_runtime_generation
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
-        let (tx, rx) = oneshot::channel();
-        *runtime_guard = Some(QQRuntimeHandle {
-            id: runtime_id,
-            shutdown_tx: tx,
-        });
-        drop(runtime_guard);
-
-        let config_ref = self.config.clone();
+        let config = self.config.clone();
         let authorization_broker = self.qq_authorization_broker.clone();
-        let runtime_ref = self.qq_runtime.clone();
-        let connected_generation = self.qq_connected_generation.clone();
-        tokio::spawn(async move {
-            crate::qqbot::run_qq_gateway(
-                config_ref,
-                authorization_broker,
-                services,
-                runtime_id,
-                connected_generation.clone(),
-                rx,
-            )
-            .await;
-            let _ = connected_generation.compare_exchange(
-                runtime_id,
-                0,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            );
-            let mut guard = runtime_ref.lock().await;
-            if guard
-                .as_ref()
-                .is_some_and(|runtime| runtime.id == runtime_id)
-            {
-                *guard = None;
-            }
-        });
-        Ok(())
-    }
-
-    async fn stop_qq(&self) -> Result<(), String> {
-        let mut guard = self.qq_runtime.lock().await;
-        if let Some(runtime) = guard.take() {
-            let _ = runtime.shutdown_tx.send(());
-            Ok(())
-        } else {
-            Err("QQ bot is not running".to_string())
-        }
+        let connected = self.qq_connected.clone();
+        self.qq
+            .start(move |ingress| {
+                connected.store(false, Ordering::SeqCst);
+                Ok(crate::qqbot::run_qq_gateway(
+                    config,
+                    authorization_broker,
+                    services,
+                    connected,
+                    ingress,
+                ))
+            })
+            .await
     }
 
     async fn start_discord(&self, services: BotChatServices) -> Result<(), String> {
-        if self.is_discord_running().await {
-            return Err("Discord bot is already running".to_string());
-        }
         let config = self.config.read().await.clone();
         if !config.discord.enabled {
             return Err("Discord bot is not enabled".to_string());
         }
         let token = resolve_secret(&config.discord.bot_token, &config.discord.bot_token_env)
             .ok_or("No Discord bot token configured")?;
-
-        let (tx, rx) = oneshot::channel();
-        *self.discord_shutdown_tx.write().await = Some(tx);
-        let config_ref = self.config.clone();
-        let shutdown_ref = self.discord_shutdown_tx.clone();
-        tokio::spawn(async move {
-            run_discord_gateway(token, config_ref, services, rx).await;
-            *shutdown_ref.write().await = None;
-        });
-        Ok(())
-    }
-
-    async fn stop_discord(&self) -> Result<(), String> {
-        let mut guard = self.discord_shutdown_tx.write().await;
-        if let Some(tx) = guard.take() {
-            let _ = tx.send(());
-            Ok(())
-        } else {
-            Err("Discord bot is not running".to_string())
-        }
+        let config = self.config.clone();
+        self.discord
+            .start(move |ingress| Ok(run_discord_gateway(token, config, services, ingress)))
+            .await
     }
 
     async fn start_http(&self, services: BotChatServices) -> Result<(), String> {
-        if self.is_http_running().await {
-            return Err("Bot HTTP server is already running".to_string());
-        }
         let config = self.config.read().await.clone();
         if !config.line.enabled && !config.webhook.enabled {
             return Err("LINE and Webhook bots are not enabled".to_string());
@@ -543,27 +496,10 @@ impl BotRuntimeService {
             .parse()
             .map_err(|e| format!("Invalid bind host: {}", e))?;
         let addr = SocketAddr::new(host, config.webhook.port);
-
-        let (tx, rx) = oneshot::channel();
-        *self.http_shutdown_tx.write().await = Some(tx);
-
-        let config_ref = self.config.clone();
-        let shutdown_ref = self.http_shutdown_tx.clone();
-        tokio::spawn(async move {
-            run_http_bot_server(addr, config_ref, services, rx).await;
-            *shutdown_ref.write().await = None;
-        });
-        Ok(())
-    }
-
-    async fn stop_http(&self) -> Result<(), String> {
-        let mut guard = self.http_shutdown_tx.write().await;
-        if let Some(tx) = guard.take() {
-            let _ = tx.send(());
-            Ok(())
-        } else {
-            Err("Bot HTTP server is not running".to_string())
-        }
+        let config = self.config.clone();
+        self.http
+            .start(move |ingress| bind_http_bot_server(addr, config, services, ingress))
+            .await
     }
 }
 
@@ -793,6 +729,10 @@ pub(crate) async fn save_bot_config(
     runtime: &BotRuntimeService,
     config: BotConfig,
 ) -> Result<BotConfig, KokoroError> {
+    let _lease = runtime
+        .qq
+        .admit_control("save Bot configuration")
+        .map_err(KokoroError::ExternalService)?;
     let saved = runtime
         .save_config(normalize_bot_config_envs(config))
         .await
@@ -805,6 +745,9 @@ pub(crate) async fn save_telegram_config(
     state: &TelegramService,
     config: crate::telegram::TelegramConfig,
 ) -> Result<(), KokoroError> {
+    let _lease = state
+        .admit_control("save Telegram configuration")
+        .map_err(KokoroError::ExternalService)?;
     let config = normalize_telegram_config_env(config);
     let mut bot_config = load_bot_config();
     bot_config.telegram = config.clone();
@@ -1474,12 +1417,13 @@ fn server_error(message: &str) -> warp::reply::Response {
     )
 }
 
-async fn run_http_bot_server(
+fn bind_http_bot_server(
     addr: SocketAddr,
     config: Arc<RwLock<BotConfig>>,
     services: BotChatServices,
-    shutdown_rx: oneshot::Receiver<()>,
-) {
+    ingress: BotIngress,
+) -> Result<impl std::future::Future<Output = Result<(), String>> + Send + 'static, String> {
+    let stop = ingress.token().clone();
     let route = warp::post()
         .and(warp::path::full())
         .and(warp::header::optional::<String>("authorization"))
@@ -1487,20 +1431,22 @@ async fn run_http_bot_server(
         .and(warp::body::content_length_limit(
             MAX_GENERIC_WEBHOOK_BODY_BYTES as u64,
         ))
-        .and(warp::body::bytes())
+        .and(warp::body::stream())
         .and(warp::any().map(move || config.clone()))
         .and(warp::any().map(move || services.clone()))
+        .and(warp::any().map(move || ingress.clone()))
         .and_then(handle_http_bot_request)
         .recover(recover_http_bot_rejection);
+    let (bound, server) = warp::serve(route)
+        .try_bind_with_graceful_shutdown(addr, async move { stop.cancelled().await })
+        .map_err(|error| format!("Could not bind Bot HTTP listener at {addr}: {error}"))?;
 
-    tracing::info!(target: "bot::http", "Bot HTTP server listening on {}", addr);
-    warp::serve(route)
-        .bind_with_graceful_shutdown(addr, async move {
-            let _ = shutdown_rx.await;
-        })
-        .1
-        .await;
-    tracing::info!(target: "bot::http", "Bot HTTP server stopped");
+    tracing::info!(target: "bot::http", "Bot HTTP server listening on {}", bound);
+    Ok(async move {
+        server.await;
+        tracing::info!(target: "bot::http", "Bot HTTP server stopped");
+        Ok(())
+    })
 }
 
 async fn recover_http_bot_rejection(
@@ -1519,14 +1465,38 @@ async fn recover_http_bot_rejection(
     Ok(json_response(json!({ "error": message }), status))
 }
 
-async fn handle_http_bot_request(
+async fn handle_http_bot_request<B>(
     full_path: warp::path::FullPath,
     authorization: Option<String>,
     line_signature: Option<String>,
-    body: bytes::Bytes,
+    body: impl Stream<Item = Result<B, warp::Error>> + Send,
     config: Arc<RwLock<BotConfig>>,
     services: BotChatServices,
-) -> Result<warp::reply::Response, Infallible> {
+    ingress: BotIngress,
+) -> Result<warp::reply::Response, Infallible>
+where
+    B: Buf + Send,
+{
+    // A connection that has only sent headers cannot hold listener shutdown
+    // open by keeping an incomplete request body in flight.
+    let stop = ingress.token();
+    let body = match tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Ok(http_bot_stopping()),
+        received = buffer_webhook_body(body) => received,
+    } {
+        Ok(body) => body,
+        Err(StatusCode::PAYLOAD_TOO_LARGE) => {
+            return Ok(json_response(
+                json!({ "error": "Webhook body exceeds the configured limit" }),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ));
+        }
+        Err(_) => return Ok(bad_request("Invalid webhook request")),
+    };
+    let Some(_lease) = ingress.admit("Webhook request") else {
+        return Ok(http_bot_stopping());
+    };
     let cfg = config.read().await.clone();
     let path = full_path.as_str();
     let line_path = normalize_path(&cfg.line.webhook_path);
@@ -1541,6 +1511,28 @@ async fn handle_http_bot_request(
     };
 
     Ok(response)
+}
+
+fn http_bot_stopping() -> warp::reply::Response {
+    json_response(
+        json!({ "error": "Bot HTTP service is shutting down" }),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+}
+
+async fn buffer_webhook_body<B: Buf>(
+    body: impl Stream<Item = Result<B, warp::Error>>,
+) -> Result<bytes::Bytes, StatusCode> {
+    tokio::pin!(body);
+    let mut bytes = BytesMut::new();
+    while let Some(fragment) = body.next().await {
+        let fragment = fragment.map_err(|_| StatusCode::BAD_REQUEST)?;
+        if bytes.len().saturating_add(fragment.remaining()) > MAX_GENERIC_WEBHOOK_BODY_BYTES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        bytes.put(fragment);
+    }
+    Ok(bytes.freeze())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1770,6 +1762,10 @@ fn bot_error_response(error: &KokoroError) -> warp::reply::Response {
             json_response(json!({"error":message}), StatusCode::CONFLICT)
         }
         KokoroError::Validation(message) => bad_request(message),
+        KokoroError::Chat(message) if message.starts_with("chat_shutting_down:") => json_response(
+            json!({ "error": message, "code": "chat_shutting_down" }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
         KokoroError::Chat(message)
             if message.starts_with("Character activation is in progress:")
                 || message.contains("chat_turn_busy") =>
@@ -2070,7 +2066,10 @@ fn verify_line_signature(secret: &str, body: &[u8], signature: &str) -> bool {
 }
 
 async fn send_line_reply(access_token: &str, reply_token: &str, text: &str) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| error.to_string())?;
     let response = client
         .post("https://api.line.me/v2/bot/message/reply")
         .bearer_auth(access_token)
@@ -2085,7 +2084,7 @@ async fn send_line_reply(access_token: &str, reply_token: &str, text: &str) -> R
         }))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("LINE reply delivery is uncertain: {}", error.without_url()))?;
     if !response.status().is_success() {
         return Err(format!("LINE API returned {}", response.status()));
     }
@@ -2096,31 +2095,32 @@ async fn run_discord_gateway(
     token: String,
     config: Arc<RwLock<BotConfig>>,
     services: BotChatServices,
-    mut shutdown_rx: oneshot::Receiver<()>,
-) {
-    let client = reqwest::Client::new();
+    ingress: BotIngress,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("Could not create Discord HTTP client: {error}"))?;
+    let stop = ingress.token();
     loop {
         let enabled = config.read().await.discord.enabled;
         if !enabled {
             break;
         }
 
-        match run_discord_session(
-            &client,
-            &token,
-            config.clone(),
-            services.clone(),
-            &mut shutdown_rx,
-        )
-        .await
+        match run_discord_session(&client, &token, config.clone(), services.clone(), &ingress).await
         {
             DiscordSessionExit::Shutdown => break,
             DiscordSessionExit::Reconnect => {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
             }
         }
     }
     tracing::info!(target: "bot::discord", "Discord bot stopped");
+    Ok(())
 }
 
 enum DiscordSessionExit {
@@ -2133,9 +2133,13 @@ async fn run_discord_session(
     token: &str,
     config: Arc<RwLock<BotConfig>>,
     services: BotChatServices,
-    shutdown_rx: &mut oneshot::Receiver<()>,
+    ingress: &BotIngress,
 ) -> DiscordSessionExit {
-    let gateway_url = match fetch_discord_gateway(client, token).await {
+    let stop = ingress.token();
+    let gateway_url = match tokio::select! {
+        _ = stop.cancelled() => return DiscordSessionExit::Shutdown,
+        gateway = fetch_discord_gateway(client, token) => gateway,
+    } {
         Ok(url) => url,
         Err(error) => {
             tracing::error!(target: "bot::discord", "failed to fetch gateway URL: {}", error);
@@ -2144,7 +2148,10 @@ async fn run_discord_session(
     };
 
     let ws_url = format!("{}?v=10&encoding=json", gateway_url);
-    let (socket, _) = match tokio_tungstenite::connect_async(&ws_url).await {
+    let (socket, _) = match tokio::select! {
+        _ = stop.cancelled() => return DiscordSessionExit::Shutdown,
+        connected = tokio_tungstenite::connect_async(&ws_url) => connected,
+    } {
         Ok(value) => value,
         Err(error) => {
             tracing::error!(target: "bot::discord", "failed to connect gateway: {}", error);
@@ -2156,7 +2163,8 @@ async fn run_discord_session(
 
     let heartbeat_interval_ms = loop {
         tokio::select! {
-            _ = &mut *shutdown_rx => return DiscordSessionExit::Shutdown,
+            biased;
+            _ = stop.cancelled() => return DiscordSessionExit::Shutdown,
             message = read.next() => {
                 let Some(Ok(WsMessage::Text(text))) = message else {
                     return DiscordSessionExit::Reconnect;
@@ -2187,28 +2195,29 @@ async fn run_discord_session(
             }
         }
     });
-    if write
-        .send(WsMessage::Text(identify.to_string().into()))
-        .await
-        .is_err()
-    {
+    let sent = tokio::select! {
+        _ = stop.cancelled() => return DiscordSessionExit::Shutdown,
+        sent = write.send(WsMessage::Text(identify.to_string().into())) => sent,
+    };
+    if sent.is_err() {
         return DiscordSessionExit::Reconnect;
     }
 
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms.max(1)));
     loop {
         tokio::select! {
-            _ = &mut *shutdown_rx => {
-                let _ = write.close().await;
+            biased;
+            _ = stop.cancelled() => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), write.close()).await;
                 return DiscordSessionExit::Shutdown;
             }
             _ = heartbeat.tick() => {
                 let heartbeat_payload = json!({ "op": 1, "d": sequence });
-                if write
-                    .send(WsMessage::Text(heartbeat_payload.to_string().into()))
-                    .await
-                    .is_err()
-                {
+                let sent = tokio::select! {
+                    _ = stop.cancelled() => return DiscordSessionExit::Shutdown,
+                    sent = write.send(WsMessage::Text(heartbeat_payload.to_string().into())) => sent,
+                };
+                if sent.is_err() {
                     return DiscordSessionExit::Reconnect;
                 }
             }
@@ -2234,6 +2243,9 @@ async fn run_discord_session(
                 if payload.get("op").and_then(Value::as_i64) == Some(0)
                     && payload.get("t").and_then(Value::as_str) == Some("MESSAGE_CREATE")
                 {
+                    let Some(_lease) = ingress.admit("Discord message") else {
+                        continue;
+                    };
                     handle_discord_message(client, token, &config, &services, payload.get("d").cloned().unwrap_or(Value::Null)).await;
                 }
             }
@@ -2517,7 +2529,12 @@ async fn send_discord_message(
         .json(&json!({ "content": truncate_for_platform(text, 1900) }))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            format!(
+                "Discord reply delivery is uncertain: {}",
+                error.without_url()
+            )
+        })?;
     if !response.status().is_success() {
         return Err(format!("Discord API returned {}", response.status()));
     }
@@ -2582,10 +2599,15 @@ mod tests {
             bearer_token: Some("fixture-token".into()),
             ..Default::default()
         };
-        let runtime = BotRuntimeService::new(BotConfig {
-            webhook: config.clone(),
-            ..Default::default()
-        });
+        let lifecycle = crate::lifecycle::AppLifecycle::new();
+        let runtime = BotRuntimeService::new(
+            BotConfig {
+                webhook: config.clone(),
+                ..Default::default()
+            },
+            lifecycle.scope(crate::lifecycle::TaskStage::Work, "bot"),
+            lifecycle.scope(crate::lifecycle::TaskStage::Service, "bot"),
+        );
         runtime
             .start_platform("webhook", services.clone())
             .await
@@ -2608,6 +2630,56 @@ mod tests {
             json!({"error": "Kokoro Engine chat is unavailable."}),
         );
         runtime.stop_platform("webhook").await.unwrap();
+        assert!(!runtime.is_http_running().await);
+    }
+
+    #[tokio::test]
+    async fn webhook_confirms_listener_start_stop_and_immediate_restart() {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = occupied.local_addr().unwrap();
+        let app = AppLifecycle::new();
+        let runtime = BotRuntimeService::new(
+            BotConfig {
+                webhook: WebhookBotConfig {
+                    enabled: true,
+                    bind_host: addr.ip().to_string(),
+                    port: addr.port(),
+                    bearer_token: Some("fixture-token".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            app.scope(TaskStage::Work, "bot"),
+            app.scope(TaskStage::Service, "bot"),
+        );
+        let services = BotChatServices::new(None, None, None, None, Arc::new(|_: BotEvent| Ok(())));
+        assert!(runtime.start_http(services.clone()).await.is_err());
+        assert!(!runtime.is_http_running().await);
+        drop(occupied);
+
+        let (first, second) = tokio::join!(
+            runtime.start_http(services.clone()),
+            runtime.start_http(services.clone())
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        let path = normalize_path(&runtime.current_config().await.webhook.endpoint_path);
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}{path}"))
+            .body(r#"{"text":"test"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
+
+        runtime.stop_platform("webhook").await.unwrap();
+        assert!(!runtime.is_http_running().await);
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+        runtime.start_http(services).await.unwrap();
+        runtime.shutdown().await.unwrap();
         assert!(!runtime.is_http_running().await);
     }
 

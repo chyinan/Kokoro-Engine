@@ -20,6 +20,10 @@ pub(super) async fn schedule_external_memory_tasks(
     memory_work: Option<MemoryWork>,
     scope: Arc<super::ownership::MemoryWriteScope>,
 ) {
+    let tasks = orchestrator.chat_memory_work();
+    if tasks.token().is_cancelled() {
+        return;
+    }
     let Some(work) = memory_work.filter(|work| orchestrator.external_memory.is_current(*work))
     else {
         return;
@@ -75,9 +79,10 @@ pub(super) async fn schedule_external_memory_tasks(
                     ),
                     target_language: Some(memory_target_language.clone()),
                 };
-                tokio::spawn(async move {
+                let _ = tasks.spawn_durable("external memory event extraction", async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
                         || !external_memory.is_current(work)
+                        || scope_shutdown(&extraction_options)
                     {
                         return;
                     }
@@ -116,9 +121,10 @@ pub(super) async fn schedule_external_memory_tasks(
             structured_memory_enabled: false,
             target_language: Some(memory_target_language.clone()),
         };
-        tokio::spawn(async move {
+        let _ = tasks.spawn_durable("external periodic memory extraction", async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
                 || !external_memory.is_current(work)
+                || scope_shutdown(&extraction_options)
             {
                 return;
             }
@@ -151,9 +157,10 @@ pub(super) async fn schedule_external_memory_tasks(
         let scope = scope.clone();
         let source = platform.to_string();
         let target_language_for_consolidation = memory_target_language.clone();
-        tokio::spawn(async move {
+        let _ = tasks.spawn_durable("external memory consolidation", async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
                 || !external_memory.is_current(work)
+                || scope.shutdown.is_cancelled()
             {
                 return;
             }
@@ -193,4 +200,11 @@ pub(super) async fn schedule_external_memory_tasks(
             }
         });
     }
+}
+
+fn scope_shutdown(options: &memory_extractor::MemoryExtractionOptions) -> bool {
+    options
+        .scope
+        .as_ref()
+        .is_some_and(|scope| scope.shutdown.is_cancelled())
 }

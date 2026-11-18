@@ -1,6 +1,8 @@
 // pattern: Imperative Shell
 use crate::ai::context::AIOrchestrator;
 use crate::ipc::events::SttMicAutoStop;
+use crate::lifecycle::TaskScope;
+use crate::stt::native_worker::{self, NativeWorker};
 use crate::stt::stream::{AudioBuffer, SAMPLE_RATE};
 use crate::stt::SttService;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -10,12 +12,14 @@ use serde::Serialize;
 use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, TrySendError};
+#[cfg(test)]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 const VOLUME_EVENT_INTERVAL: Duration = Duration::from_millis(50);
 const RESAMPLER_CHUNK_SIZE: usize = 256;
@@ -27,10 +31,10 @@ enum WorkerCommand {
     Start {
         auto_stop_on_silence: bool,
         only_when_chat_idle: bool,
-        response: SyncSender<Result<bool, String>>,
+        response: oneshot::Sender<Result<bool, String>>,
     },
     Stop {
-        response: SyncSender<Result<(), String>>,
+        response: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -41,52 +45,41 @@ pub(crate) struct MicVolumeEvent {
     rms: f32,
 }
 
-#[derive(Default)]
 pub struct NativeMicState {
-    control_tx: Mutex<Option<Sender<WorkerCommand>>>,
+    worker: NativeWorker<WorkerCommand>,
 }
 
 impl NativeMicState {
-    pub fn new() -> Self {
+    pub(crate) fn new(work: TaskScope, service: TaskScope) -> Self {
         Self {
-            control_tx: Mutex::new(None),
+            worker: NativeWorker::new("native microphone", work, service),
         }
     }
 
-    fn ensure_worker(&self, app: &AppHandle) -> Result<Sender<WorkerCommand>, String> {
-        let mut guard = self
-            .control_tx
-            .lock()
-            .map_err(|_| "Failed to lock native microphone state".to_string())?;
-
-        if let Some(tx) = guard.as_ref() {
-            return Ok(tx.clone());
-        }
-
-        let (tx, rx) = mpsc::channel();
-        spawn_mic_worker(rx, app.clone());
-        *guard = Some(tx.clone());
-        Ok(tx)
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        self.worker.shutdown().await
     }
 }
 
 struct NativeFrameProcessorHandle {
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NativeFrameProcessorHandle {
-    fn stop(mut self) {
-        self.cancel.store(true, Ordering::SeqCst);
+    fn stop(mut self) -> Result<(), String> {
+        self.cancel.cancel();
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            join.join()
+                .map_err(|_| "Native microphone frame processor panicked".to_string())?;
         }
+        Ok(())
     }
 }
 
 impl Drop for NativeFrameProcessorHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -171,9 +164,13 @@ struct NativeFrameProcessor {
 }
 
 impl NativeFrameProcessor {
-    fn new(app: AppHandle, auto_stop_on_silence: bool) -> Result<Self, String> {
+    fn new(
+        app: AppHandle,
+        auto_stop_on_silence: bool,
+        stop: &CancellationToken,
+    ) -> Result<Self, String> {
         let vad = if auto_stop_on_silence {
-            Some(create_voice_activity_detector()?)
+            Some(create_voice_activity_detector(stop)?)
         } else {
             None
         };
@@ -190,7 +187,11 @@ impl NativeFrameProcessor {
 
     fn process_frame(&mut self, frame: NativeAudioFrame) {
         if self.last_volume_emit.elapsed() >= VOLUME_EVENT_INTERVAL {
-            let _ = MicVolumeEvent { volume: frame.volume, rms: frame.rms }.emit(&self.app);
+            let _ = MicVolumeEvent {
+                volume: frame.volume,
+                rms: frame.rms,
+            }
+            .emit(&self.app);
             self.last_volume_emit = Instant::now();
         }
 
@@ -213,39 +214,38 @@ impl NativeFrameProcessor {
     }
 }
 
-pub fn start_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<(), String> {
-    start_native_mic_with_options(app, mic_state, false, false).map(|_| ())
-}
-
-pub fn start_native_mic_with_options(
+pub(crate) async fn start_native_mic_with_options(
     app: &AppHandle,
     mic_state: &NativeMicState,
     auto_stop_on_silence: bool,
     only_when_chat_idle: bool,
 ) -> Result<bool, String> {
-    let tx = mic_state.ensure_worker(app)?;
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let _lease = mic_state.worker.admit("start")?;
+    let app = app.clone();
+    let tx = mic_state
+        .worker
+        .commands(move |rx, stop| run_mic_worker(rx, app, stop))?;
+    let (response, result) = oneshot::channel();
     tx.send(WorkerCommand::Start {
         auto_stop_on_silence,
         only_when_chat_idle,
-        response: response_tx,
+        response,
     })
     .map_err(|_| "Native microphone worker is unavailable".to_string())?;
-    response_rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
+    native_worker::response(result, "Native microphone").await
 }
 
-pub fn stop_native_mic(app: &AppHandle, mic_state: &NativeMicState) -> Result<(), String> {
-    let tx = mic_state.ensure_worker(app)?;
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
-    tx.send(WorkerCommand::Stop {
-        response: response_tx,
-    })
-    .map_err(|_| "Native microphone worker is unavailable".to_string())?;
-    response_rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "Native microphone worker did not respond within 10 seconds".to_string())?
+pub(crate) async fn stop_native_mic(mic_state: &NativeMicState) -> Result<(), String> {
+    let Ok(_lease) = mic_state.worker.admit("stop") else {
+        return mic_state.worker.confirm_app_stop().await;
+    };
+    let Some(tx) = mic_state.worker.running_commands() else {
+        return Ok(());
+    };
+    let (response, result) = oneshot::channel();
+    tx.send(WorkerCommand::Stop { response })
+        .map_err(|_| "Native microphone worker is unavailable".to_string())?;
+    native_worker::response(result, "Native microphone").await
 }
 
 fn start_interrupt(
@@ -256,70 +256,94 @@ fn start_interrupt(
     stt.with_interrupt_enabled(|| state.start_if_chat_idle(|| start().map(|()| true)))
 }
 
-fn spawn_mic_worker(rx: Receiver<WorkerCommand>, app: AppHandle) {
-    std::thread::spawn(move || {
-        let mut stream: Option<(Stream, NativeFrameProcessorHandle)> = None;
+fn run_mic_worker(
+    rx: Receiver<WorkerCommand>,
+    app: AppHandle,
+    stop: CancellationToken,
+) -> Result<(), String> {
+    let mut stream: Option<(Stream, NativeFrameProcessorHandle)> = None;
 
-        while let Ok(command) = rx.recv() {
-            match command {
-                WorkerCommand::Start {
-                    auto_stop_on_silence,
-                    only_when_chat_idle,
-                    response,
-                } => {
-                    if stream.is_some() {
-                        let _ = response.send(Ok(!only_when_chat_idle));
-                        continue;
+    while let Some(command) = native_worker::receive(&rx, &stop) {
+        match command {
+            WorkerCommand::Start {
+                auto_stop_on_silence,
+                only_when_chat_idle,
+                response,
+            } => {
+                if response.is_closed() {
+                    continue;
+                }
+                if stream.is_some() {
+                    let _ = response.send(Ok(!only_when_chat_idle));
+                    continue;
+                }
+                let result = (|| {
+                    let state = only_when_chat_idle.then(|| app.state::<AIOrchestrator>());
+                    if state.as_ref().is_some_and(|state| state.is_chat_busy()) {
+                        return Ok(false);
                     }
-                    let result = (|| {
-                        let state = only_when_chat_idle.then(|| app.state::<AIOrchestrator>());
-                        if state.as_ref().is_some_and(|state| state.is_chat_busy()) {
+                    let stt = only_when_chat_idle.then(|| app.state::<SttService>());
+                    if let Some(stt) = &stt {
+                        if !stt.with_interrupt_enabled(|| Ok(true))? {
                             return Ok(false);
                         }
-                        let stt = only_when_chat_idle.then(|| app.state::<SttService>());
-                        if let Some(stt) = &stt {
-                            if !stt.with_interrupt_enabled(|| Ok(true))? {
-                                return Ok(false);
-                            }
-                        }
-                        let (new_stream, processor) =
-                            build_native_input_stream(&app, auto_stop_on_silence)?;
-                        let play = || {
-                            new_stream.play().map_err(|error| {
-                                format!("Failed to start microphone stream: {error}")
-                            })
-                        };
-                        let started = match (state, stt) {
-                            (Some(state), Some(stt)) => start_interrupt(&state, &stt, || {
-                                app.state::<AudioBuffer>().discard()?;
-                                play()
-                            })?,
-                            _ => {
-                                play()?;
-                                true
-                            }
-                        };
-                        if started {
-                            stream = Some((new_stream, processor));
-                        }
-                        Ok(started)
-                    })();
-                    if let Err(mpsc::SendError(Ok(true))) = response.send(result) {
-                        // The caller timed out while the device was initializing.
-                        stream.take();
                     }
-                }
-                WorkerCommand::Stop { response } => {
-                    if let Some((input_stream, processor)) = stream.take() {
-                        drop(input_stream);
-                        processor.stop();
+                    let (new_stream, processor) =
+                        build_native_input_stream(&app, auto_stop_on_silence, stop.child_token())?;
+                    if stop.is_cancelled() || response.is_closed() {
+                        return Ok(false);
                     }
-                    let _ = MicVolumeEvent { volume: 0.0, rms: 0.0 }.emit(&app);
-                    let _ = response.send(Ok(()));
+                    let play = || {
+                        if stop.is_cancelled() || response.is_closed() {
+                            return Err("Native microphone start was cancelled".into());
+                        }
+                        new_stream
+                            .play()
+                            .map_err(|error| format!("Failed to start microphone stream: {error}"))
+                    };
+                    let started = match (state, stt) {
+                        (Some(state), Some(stt)) => start_interrupt(&state, &stt, || {
+                            app.state::<AudioBuffer>().discard()?;
+                            play()
+                        })?,
+                        _ => {
+                            play()?;
+                            true
+                        }
+                    };
+                    if started {
+                        stream = Some((new_stream, processor));
+                    }
+                    Ok(started)
+                })();
+                if let Err(Ok(true)) = response.send(result) {
+                    // The caller timed out while the device was initializing.
+                    drop_mic_stream(&mut stream)?;
                 }
             }
+            WorkerCommand::Stop { response } => {
+                let stopped = drop_mic_stream(&mut stream);
+                let _ = MicVolumeEvent {
+                    volume: 0.0,
+                    rms: 0.0,
+                }
+                .emit(&app);
+                let _ = response.send(stopped);
+            }
         }
-    });
+    }
+    drop_mic_stream(&mut stream)
+}
+
+fn drop_mic_stream(
+    stream: &mut Option<(Stream, NativeFrameProcessorHandle)>,
+) -> Result<(), String> {
+    if let Some((input, frames)) = stream.take() {
+        frames.cancel.cancel();
+        drop(input);
+        frames.stop()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -430,6 +454,7 @@ mod tests {
 fn build_native_input_stream(
     app: &AppHandle,
     auto_stop_on_silence: bool,
+    stop: CancellationToken,
 ) -> Result<(Stream, NativeFrameProcessorHandle), String> {
     let host = cpal::default_host();
     let device = host
@@ -452,6 +477,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::I16 => build_input_stream::<i16>(
             &device,
@@ -460,6 +486,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::I32 => build_input_stream::<i32>(
             &device,
@@ -468,6 +495,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::I64 => build_input_stream::<i64>(
             &device,
@@ -476,6 +504,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::U8 => build_input_stream::<u8>(
             &device,
@@ -484,6 +513,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::U16 => build_input_stream::<u16>(
             &device,
@@ -492,6 +522,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::U32 => build_input_stream::<u32>(
             &device,
@@ -500,6 +531,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::U64 => build_input_stream::<u64>(
             &device,
@@ -508,6 +540,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::F32 => build_input_stream::<f32>(
             &device,
@@ -516,6 +549,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         SampleFormat::F64 => build_input_stream::<f64>(
             &device,
@@ -524,6 +558,7 @@ fn build_native_input_stream(
             sample_rate,
             app_handle,
             auto_stop_on_silence,
+            stop,
         ),
         sample_format => Err(format!(
             "Unsupported microphone sample format: {sample_format}"
@@ -539,6 +574,7 @@ fn build_input_stream<T>(
     sample_rate: u32,
     app: AppHandle,
     auto_stop_on_silence: bool,
+    stop: CancellationToken,
 ) -> Result<(Stream, NativeFrameProcessorHandle), String>
 where
     T: SizedSample + Sample + Send + 'static,
@@ -547,12 +583,16 @@ where
     let mut processor = NativeInputProcessor::new(sample_rate, channels)?;
     let err_app = app.clone();
     let (frame_tx, frame_rx) = mpsc::sync_channel::<NativeAudioFrame>(8);
-    let frame_processor = spawn_frame_processor(app.clone(), frame_rx, auto_stop_on_silence)?;
+    let error_stop = stop.clone();
+    let callback_stop = stop.clone();
 
     let stream = device
         .build_input_stream(
             config,
             move |data: &[T], _| {
+                if callback_stop.is_cancelled() {
+                    return;
+                }
                 if let Some(frame) = processor.process_input(data) {
                     match frame_tx.try_send(frame) {
                         Ok(()) => {}
@@ -566,12 +606,16 @@ where
                 }
             },
             move |err| {
+                if error_stop.is_cancelled() {
+                    return;
+                }
                 tracing::error!(target: "stt", "[STT] Native microphone stream error: {err}");
                 let _ = MicVolumeEvent { volume: 0.0, rms: 0.0 }.emit(&err_app);
             },
             None,
         )
         .map_err(|err| format!("Failed to build microphone input stream: {err}"))?;
+    let frame_processor = spawn_frame_processor(app, frame_rx, auto_stop_on_silence, stop)?;
     Ok((stream, frame_processor))
 }
 
@@ -579,41 +623,50 @@ fn spawn_frame_processor(
     app: AppHandle,
     frame_rx: Receiver<NativeAudioFrame>,
     auto_stop_on_silence: bool,
+    cancel: CancellationToken,
 ) -> Result<NativeFrameProcessorHandle, String> {
-    if auto_stop_on_silence {
-        let _ = create_voice_activity_detector()?;
-    }
-    let cancel = Arc::new(AtomicBool::new(false));
+    let (initialized, ready) = mpsc::sync_channel(1);
     let cancel_worker = cancel.clone();
-    let join = std::thread::spawn(move || {
-        let mut processor = match NativeFrameProcessor::new(app, auto_stop_on_silence) {
-            Ok(processor) => processor,
-            Err(err) => {
-                tracing::error!(target: "stt", "[STT] Native mic frame processor init failed: {err}");
-                return;
-            }
-        };
-        while !cancel_worker.load(Ordering::SeqCst) {
-            match frame_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(frame) => {
-                    if cancel_worker.load(Ordering::SeqCst) {
-                        break;
+    let frames = std::thread::Builder::new()
+        .name("microphone-frames".into())
+        .spawn(move || {
+            let mut processor =
+                match NativeFrameProcessor::new(app, auto_stop_on_silence, &cancel_worker) {
+                    Ok(processor) => {
+                        let _ = initialized.send(Ok(()));
+                        processor
                     }
-                    processor.process_frame(frame);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(error) => {
+                        let _ = initialized.send(Err(error));
+                        return;
+                    }
+                };
+            while let Some(frame) = native_worker::receive(&frame_rx, &cancel_worker) {
+                processor.process_frame(frame);
             }
+        })
+        .map_err(|error| format!("Could not start native microphone frame processor: {error}"))?;
+    match ready.recv() {
+        Ok(Ok(())) => Ok(NativeFrameProcessorHandle {
+            cancel,
+            join: Some(frames),
+        }),
+        result => {
+            let _ = frames.join();
+            Err(result
+                .ok()
+                .and_then(Result::err)
+                .unwrap_or_else(|| "Native microphone frame processor exited during setup".into()))
         }
-    });
-    Ok(NativeFrameProcessorHandle {
-        cancel,
-        join: Some(join),
-    })
+    }
 }
 
-pub(crate) fn create_voice_activity_detector() -> Result<VoiceActivityDetector, String> {
-    let model_path = ensure_silero_vad_model()?;
+pub(crate) fn create_voice_activity_detector(
+    stop: &CancellationToken,
+) -> Result<VoiceActivityDetector, String> {
+    static MODEL_SETUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _setup = MODEL_SETUP.lock().unwrap();
+    let model_path = ensure_silero_vad_model(stop)?;
     match create_voice_activity_detector_from_path(&model_path) {
         Ok(detector) => Ok(detector),
         Err(first_error) => {
@@ -622,7 +675,7 @@ pub(crate) fn create_voice_activity_detector() -> Result<VoiceActivityDetector, 
                 "[STT] Cached Silero VAD model failed validation; retrying download: {first_error}"
             );
             let _ = fs::remove_file(&model_path);
-            let refreshed_path = ensure_silero_vad_model()?;
+            let refreshed_path = ensure_silero_vad_model(stop)?;
             create_voice_activity_detector_from_path(&refreshed_path)
                 .map_err(|second_error| format!("{first_error}; retry failed: {second_error}"))
         }
@@ -652,7 +705,10 @@ fn create_voice_activity_detector_from_path(
         .ok_or_else(|| "failed to create sherpa-onnx voice activity detector".to_string())
 }
 
-fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
+fn ensure_silero_vad_model(stop: &CancellationToken) -> Result<std::path::PathBuf, String> {
+    if stop.is_cancelled() {
+        return Err("Silero VAD model setup was cancelled".into());
+    }
     let app_data_dir = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro")
@@ -664,7 +720,7 @@ fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
         return Ok(model_path);
     }
 
-    let bytes = tauri::async_runtime::block_on(async {
+    let download = async {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -678,6 +734,13 @@ fn ensure_silero_vad_model() -> Result<std::path::PathBuf, String> {
             .bytes()
             .await
             .map_err(|err| format!("Failed to read silero VAD model bytes: {err}"))
+    };
+    let bytes = tauri::async_runtime::block_on(async {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => Err("Silero VAD model download was cancelled".into()),
+            result = download => result,
+        }
     })?;
 
     let temporary = model_path.with_file_name(format!(

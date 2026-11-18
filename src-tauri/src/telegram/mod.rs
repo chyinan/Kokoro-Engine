@@ -5,29 +5,29 @@ pub mod config;
 
 pub use config::{load_config, save_config, TelegramConfig};
 
-use crate::bot::BotChatServices;
+use crate::bot::{lifecycle::BotWorker, BotChatServices};
+use crate::lifecycle::{TaskScope, WorkLease};
 use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::RwLock;
 
 /// Application-owned Telegram polling service.
 #[derive(Clone)]
 pub struct TelegramService {
     config: Arc<RwLock<TelegramConfig>>,
-    /// Sender half of the shutdown signal. `Some` = bot is running.
-    shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
+    worker: BotWorker,
 }
 
 impl TelegramService {
-    pub fn new(config: TelegramConfig) -> Self {
+    pub(crate) fn new(config: TelegramConfig, work: TaskScope, service: TaskScope) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
-            shutdown_tx: Arc::new(RwLock::new(None)),
+            worker: BotWorker::new("Telegram bot", work, service),
         }
     }
 
     /// Whether the bot polling loop is currently running.
     pub async fn is_running(&self) -> bool {
-        self.shutdown_tx.read().await.is_some()
+        self.worker.is_running().await
     }
 
     /// Get a snapshot of the current config.
@@ -41,47 +41,35 @@ impl TelegramService {
         *cfg = new_config;
     }
 
-    /// Start the bot polling loop. Returns Err if already running or no token.
+    /// Start the bot polling loop.
     pub async fn start(&self, services: BotChatServices) -> Result<(), String> {
-        if self.is_running().await {
-            return Err("Telegram bot is already running".to_string());
-        }
-
-        let config = self.config.read().await.clone();
-        let token = config
+        let token = self
+            .config
+            .read()
+            .await
             .resolve_bot_token()
             .ok_or("No bot token configured")?;
-
-        let (tx, rx) = oneshot::channel::<()>();
-        {
-            let mut shutdown = self.shutdown_tx.write().await;
-            *shutdown = Some(tx);
-        }
-
-        let shutdown_flag = self.shutdown_tx.clone();
-        // Pass the shared Arc so config changes take effect without restart
-        let shared_config = self.config.clone();
-
-        tokio::spawn(async move {
-            tracing::info!(target: "telegram", "Bot polling started");
-            bot::run_polling(token, shared_config, services, rx).await;
-            tracing::info!(target: "telegram", "Bot polling stopped");
-            // Clear the shutdown sender so is_running() returns false
-            let mut guard = shutdown_flag.write().await;
-            *guard = None;
-        });
-
-        Ok(())
+        let config = self.config.clone();
+        self.worker
+            .start(move |ingress| Ok(bot::run_polling(token, config, services, ingress)))
+            .await
     }
 
-    /// Stop the bot polling loop gracefully.
+    pub(crate) fn close_ingress(&self) {
+        self.worker.close_ingress();
+    }
+
+    pub(crate) fn admit_control(&self, action: &str) -> Result<WorkLease, String> {
+        self.worker.admit_control(action)
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        self.close_ingress();
+        self.stop().await
+    }
+
+    /// Stop polling and join the dispatcher after its admitted handlers return.
     pub async fn stop(&self) -> Result<(), String> {
-        let mut shutdown = self.shutdown_tx.write().await;
-        if let Some(tx) = shutdown.take() {
-            let _ = tx.send(());
-            Ok(())
-        } else {
-            Err("Telegram bot is not running".to_string())
-        }
+        self.worker.stop().await
     }
 }

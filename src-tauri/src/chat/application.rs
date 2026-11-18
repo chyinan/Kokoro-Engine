@@ -19,6 +19,12 @@ use crate::ai::memory_event_ingress::{
     select_memory_ingress_decision, should_use_structured_extraction, MemoryEventIngressOptions,
 };
 use crate::characters::activation::ActivationCoordinator;
+use crate::chat::event_payloads::{
+    ChatEventScope, ChatFailure, ChatFinishStatus, ChatTurnAcknowledgedEvent, ChatTurnBoundEvent,
+    ChatTurnDeltaEvent, ChatTurnFinishEvent, ChatTurnStartEvent, ChatTurnTextCompleteEvent,
+    ChatTurnToolEvent, ChatTurnTranslationEvent, ChatTypingEvent, ChatWarningEvent, CueEvent,
+    ToolApprovalStatus, ToolDenyKind,
+};
 use crate::chat::persistence::{
     self, ConversationTarget, MessageWrite, PendingChatSave, PendingUserSave,
 };
@@ -35,11 +41,7 @@ use crate::hooks::{
 };
 use crate::imagegen::ImageGenService;
 use crate::imagegen::WindowSizeState;
-use crate::chat::event_payloads::{
-    ChatTurnAcknowledgedEvent, ChatTurnBoundEvent, CueEvent, ChatTurnFinishEvent, ChatTurnStartEvent, ChatTurnTextCompleteEvent, ChatTurnTranslationEvent, ChatWarningEvent,
-    ChatEventScope, ChatFailure, ChatFinishStatus, ChatTurnDeltaEvent, ChatTurnToolEvent,
-    ChatTypingEvent, ToolApprovalStatus, ToolDenyKind,
-};
+use crate::lifecycle::{TaskScope, TaskStage};
 use crate::live2d::Live2dStore;
 use crate::llm::messages::{
     assistant_tool_calls_message, extract_message_text, history_message_to_llm_chat_message,
@@ -54,6 +56,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -243,7 +246,7 @@ fn prune_tombstones(tombstones: &mut HashMap<String, (Option<String>, std::time:
 }
 
 pub struct TurnCancellationState {
-    inner: RwLock<TurnCancellationInner>,
+    inner: std::sync::RwLock<TurnCancellationInner>,
     finished_tx: tokio::sync::broadcast::Sender<String>,
 }
 
@@ -259,7 +262,7 @@ impl TurnCancellationState {
     pub fn new() -> Self {
         let (finished_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
-            inner: RwLock::new(TurnCancellationInner::default()),
+            inner: std::sync::RwLock::new(TurnCancellationInner::default()),
             finished_tx,
         }
     }
@@ -269,7 +272,10 @@ impl TurnCancellationState {
     }
 
     pub async fn register_turn_with_request(&self, turn_id: &str, client_request_id: Option<&str>) {
-        let mut inner = self.inner.write().await;
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
         prune_tombstones(&mut inner.tombstones);
 
         let tombstone = inner
@@ -323,7 +329,10 @@ impl TurnCancellationState {
             return Err("target_id cannot be empty".to_string());
         }
 
-        let mut inner = self.inner.write().await;
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(entry) = inner.cancelled.get_mut(target_trimmed) {
             if entry.reason.is_none() {
                 entry.reason = reason;
@@ -355,7 +364,7 @@ impl TurnCancellationState {
     }
 
     async fn is_cancelled(&self, turn_id: &str) -> bool {
-        let inner = self.inner.read().await;
+        let inner = self.inner.read().unwrap_or_else(|error| error.into_inner());
         if let Some(v) = inner.cancelled.get(turn_id) {
             return *v.cancel_tx.borrow();
         }
@@ -368,7 +377,7 @@ impl TurnCancellationState {
     }
 
     async fn has_turn(&self, turn_id: &str) -> bool {
-        let inner = self.inner.read().await;
+        let inner = self.inner.read().unwrap_or_else(|error| error.into_inner());
         inner.cancelled.contains_key(turn_id)
             || inner
                 .request_to_turn
@@ -381,7 +390,7 @@ impl TurnCancellationState {
         &self,
         turn_id: &str,
     ) -> Option<tokio::sync::watch::Receiver<bool>> {
-        let inner = self.inner.read().await;
+        let inner = self.inner.read().unwrap_or_else(|error| error.into_inner());
         if let Some(v) = inner.cancelled.get(turn_id) {
             return Some(v.cancel_tx.subscribe());
         }
@@ -394,7 +403,7 @@ impl TurnCancellationState {
     }
 
     pub async fn resolve_turn_id(&self, target_id: &str) -> Option<String> {
-        let inner = self.inner.read().await;
+        let inner = self.inner.read().unwrap_or_else(|error| error.into_inner());
         if inner.cancelled.contains_key(target_id) {
             Some(target_id.to_string())
         } else {
@@ -402,9 +411,12 @@ impl TurnCancellationState {
         }
     }
 
-    async fn clear_turn(&self, turn_id: &str) {
+    fn clear_turn(&self, turn_id: &str) {
         {
-            let mut inner = self.inner.write().await;
+            let mut inner = self
+                .inner
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
             inner.cancelled.remove(turn_id);
             inner.request_to_turn.retain(|_, v| v != turn_id);
             inner.tombstones.remove(turn_id);
@@ -880,33 +892,33 @@ async fn delete_empty_conversation_if_unused(
 
 struct TurnCancellationGuard {
     state: Arc<TurnCancellationState>,
-    turn_id: Option<String>,
+    turn_id: String,
 }
 
 impl TurnCancellationGuard {
     fn new(state: Arc<TurnCancellationState>, turn_id: String) -> Self {
-        Self {
-            state,
-            turn_id: Some(turn_id),
-        }
-    }
-
-    async fn clear_before_retry(&mut self) {
-        if let Some(turn_id) = self.turn_id.take() {
-            self.state.clear_turn(&turn_id).await;
-        }
+        Self { state, turn_id }
     }
 }
 
 impl Drop for TurnCancellationGuard {
     fn drop(&mut self) {
-        let state = Arc::clone(&self.state);
-        let Some(turn_id) = self.turn_id.take() else {
-            return;
-        };
-        tokio::spawn(async move {
-            state.clear_turn(&turn_id).await;
-        });
+        self.state.clear_turn(&self.turn_id);
+    }
+}
+
+struct PreparingWrite<'a>(&'a AtomicBool);
+
+impl<'a> PreparingWrite<'a> {
+    fn begin(active: &'a AtomicBool) -> Self {
+        active.store(true, Ordering::Relaxed);
+        Self(active)
+    }
+}
+
+impl Drop for PreparingWrite<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
     }
 }
 
@@ -1131,6 +1143,10 @@ pub(crate) fn channel_id(namespace: &str, owner: &str, id: &str) -> String {
 pub struct ChatRequest {
     #[cfg(test)]
     #[serde(skip)]
+    #[specta(skip)]
+    pub(crate) assistant_commit_pause: Option<Arc<AssistantCommitPause>>,
+    #[cfg(test)]
+    #[serde(skip)]
     pub(crate) preparation_timeout: Option<std::time::Duration>,
     /// Resolved once by the trusted entry boundary; never accepted over IPC.
     #[serde(skip)]
@@ -1194,6 +1210,13 @@ pub struct ChatRequest {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub conversation_generation: Option<u64>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct AssistantCommitPause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 impl ChatRequest {
@@ -2334,13 +2357,16 @@ async fn resolve_request_scope(
 pub(crate) struct ChatService {
     dependencies: Arc<ChatDependencies>,
     events: ChatEvents,
+    work: TaskScope,
 }
 
 impl ChatService {
     pub(crate) fn new(dependencies: ChatDependencies, events: ChatEvents) -> Self {
+        let work = dependencies.state.lifecycle.scope(TaskStage::Work, "chat");
         Self {
             dependencies: Arc::new(dependencies),
             events,
+            work,
         }
     }
 
@@ -2410,7 +2436,7 @@ impl ChatService {
         .await
     }
 
-    async fn speak_completed_turn(
+    fn speak_completed_turn(
         &self,
         request_id: String,
         turn_id: String,
@@ -2428,11 +2454,27 @@ impl ChatService {
             text,
             speech,
             snapshot,
-        )
-        .await;
+        );
     }
 
     pub(crate) async fn submit(
+        &self,
+        request: ChatRequest,
+        policy: ChatPolicy,
+    ) -> Result<StreamChatResponse, KokoroError> {
+        let chat = self.clone();
+        let mut task = self
+            .work
+            .spawn_durable("turn", async move {
+                chat.submit_admitted(request, policy).await
+            })
+            .map_err(|_| chat_stopping())?;
+        task.join()
+            .await
+            .map_err(|error| KokoroError::Chat(error.to_string()))?
+    }
+
+    async fn submit_admitted(
         &self,
         mut request: ChatRequest,
         policy: ChatPolicy,
@@ -2454,7 +2496,12 @@ impl ChatService {
                 return Ok(response);
             }
         }
-        resolve_request_scope(&self.dependencies.state, &mut request, policy).await?;
+        let shutdown = self.work.token();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Err(chat_stopping()),
+            result = resolve_request_scope(&self.dependencies.state, &mut request, policy) => result?,
+        }
         let request_id = request.client_request_id.clone().unwrap();
         let runtime = &self.events.runtime;
         let (created, outcome, replay_only) = runtime
@@ -2462,18 +2509,19 @@ impl ChatService {
             .map_err(KokoroError::Chat)?;
         request.require_saved_external_reply = replay_only;
         if created {
-            let service = self.clone();
-            tokio::spawn(async move {
-                let _database_operation_guard = database_operation_guard;
-                run_chat_worker(service, request_id, request, policy, None).await;
-            });
+            run_chat_worker(self.clone(), request_id, request, policy, None).await;
         }
+        drop(database_operation_guard);
         let mut response = wait_chat_outcome(outcome).await?;
         if !created {
             response.newly_committed = false;
         }
         Ok(response)
     }
+}
+
+fn chat_stopping() -> KokoroError {
+    KokoroError::Chat("chat_shutting_down: The application is shutting down".into())
 }
 
 pub(crate) async fn cancel_and_wait(
@@ -2531,9 +2579,21 @@ async fn run_chat_worker(
     // a request permanently pending after a worker failure.
     let runtime = &chat.events.runtime;
     let execution = execute_chat_with_pending(&chat, request, policy, pending_user_save);
-    let execution = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(execution))
-        .await
-        .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())));
+    let execution = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(execution));
+    tokio::pin!(execution);
+    let shutdown = chat.work.token();
+    let execution = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {
+            let _ = chat.dependencies.cancellation.cancel_turn(
+                &request_id,
+                Some("application shutdown".into()),
+            ).await;
+            execution.await
+        }
+        result = &mut execution => result,
+    }
+    .unwrap_or_else(|_| Err(KokoroError::Chat("chat worker panicked".into())));
     let mut result = match execution {
         Err(KokoroError::Chat(ref message)) if is_turn_cancelled_error_message(message) => runtime
             .cancelled_response(&request_id)
@@ -2592,155 +2652,162 @@ impl ChatService {
         client_request_id: String,
     ) -> Result<StreamChatResponse, KokoroError> {
         let chat = self.clone();
-        tokio::spawn(async move {
-            let runtime = &chat.events.runtime;
-            let _retry = runtime.lock_save_retry().await;
-            let _database_guard = crate::ai::context::try_acquire_database_operation_read_guard()
-                .map_err(|error| KokoroError::Chat(error.into()))?;
-            let state = &chat.dependencies.state;
-            let pending = match runtime.save_retry(&client_request_id)? {
-                crate::chat::runtime::SaveRetry::Saved(response) => return Ok(*response),
-                crate::chat::runtime::SaveRetry::Pending(pending) => pending,
-                crate::chat::runtime::SaveRetry::InFlight(outcome) => {
-                    drop(_retry);
-                    return wait_chat_outcome(outcome).await;
-                }
-                crate::chat::runtime::SaveRetry::User(pending) => {
-                    if state.is_chat_busy() {
-                        return Err(KokoroError::Chat(
-                            "chat_turn_busy: A chat turn is already in progress".into(),
-                        ));
+        let mut task = self
+            .work
+            .spawn_durable("persistence retry", async move {
+                let runtime = &chat.events.runtime;
+                let _retry = runtime.lock_save_retry().await;
+                let _database_guard =
+                    crate::ai::context::try_acquire_database_operation_read_guard()
+                        .map_err(|error| KokoroError::Chat(error.into()))?;
+                let state = &chat.dependencies.state;
+                let pending = match runtime.save_retry(&client_request_id)? {
+                    crate::chat::runtime::SaveRetry::Saved(response) => return Ok(*response),
+                    crate::chat::runtime::SaveRetry::Pending(pending) => pending,
+                    crate::chat::runtime::SaveRetry::InFlight(outcome) => {
+                        drop(_retry);
+                        return wait_chat_outcome(outcome).await;
                     }
-                    let snapshot = runtime
-                        .start_user_save_retry(&client_request_id)
-                        .ok_or_else(|| {
-                            KokoroError::Validation(
-                                "No failed chat save is available to retry".into(),
-                            )
-                        })?;
-                    let outcome = runtime
-                        .outcome(&client_request_id)
-                        .expect("the retried turn is active");
-                    chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
-                    drop(_retry);
-                    let request = pending.request.clone();
-                    run_chat_worker(
-                        chat.clone(),
-                        client_request_id,
-                        request,
-                        ChatPolicy::Desktop,
-                        Some(pending),
-                    )
-                    .await;
-                    return wait_chat_outcome(outcome).await;
-                }
-            };
-            let _chat_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-            let _execution = state
-                .try_acquire_chat_turn(&client_request_id)
-                .await
-                .map_err(KokoroError::Chat)?;
-            let _selection = state.selection.conversation_switch_lock.lock().await;
-            let select_on_commit = pending.target.create
-                && pending.creation_generation == Some(state.current_conversation_generation())
-                && state.get_character_id().await == pending.target.character_id
-                && state
-                    .selection
-                    .current_conversation_id
-                    .lock()
-                    .await
-                    .is_none();
-            let result = if pending
-                .post_commit
-                .scope
-                .as_ref()
-                .is_some_and(|scope| scope.owner_is_current())
-            {
-                state
-                    .save_messages_expected_locked(
-                        &pending.target,
-                        &pending.messages,
-                        select_on_commit,
-                        None,
-                        Some(pending.expected_revision),
-                    )
-                    .await
-            } else {
-                Err(KokoroError::Validation(
-                    "Chat owner was deleted or replaced".into(),
-                ))
-            };
-            let saved = match result {
-                Ok(saved) => saved,
-                Err(error @ KokoroError::Validation(_)) => {
-                    if let Some(snapshot) =
-                        runtime.retire_save_retry(&client_request_id, error.to_string())
-                    {
+                    crate::chat::runtime::SaveRetry::User(pending) => {
+                        if state.is_chat_busy() {
+                            return Err(KokoroError::Chat(
+                                "chat_turn_busy: A chat turn is already in progress".into(),
+                            ));
+                        }
+                        let snapshot = runtime
+                            .start_user_save_retry(&client_request_id)
+                            .ok_or_else(|| {
+                                KokoroError::Validation(
+                                    "No failed chat save is available to retry".into(),
+                                )
+                            })?;
+                        let outcome = runtime
+                            .outcome(&client_request_id)
+                            .expect("the retried turn is active");
                         chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
+                        drop(_retry);
+                        let request = pending.request.clone();
+                        run_chat_worker(
+                            chat.clone(),
+                            client_request_id,
+                            request,
+                            ChatPolicy::Desktop,
+                            Some(pending),
+                        )
+                        .await;
+                        return wait_chat_outcome(outcome).await;
                     }
-                    return Err(error);
+                };
+                let _chat_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
+                let _execution = state
+                    .try_acquire_chat_turn(&client_request_id)
+                    .await
+                    .map_err(KokoroError::Chat)?;
+                let _selection = state.selection.conversation_switch_lock.lock().await;
+                let select_on_commit = pending.target.create
+                    && pending.creation_generation == Some(state.current_conversation_generation())
+                    && state.get_character_id().await == pending.target.character_id
+                    && state
+                        .selection
+                        .current_conversation_id
+                        .lock()
+                        .await
+                        .is_none();
+                if chat.work.token().is_cancelled() {
+                    return Err(chat_stopping());
                 }
-                Err(error) => return Err(error),
-            };
-            let assistant_message_id = if pending.has_assistant_text {
-                saved.last().map(|message| message.id)
-            } else {
-                None
-            };
-            let response = StreamChatResponse {
-                text: pending.text.clone(),
-                conversation_id: pending.target.conversation_id,
-                user_message_id: pending.user_message_id,
-                assistant_message_id,
-                client_request_id: Some(client_request_id.clone()),
-                status: Some("completed".into()),
-                translation: None,
-                images: Vec::new(),
-                output_warnings: Vec::new(),
-                ..Default::default()
-            };
-            let snapshot = runtime.complete_save_retry(
-                &client_request_id,
-                response.clone(),
-                select_on_commit.then(|| state.current_conversation_generation()),
-            );
-            drop(_selection);
-            if let Some(snapshot) = snapshot {
-                pending
+                let result = if pending
                     .post_commit
-                    .dispatch(state.clone(), chat.events.clone());
-                chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
-                ChatPolicy::Desktop.emit(
-                    &chat,
-                    ChatEvent::Finished(ChatTurnFinishEvent {
-                        scope: ChatEventScope {
-                            client_request_id: Some(Some(client_request_id.to_owned())),
-                            conversation_id: Some(Some(response.conversation_id.to_owned())),
-                            ..Default::default()
-                        },
-                        turn_id: Some(pending.turn_id.to_owned()),
-                        assistant_message_id: Some(response.assistant_message_id),
-                        status: ChatFinishStatus::Completed,
-                        text: Some(response.text.to_owned()),
-                        stage: None,
-                        code: None,
-                    }),
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.owner_is_current())
+                {
+                    state
+                        .save_messages_expected_locked(
+                            &pending.target,
+                            &pending.messages,
+                            select_on_commit,
+                            None,
+                            Some(pending.expected_revision),
+                        )
+                        .await
+                } else {
+                    Err(KokoroError::Validation(
+                        "Chat owner was deleted or replaced".into(),
+                    ))
+                };
+                let saved = match result {
+                    Ok(saved) => saved,
+                    Err(error @ KokoroError::Validation(_)) => {
+                        if let Some(snapshot) =
+                            runtime.retire_save_retry(&client_request_id, error.to_string())
+                        {
+                            chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
+                        }
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let assistant_message_id = if pending.has_assistant_text {
+                    saved.last().map(|message| message.id)
+                } else {
+                    None
+                };
+                let response = StreamChatResponse {
+                    text: pending.text.clone(),
+                    conversation_id: pending.target.conversation_id,
+                    user_message_id: pending.user_message_id,
+                    assistant_message_id,
+                    client_request_id: Some(client_request_id.clone()),
+                    status: Some("completed".into()),
+                    translation: None,
+                    images: Vec::new(),
+                    output_warnings: Vec::new(),
+                    ..Default::default()
+                };
+                let snapshot = runtime.complete_save_retry(
+                    &client_request_id,
+                    response.clone(),
+                    select_on_commit.then(|| state.current_conversation_generation()),
                 );
-                if let Some(speech) = pending.speech {
-                    chat.speak_completed_turn(
-                        client_request_id,
-                        pending.turn_id,
-                        response.text.clone(),
-                        speech,
-                        pending.speech_snapshot.clone(),
-                    )
-                    .await;
+                drop(_selection);
+                if let Some(snapshot) = snapshot {
+                    pending
+                        .post_commit
+                        .dispatch(state.clone(), chat.events.clone());
+                    chat.events.notify(ChatEvent::RuntimeChanged(snapshot));
+                    ChatPolicy::Desktop.emit(
+                        &chat,
+                        ChatEvent::Finished(ChatTurnFinishEvent {
+                            scope: ChatEventScope {
+                                client_request_id: Some(Some(client_request_id.to_owned())),
+                                conversation_id: Some(Some(response.conversation_id.to_owned())),
+                                ..Default::default()
+                            },
+                            turn_id: Some(pending.turn_id.to_owned()),
+                            assistant_message_id: Some(response.assistant_message_id),
+                            status: ChatFinishStatus::Completed,
+                            text: Some(response.text.to_owned()),
+                            stage: None,
+                            code: None,
+                        }),
+                    );
+                    if let Some(speech) = pending.speech {
+                        chat.speak_completed_turn(
+                            client_request_id,
+                            pending.turn_id,
+                            response.text.clone(),
+                            speech,
+                            pending.speech_snapshot.clone(),
+                        );
+                    }
                 }
-            }
-            Ok(response)
-        })
-        .await
-        .map_err(|error| KokoroError::Chat(error.to_string()))?
+                Ok(response)
+            })
+            .map_err(|_| chat_stopping())?;
+        task.join()
+            .await
+            .map_err(|error| KokoroError::Chat(error.to_string()))?
     }
 
     pub(crate) fn submit_proactive_bound(
@@ -2767,11 +2834,13 @@ impl ChatService {
             ..Default::default()
         };
         let chat = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = chat.submit(request, ChatPolicy::Desktop).await {
-                tracing::debug!(target:"chat","proactive request ended: {error}");
-            }
-        });
+        self.work
+            .spawn_durable("proactive turn", async move {
+                if let Err(error) = chat.submit_admitted(request, ChatPolicy::Desktop).await {
+                    tracing::debug!(target:"chat","proactive request ended: {error}");
+                }
+            })
+            .ok()?;
         Some(request_id)
     }
 }
@@ -2871,8 +2940,7 @@ async fn execute_chat_with_pending(
     cancel_state
         .register_turn_with_request(&assistant_turn_id, Some(&client_request_id))
         .await;
-    let mut turn_guard =
-        TurnCancellationGuard::new(cancel_state.clone(), assistant_turn_id.clone());
+    let _turn_guard = TurnCancellationGuard::new(cancel_state.clone(), assistant_turn_id.clone());
     let mut cancel_rx = cancel_state
         .subscribe_cancellation(&assistant_turn_id)
         .await;
@@ -2910,6 +2978,9 @@ async fn execute_chat_with_pending(
     #[cfg(test)]
     let preparation_timeout = request.preparation_timeout.unwrap_or(preparation_timeout);
 
+    let writing = AtomicBool::new(false);
+    let preparation_interrupted = AtomicBool::new(false);
+    let replaying_saved_reply = AtomicBool::new(false);
     let prep_fut = async {
         // Activation protects only the snapshot. No activation lock is held across
         // model, tool, media or memory I/O.
@@ -3139,6 +3210,7 @@ async fn execute_chat_with_pending(
                 if let Some(original) = original_input {
                     metadata["external_input_text"] = original.into();
                 }
+                let _writing = PreparingWrite::begin(&writing);
                 let turn = persistence::ExternalTurn::begin_with_input_metadata(
                     state,
                     target.clone(),
@@ -3148,6 +3220,7 @@ async fn execute_chat_with_pending(
                     Some(memory_scope.clone()),
                 )
                 .await?;
+                replaying_saved_reply.store(turn.previous_reply.is_some(), Ordering::Relaxed);
                 let cid = turn.target.conversation_id.clone();
                 let mid = turn.user_message_id;
                 let history = turn.history.clone();
@@ -3256,6 +3329,7 @@ async fn execute_chat_with_pending(
             // A reserved conversation belongs to its admitted empty view until
             // this turn actually selects the newly committed conversation.
             let mut projection_generation = initial_generation;
+            let mut user_write = None;
             let (cid, mid) = if should_insert {
                 let already_saved: bool = sqlx::query_scalar(
                     "SELECT EXISTS (
@@ -3326,6 +3400,7 @@ async fn execute_chat_with_pending(
                         .lock()
                         .await
                         .is_none();
+                user_write = Some(PreparingWrite::begin(&writing));
                 let saved = state
                     .save_messages_expected_locked(
                         &target,
@@ -3398,6 +3473,11 @@ async fn execute_chat_with_pending(
                     message: None,
                 }),
             );
+            drop(user_write);
+
+            if preparation_interrupted.load(Ordering::Relaxed) {
+                return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.into()));
+            }
 
             let history_snapshot = if cid.is_some() {
                 state.saved_history_for(&target, None).await?
@@ -3513,7 +3593,10 @@ async fn execute_chat_with_pending(
         };
         let memory_target_language = prompt_snapshot.response_language.clone();
 
-        if cancel_state.is_cancelled(&assistant_turn_id).await {
+        if !replaying_saved_reply.load(Ordering::Relaxed)
+            && (preparation_interrupted.load(Ordering::Relaxed)
+                || cancel_state.is_cancelled(&assistant_turn_id).await)
+        {
             tracing::info!(
                 target: "chat",
                 "[stream_chat] Turn {} (request {}) cancelled before prompt composition",
@@ -3585,9 +3668,25 @@ async fn execute_chat_with_pending(
     };
 
     // One budget covers snapshot acquisition and the rest of preparation.
-    let prepared_turn = tokio::select! {
-        biased;
-        _ = wait_for_cancel_event(&mut cancel_rx) => {
+    let mut prep_fut = Box::pin(prep_fut);
+    let prepared_turn = 'prepare: {
+        let cancelled = tokio::select! {
+            biased;
+            _ = wait_for_cancel_event(&mut cancel_rx) => true,
+            _ = tokio::time::sleep(preparation_timeout) => false,
+            result = &mut prep_fut => break 'prepare result?,
+        };
+        // An SQLite commit and its history projection can outlive a dropped
+        // query future. Let a write already in progress reach its checkpoint.
+        if writing.load(Ordering::Relaxed) || replaying_saved_reply.load(Ordering::Relaxed) {
+            preparation_interrupted.store(true, Ordering::Relaxed);
+            match (&mut prep_fut).await {
+                Ok(prepared) => break 'prepare prepared,
+                Err(error @ KokoroError::ChatPersistence(_)) => return Err(error),
+                Err(_) => {}
+            }
+        }
+        if cancelled {
             tracing::info!(
                 target: "chat",
                 "[stream_chat] Turn {} (request {}) cancelled during preparation phase",
@@ -3613,9 +3712,10 @@ async fn execute_chat_with_pending(
                     code: None,
                 }),
             );
-            return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.to_string()));
-        }
-        _ = tokio::time::sleep(preparation_timeout) => {
+            return Err(KokoroError::Chat(
+                TURN_CANCELLED_BY_USER_MESSAGE.to_string(),
+            ));
+        } else {
             tracing::error!(
                 target: "chat",
                 "[stream_chat] Turn {} (request {}) timed out during preparation phase after {}s",
@@ -3647,16 +3747,8 @@ async fn execute_chat_with_pending(
                 preparation_timeout.as_secs()
             )));
         }
-        res = prep_fut => {
-            if matches!(res, Err(KokoroError::ChatPersistence(_))) {
-                // The explicit retry will register this same turn ID. Finish
-                // removing the old cancellation registration before publishing
-                // the save failure and letting the retry reach admission.
-                turn_guard.clear_before_retry().await;
-            }
-            res?
-        }
     };
+    drop(prep_fut);
 
     let PreparedChatTurn {
         prompt_snapshot,
@@ -3743,6 +3835,8 @@ async fn execute_chat_with_pending(
     let mut pending_tool_messages = Vec::new();
     let draft_row_id_holder = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let draft_row_id_for_stream = std::sync::Arc::clone(&draft_row_id_holder);
+    // A dispatched handler can have side effects even if its result is lost.
+    let mut dispatched_tools = false;
 
     let stream_result: Result<Option<i64>, KokoroError> = async {
     let mut before_llm_request_payload = build_before_llm_request_payload(
@@ -3941,8 +4035,6 @@ async fn execute_chat_with_pending(
     };
     let mut all_cleaned_text = String::new();
     let mut executed_any_tool = false;
-    // Tools can change state even when the handler eventually returns an error.
-    let mut dispatched_tools = false;
     let mut all_translations = Vec::new();
     let mut bg_generated_by_tool = false;
     let mut cue_set_by_tool = false;
@@ -4152,6 +4244,7 @@ async fn execute_chat_with_pending(
             .map_err(KokoroError::Chat)?;
         let allowed_tool_ids = (!desktop).then(|| native_tools.iter().map(|tool| tool.name.clone()).collect());
         let tool_scope = ToolExecutionScope {
+            external_turn: external_turn.as_ref(),
             memory_scope: Some(&memory_scope),
             cue_names: cue_names.as_ref(),
             request_id: &client_request_id,
@@ -4415,6 +4508,9 @@ async fn execute_chat_with_pending(
         );
     }
 
+    ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id)
+        .await
+        .map_err(KokoroError::Chat)?;
     let mut full_response = strip_leaked_tags(&all_cleaned_text);
     output_warnings.extend(media_delivery_failures.into_iter().map(str::to_owned));
     let mut canonical_response = strip_leaked_tool_results(&all_cleaned_text);
@@ -4800,6 +4896,7 @@ async fn execute_chat_with_pending(
         if !final_provider_data.is_empty() { metadata["provider_data"] = final_provider_data.into(); }
         pending_tool_messages.push(MessageWrite::new("assistant", &canonical_response, Some(metadata.to_string()))
             .with_save_id(format!("{client_request_id}:assistant")));
+        ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id).await.map_err(KokoroError::Chat)?;
         let work = turn.save_reply_batch(state, &canonical_response, final_translation.as_deref(), external_media.clone(), pending_tool_messages,
             Some(Arc::new(persistence::ExternalReplyExecution {
                 speech: speech_snapshot.clone(), memory_provider: system_provider.clone(), memory_language: memory_target_language.clone(), memory_scope: memory_scope.clone(),
@@ -4908,6 +5005,12 @@ async fn execute_chat_with_pending(
             && state.current_conversation_generation() == bound_generation
             && state.get_character_id().await == char_id
             && state.selection.current_conversation_id.lock().await.is_none();
+        ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id).await.map_err(KokoroError::Chat)?;
+        #[cfg(test)]
+        if let Some(pause) = request.assistant_commit_pause.as_ref() {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
         let saved = match state.save_messages_locked(&target, &messages, select_on_commit, None).await {
             Ok(saved) => saved,
             Err(error) => {
@@ -4938,6 +5041,8 @@ async fn execute_chat_with_pending(
             }));
         }
         conversation_id = Some(target.conversation_id);
+    } else {
+        ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id).await.map_err(KokoroError::Chat)?;
     }
 
     post_commit.conversation_id = conversation_id.clone();
@@ -4978,8 +5083,7 @@ async fn execute_chat_with_pending(
                         text,
                         speech,
                         speech_snapshot.clone(),
-                    )
-                    .await;
+                    );
                 }
             }
             Ok(StreamChatResponse {
@@ -5000,9 +5104,16 @@ async fn execute_chat_with_pending(
         Err(KokoroError::Chat(message)) if is_turn_cancelled_error_message(&message) => {
             tracing::info!(
                 target: "chat",
-                "[Chat] Turn {} cancelled by user",
+                "[Chat] Turn {} cancelled",
                 assistant_turn_id
             );
+            if dispatched_tools {
+                tracing::warn!(
+                    target: "chat::tools",
+                    turn_id = %assistant_turn_id,
+                    "A cancelled turn dispatched tools with potentially lasting side effects"
+                );
+            }
             // Remove the turn's technical rows (assistant_tool_calls/tool_result) and the
             // streaming draft, then emit the cancelled finish so the frontend reloads a
             // clean conversation.
@@ -5102,15 +5213,25 @@ mod tests {
         calls: AtomicUsize,
         started: Notify,
         release: Notify,
+        pause_background: AtomicBool,
+        background_started: Notify,
     }
 
     #[async_trait::async_trait]
     impl crate::llm::provider::LlmProvider for HeadlessProvider {
         async fn chat(
             &self,
-            _: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
+            messages: Vec<async_openai::types::chat::ChatCompletionRequestMessage>,
             _: Option<crate::llm::provider::LlmParams>,
         ) -> Result<String, String> {
+            if self.pause_background.load(Ordering::SeqCst)
+                && serde_json::to_string(&messages)
+                    .unwrap()
+                    .contains("Character reply:")
+            {
+                self.background_started.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(r#"{"cue":null}"#.into())
         }
 
@@ -5220,6 +5341,115 @@ mod tests {
             message: message.into(),
             ..Default::default()
         }
+    }
+
+    async fn finish_test_shutdown(shutdown: crate::lifecycle::Shutdown) {
+        let report = shutdown
+            .finish_with_finalizer(|_| async { Vec::new() }, |_| async { Ok(()) })
+            .await;
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn chat_shutdown_cancels_generation_and_rejects_new_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let (chat, state, provider) = headless_chat(root.path()).await;
+        let waiter = tokio::spawn({
+            let chat = chat.clone();
+            async move {
+                chat.submit(headless_request("stopped", "[wait]"), ChatPolicy::Desktop)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), provider.started.notified())
+            .await
+            .unwrap();
+        let shutdown = state
+            .lifecycle
+            .try_begin_shutdown(Duration::from_secs(5))
+            .unwrap();
+        let error = chat
+            .submit(
+                headless_request("rejected", "New work"),
+                ChatPolicy::Desktop,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("chat_shutting_down"));
+        finish_test_shutdown(shutdown).await;
+        let response = waiter.await.unwrap().unwrap();
+        assert_eq!(response.status.as_deref(), Some("cancelled"));
+        assert!(response.user_message_id.is_some());
+        assert!(response.assistant_message_id.is_none());
+        assert!(chat.events.runtime.turn_scope("rejected").is_none());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE role='assistant'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn chat_shutdown_drains_an_assistant_save_already_entered() {
+        let root = tempfile::tempdir().unwrap();
+        let (chat, state, _) = headless_chat(root.path()).await;
+        let pause = Arc::new(AssistantCommitPause::default());
+        let mut request = headless_request("committing", "Save during shutdown");
+        request.assistant_commit_pause = Some(pause.clone());
+        let waiter = tokio::spawn(async move { chat.submit(request, ChatPolicy::Desktop).await });
+        tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+            .await
+            .unwrap();
+        let shutdown = state
+            .lifecycle
+            .try_begin_shutdown(Duration::from_secs(5))
+            .unwrap();
+        assert!(!waiter.is_finished());
+        pause.release.notify_one();
+        finish_test_shutdown(shutdown).await;
+        let response = waiter.await.unwrap().unwrap();
+        assert_eq!(response.status.as_deref(), Some("completed"));
+        let stored: String = sqlx::query_scalar(
+            "SELECT content FROM conversation_messages WHERE id=? AND role='assistant'",
+        )
+        .bind(response.assistant_message_id.unwrap())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(stored, response.text);
+    }
+
+    #[tokio::test]
+    async fn chat_shutdown_cancels_post_commit_generation_and_preserves_the_reply() {
+        let root = tempfile::tempdir().unwrap();
+        let (chat, state, provider) = headless_chat(root.path()).await;
+        provider.pause_background.store(true, Ordering::SeqCst);
+        let mut request = headless_request("after-save", "Save before background work");
+        request.allow_image_gen = Some(true);
+        let response = chat.submit(request, ChatPolicy::Desktop).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.background_started.notified(),
+        )
+        .await
+        .unwrap();
+        let shutdown = state
+            .lifecycle
+            .try_begin_shutdown(Duration::from_secs(5))
+            .unwrap();
+        finish_test_shutdown(shutdown).await;
+        assert_eq!(
+            chat.events.runtime.turn_scope("after-save").unwrap().status,
+            "completed"
+        );
+        let stored: String =
+            sqlx::query_scalar("SELECT content FROM conversation_messages WHERE id=?")
+                .bind(response.assistant_message_id.unwrap())
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(stored, response.text);
     }
 
     #[tokio::test]
@@ -5511,15 +5741,13 @@ mod tests {
         state
             .register_turn_with_request("turn", Some("request"))
             .await;
-        let mut previous = TurnCancellationGuard::new(state.clone(), "turn".into());
-        previous.clear_before_retry().await;
+        let previous = TurnCancellationGuard::new(state.clone(), "turn".into());
+        drop(previous);
         assert!(state.resolve_turn_id("request").await.is_none());
 
         state
             .register_turn_with_request("turn", Some("request"))
             .await;
-        drop(previous);
-        tokio::task::yield_now().await;
         assert_eq!(
             state.resolve_turn_id("request").await.as_deref(),
             Some("turn")
@@ -6933,7 +7161,7 @@ mod tests {
         assert!(approve_tool_approval_inner(&approval_state, req_id)
             .await
             .is_err());
-        cancel_state.clear_turn("turn-unblock-test").await;
+        cancel_state.clear_turn("turn-unblock-test");
         cancelling.await.unwrap();
     }
 
@@ -7034,7 +7262,7 @@ mod tests {
         assert!(state.is_cancelled("req-unborn-1").await);
 
         // Cleanup
-        state.clear_turn("turn-born-1").await;
+        state.clear_turn("turn-born-1");
         assert!(!state.has_turn("turn-born-1").await);
         assert!(!state.has_turn("req-unborn-1").await);
     }
@@ -7058,7 +7286,7 @@ mod tests {
         state.register_turn("turn-unborn-2").await;
         assert!(state.is_cancelled("turn-unborn-2").await);
 
-        state.clear_turn("turn-unborn-2").await;
+        state.clear_turn("turn-unborn-2");
         assert!(!state.has_turn("turn-unborn-2").await);
     }
 
@@ -7110,7 +7338,7 @@ mod tests {
                 .await;
         }
 
-        let inner = state.inner.read().await;
+        let inner = state.inner.read().unwrap();
         assert!(
             inner.tombstones.len() <= 256,
             "Tombstones map must be bounded to MAX_TOMBSTONES"
@@ -7147,7 +7375,7 @@ mod tests {
         assert!(state.is_cancelled("req-client-456").await);
 
         // Clearing turn also cleans up request_to_turn mapping
-        state.clear_turn("turn-real-123").await;
+        state.clear_turn("turn-real-123");
         assert!(!state.has_turn("turn-real-123").await);
         assert!(!state.has_turn("req-client-456").await);
     }

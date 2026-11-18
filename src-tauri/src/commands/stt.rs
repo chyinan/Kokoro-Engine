@@ -1,5 +1,6 @@
 use crate::error::KokoroError;
 use crate::ipc::wire::emit;
+use crate::lifecycle::{AppLifecycle, TaskStage};
 use crate::stt::{
     AudioChunk, AudioSource, NativeMicState, NativeWakeWordState, SenseVoiceLocalModelStatus,
     SttConfig, SttService,
@@ -82,28 +83,22 @@ pub async fn start_native_mic(
     auto_stop_on_silence: Option<bool>,
     only_when_chat_idle: Option<bool>,
 ) -> Result<bool, KokoroError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::stt::mic::start_native_mic_with_options(
-            &app,
-            app.state::<NativeMicState>().inner(),
-            auto_stop_on_silence.unwrap_or(false),
-            only_when_chat_idle.unwrap_or(false),
-        )
-    })
+    crate::stt::mic::start_native_mic_with_options(
+        &app,
+        app.state::<NativeMicState>().inner(),
+        auto_stop_on_silence.unwrap_or(false),
+        only_when_chat_idle.unwrap_or(false),
+    )
     .await
-    .map_err(|error| KokoroError::Stt(error.to_string()))?
     .map_err(KokoroError::Stt)
 }
 
 #[command]
 #[specta::specta]
 pub async fn stop_native_mic(app: AppHandle) -> Result<(), KokoroError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::stt::mic::stop_native_mic(&app, app.state::<NativeMicState>().inner())
-    })
-    .await
-    .map_err(|error| KokoroError::Stt(error.to_string()))?
-    .map_err(KokoroError::Stt)
+    crate::stt::mic::stop_native_mic(app.state::<NativeMicState>().inner())
+        .await
+        .map_err(KokoroError::Stt)
 }
 
 #[command]
@@ -122,17 +117,18 @@ pub async fn start_native_wake_word(
         trigger_on_speech.unwrap_or(false),
         owner,
     )
+    .await
     .map_err(KokoroError::Stt)
 }
 
 #[command]
 #[specta::specta]
 pub async fn stop_native_wake_word(
-    app: AppHandle,
     wake_word_state: State<'_, NativeWakeWordState>,
     owner: Option<u64>,
 ) -> Result<(), KokoroError> {
-    crate::stt::wake_word::stop_native_wake_word(&app, wake_word_state.inner(), owner)
+    crate::stt::wake_word::stop_native_wake_word(wake_word_state.inner(), owner)
+        .await
         .map_err(KokoroError::Stt)
 }
 
@@ -147,9 +143,19 @@ pub async fn get_sensevoice_local_status() -> Result<SenseVoiceLocalModelStatus,
 pub async fn download_sensevoice_local_model(
     app: tauri::AppHandle,
 ) -> Result<SenseVoiceLocalModelStatus, KokoroError> {
-    crate::stt::sensevoice_local::download_recommended_model(move |progress| {
-        emit(&app, progress).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(KokoroError::Stt)
+    let scope = app.state::<AppLifecycle>().scope(TaskStage::Work, "stt");
+    let download_scope = scope.clone();
+    let mut task = scope
+        .spawn_durable("SenseVoice model installation", async move {
+            crate::stt::sensevoice_local::download_recommended_model(
+                download_scope,
+                move |progress| emit(&app, progress).map_err(|e| e.to_string()),
+            )
+            .await
+        })
+        .map_err(|error| KokoroError::Stt(error.to_string()))?;
+    task.join()
+        .await
+        .map_err(|error| KokoroError::Stt(error.to_string()))?
+        .map_err(KokoroError::Stt)
 }

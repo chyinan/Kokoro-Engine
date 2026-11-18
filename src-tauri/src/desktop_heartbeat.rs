@@ -4,6 +4,7 @@ use crate::ai::context::AIOrchestrator;
 use crate::ai::initiative::InitiativeDecision;
 use crate::chat::application::ChatService;
 use crate::ipc::{events::ProactiveTrigger, wire::emit};
+use crate::lifecycle::TaskScope;
 use chrono::Timelike;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -49,12 +50,17 @@ fn time_of_day_context() -> &'static str {
 }
 
 /// Main heartbeat loop. Spawned once at app startup.
-pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
+pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService, scope: TaskScope) {
     let config = HeartbeatConfig::default();
     let _last_time_period = current_time_period();
+    let stop = scope.token();
 
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {}
+        }
 
         // Get orchestrator state
         let orchestrator = match app_handle.try_state::<AIOrchestrator>() {
@@ -62,10 +68,10 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
             None => continue,
         };
 
-        let Ok(scope) = orchestrator.desktop_admission_scope().await else {
+        let Ok(character_scope) = orchestrator.desktop_admission_scope().await else {
             continue;
         };
-        let character = scope.0.clone();
+        let character = character_scope.0.clone();
         let behavior = orchestrator.owners.character(&character);
 
         // Gather metrics
@@ -94,7 +100,7 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
                     IdleBehaviorEvent {
                         behavior,
                         character_id: character.clone(),
-                        conversation_id: scope.1.clone(),
+                        conversation_id: character_scope.1.clone(),
                     },
                 );
             }
@@ -107,12 +113,18 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
         if orchestrator.is_memory_enabled()
             && behavior.lock().await.last_prune.elapsed().as_secs() >= 3600
         {
-            behavior.lock().await.last_prune = std::time::Instant::now();
             let memory_mgr = orchestrator.memory_manager.clone();
             let char_id = character.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = memory_mgr.prune_decayed_memories(&char_id, 0.05).await;
-            });
+            if scope
+                .spawn_durable("memory-prune", async move {
+                    if let Err(error) = memory_mgr.prune_decayed_memories(&char_id, 0.05).await {
+                        tracing::warn!(target: "memory", %error, "memory pruning failed");
+                    }
+                })
+                .is_ok()
+            {
+                behavior.lock().await.last_prune = std::time::Instant::now();
+            }
         }
 
         // 5. Dream Memory v2 daily consolidation (once per local day after configured hour)
@@ -147,7 +159,6 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
                         );
                     }
                 }
-                behavior.lock().await.last_dream_day = Some(today);
                 let target_language = {
                     let Ok(_activation) = orchestrator.enter_chat_turn() else {
                         continue;
@@ -162,7 +173,7 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
                 let provider = app_handle
                     .try_state::<crate::llm::service::LlmService>()
                     .map(|state| state.inner().clone());
-                tauri::async_runtime::spawn(async move {
+                if scope.spawn_durable("memory-dream", async move {
                     let database_guard =
                         crate::ai::context::acquire_database_operation_read_guard().await;
                     if !database_guard.is_current() {
@@ -185,7 +196,9 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
                     {
                         tracing::warn!(target: "memory", "[Memory] Daily dream job failed: {}", error);
                     }
-                });
+                }).is_ok() {
+                    behavior.lock().await.last_dream_day = Some(today);
+                }
             }
         }
 
@@ -216,7 +229,7 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
                         &app_handle,
                         &chat,
                         &orchestrator,
-                        &scope,
+                        &character_scope,
                         idle_secs,
                         "curiosity",
                         &format!("Ask the user about: {}", topic),
@@ -234,7 +247,7 @@ pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
                         &app_handle,
                         &chat,
                         &orchestrator,
-                        &scope,
+                        &character_scope,
                         idle_secs,
                         "initiative",
                         instruction,

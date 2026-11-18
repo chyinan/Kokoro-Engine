@@ -1,5 +1,7 @@
 //! Kokoro policy and a tool catalog over the official MCP client's peer.
 
+use super::transport::RetainedTransport;
+use futures::FutureExt;
 use rmcp::{
     model::{
         CallToolRequest, CallToolRequestParams, CancelledNotification, CancelledNotificationParam,
@@ -16,10 +18,22 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::HashSet, sync::RwLock, time::Duration};
-use tokio::sync::{watch, Mutex};
+use std::{
+    collections::HashSet,
+    panic::AssertUnwindSafe,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        RwLock,
+    },
+    time::Duration,
+};
+use tokio::{
+    sync::{mpsc, oneshot, watch, Mutex},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TOOL_PAGES: usize = 128;
 const MAX_TOOLS: usize = 4096;
@@ -66,6 +80,8 @@ pub enum McpRequestError {
     Cancelled,
     #[error("MCP tool changed or is no longer available; refresh the tool list")]
     ToolUnavailable,
+    #[error("MCP connection is stopping; request was not sent")]
+    Stopping,
 }
 
 impl From<ServiceError> for McpRequestError {
@@ -93,6 +109,10 @@ pub(super) enum McpConnectError {
     Initialization,
     #[error("MCP transport failed during initialization")]
     Transport,
+    #[error("MCP connection timed out")]
+    Timeout,
+    #[error("MCP transport cleanup failed during initialization: {0}")]
+    Cleanup(String),
     #[error("MCP server negotiated an unsupported protocol version")]
     Version,
     #[error("MCP tool discovery failed: {0}")]
@@ -150,7 +170,13 @@ fn invalidate(changed: &watch::Sender<u64>) {
 pub struct McpClient {
     peer: Peer<RoleClient>,
     lifetime: CancellationToken,
-    closed: watch::Receiver<bool>,
+    startup_stop: CancellationToken,
+    committed: AtomicBool,
+    closed: watch::Receiver<Option<Result<(), String>>>,
+    actor: Mutex<Option<JoinHandle<()>>>,
+    cancellations: mpsc::UnboundedSender<RequestId>,
+    accepting_tools: AtomicBool,
+    active_tools: tokio::sync::RwLock<()>,
     changed: watch::Sender<u64>,
     catalog: RwLock<Option<(u64, Vec<McpToolInfo>)>>,
     refreshing: Mutex<()>,
@@ -160,101 +186,92 @@ impl McpClient {
     pub(super) async fn start<T: Transport<RoleClient> + 'static>(
         transport: T,
         legacy_sse: bool,
-        lifetime: CancellationToken,
+        startup_stop: CancellationToken,
     ) -> Result<Self, McpConnectError> {
-        // A service can close itself while its startup error is being returned.
-        // Its child token must not cancel the manager's connection attempt.
-        let lifetime = lifetime.child_token();
+        let lifetime = CancellationToken::new();
         let (changed, _) = watch::channel(0);
-        let initialize_version = if legacy_sse {
-            ProtocolVersion::V_2024_11_05
-        } else {
-            ProtocolVersion::LATEST_WITH_INITIALIZE
-        };
-        let lifecycle = if legacy_sse {
-            ClientLifecycleMode::Initialize
-        } else {
-            ClientLifecycleMode::Auto {
-                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
-                legacy_version: Some(initialize_version.clone()),
+        let (transport, returned) = RetainedTransport::new(transport);
+        let (ready, startup) = oneshot::channel();
+        let (finished, closed) = watch::channel(None);
+        let (cancellations, cancelled_requests) = mpsc::unbounded_channel();
+        let session_lifetime = lifetime.clone();
+        let session_changes = changed.clone();
+        let cancelled_startup = lifetime.clone().drop_guard();
+        let stop_initialization = startup_stop.clone();
+        let mut actor = tokio::spawn(async move {
+            let guard = session_lifetime.clone().drop_guard();
+            let outcome = AssertUnwindSafe(run_sdk_session(
+                transport,
+                legacy_sse,
+                session_lifetime.clone(),
+                stop_initialization,
+                session_changes,
+                ready,
+                cancelled_requests,
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err("MCP SDK session panicked".into()));
+            drop(guard);
+
+            let cleanup = match returned.await {
+                Ok(mut transport) => transport
+                    .close()
+                    .await
+                    .map_err(|_| "MCP transport close could not be confirmed".to_string()),
+                Err(_) => Err("MCP transport was not returned for cleanup".into()),
+            };
+            let result = cleanup.and(outcome);
+            if let Err(error) = &result {
+                tracing::error!(target: "mcp", %error, "MCP connection owner failed");
+            }
+            finished.send_replace(Some(result));
+        });
+        let peer = match startup.await {
+            Ok(Ok(peer)) => peer,
+            failed => {
+                let error = match failed {
+                    Ok(Err(error)) => error,
+                    _ => McpConnectError::Initialization,
+                };
+                if let Err(join_error) = (&mut actor).await {
+                    return Err(McpConnectError::Cleanup(join_error.to_string()));
+                }
+                if let Some(Err(error)) = &*closed.borrow() {
+                    return Err(McpConnectError::Cleanup(error.clone()));
+                }
+                return Err(error);
             }
         };
-        let running = serve_client_with_lifecycle_and_ct(
-            CatalogHandler {
-                initialize_version,
-                changed: changed.clone(),
-            },
-            transport,
-            lifecycle,
-            lifetime.clone(),
-        )
-        .await?;
-        let peer = running.peer().clone();
-        let info = peer.peer_info().ok_or(McpConnectError::Initialization)?;
-        let max_version = if legacy_sse {
-            ProtocolVersion::LATEST_WITH_INITIALIZE
-        } else {
-            ProtocolVersion::V_2026_07_28
-        };
-        if !ProtocolVersion::known_up_to(&max_version).contains(&info.protocol_version) {
-            let _ = running.cancel().await;
-            return Err(McpConnectError::Version);
-        }
-
-        let (finished, closed) = watch::channel(false);
-        let session_lifetime = lifetime.clone();
-        tokio::spawn(async move {
-            let _ = running.waiting().await;
-            session_lifetime.cancel();
-            finished.send_replace(true);
-        });
         let client = Self {
             peer,
             lifetime,
+            startup_stop: startup_stop.clone(),
+            committed: AtomicBool::new(false),
             closed,
+            actor: Mutex::new(Some(actor)),
+            cancellations,
+            accepting_tools: AtomicBool::new(true),
+            active_tools: tokio::sync::RwLock::new(()),
             changed,
             catalog: RwLock::new(None),
             refreshing: Mutex::new(()),
         };
-        if info.protocol_version == ProtocolVersion::V_2026_07_28
-            && declares_list_changed(&client.peer)
-        {
-            client.subscribe_to_tool_changes();
+        let discovery = tokio::select! {
+            biased;
+            _ = startup_stop.cancelled() => Err(McpConnectError::Cancelled),
+            discovered = client.refresh_tools() => discovered.map_err(McpConnectError::Discovery),
+        };
+        if let Err(error) = discovery {
+            client.cancel();
+            client
+                .wait_closed()
+                .await
+                .map_err(McpConnectError::Cleanup)?;
+            return Err(error);
         }
-        client.refresh_tools().await?;
+        let _ = cancelled_startup.disarm();
         Ok(client)
-    }
-
-    fn subscribe_to_tool_changes(&self) {
-        let peer = self.peer.clone();
-        let changed = self.changed.clone();
-        let lifetime = self.lifetime.clone();
-        tokio::spawn(async move {
-            let subscribe = peer.listen(SubscriptionFilter::builder().tools_list_changed().build());
-            let mut stream = tokio::select! {
-                _ = lifetime.cancelled() => return,
-                result = tokio::time::timeout(REQUEST_TIMEOUT, subscribe) => match result {
-                    Ok(Ok(stream)) if stream.acknowledged().tools_list_changed == Some(true) => stream,
-                    _ => {
-                        tracing::debug!(target: "mcp", "Peer did not accept tool list notifications");
-                        return;
-                    }
-                }
-            };
-            loop {
-                tokio::select! {
-                    _ = lifetime.cancelled() => return,
-                    notification = stream.next() => match notification {
-                        Ok(Some(ServerNotification::ToolListChangedNotification(_))) => invalidate(&changed),
-                        Ok(Some(_)) => {},
-                        _ => {
-                            invalidate(&changed);
-                            return;
-                        }
-                    }
-                }
-            }
-        });
     }
 
     pub(super) fn changes(&self) -> watch::Receiver<u64> {
@@ -380,6 +397,13 @@ impl McpClient {
         name: &str,
         arguments: JsonObject,
     ) -> Result<McpToolResult, McpRequestError> {
+        if !self.accepting_tools.load(Ordering::Acquire) {
+            return Err(McpRequestError::Stopping);
+        }
+        let _call = self.active_tools.read().await;
+        if !self.accepting_tools.load(Ordering::Acquire) {
+            return Err(McpRequestError::Stopping);
+        }
         if !self.is_connected() {
             return Err(McpRequestError::Disconnected);
         }
@@ -399,7 +423,7 @@ impl McpClient {
                 .peer
                 .send_cancellable_request(request, PeerRequestOptions::no_options())
                 .await?;
-            let mut guard = CancelOnDrop(Some((self.peer.clone(), handle.id.clone())));
+            let mut guard = CancelOnDrop(Some((self.cancellations.clone(), handle.id.clone())));
             let result = handle.await_response().await;
             guard.0.take();
             if let Err(ServiceError::TransportSend(error)) = &result {
@@ -425,7 +449,14 @@ impl McpClient {
     }
 
     pub(super) fn is_connected(&self) -> bool {
-        !self.lifetime.is_cancelled() && !self.peer.is_transport_closed()
+        self.accepting_tools.load(Ordering::Acquire)
+            && (self.committed.load(Ordering::Acquire) || !self.startup_stop.is_cancelled())
+            && !self.lifetime.is_cancelled()
+            && !self.peer.is_transport_closed()
+    }
+
+    pub(super) fn commit(&self) {
+        self.committed.store(true, Ordering::Release);
     }
 
     pub(super) fn server_version(&self) -> Option<String> {
@@ -436,17 +467,38 @@ impl McpClient {
             .map(|info| info.version.clone())
     }
 
+    pub(super) fn stop_accepting(&self) {
+        self.accepting_tools.store(false, Ordering::Release);
+    }
+
     pub(super) fn cancel(&self) {
         self.lifetime.cancel();
     }
 
-    pub(super) async fn shutdown(&self) {
-        self.cancel();
-        let _ = tokio::time::timeout(
-            Duration::from_secs(8),
-            self.closed.clone().wait_for(|done| *done),
-        )
-        .await;
+    pub(super) async fn drain_and_close(&self) -> Result<(), String> {
+        self.stop_accepting();
+        {
+            let _drained = self.active_tools.write().await;
+            self.cancel();
+        }
+        self.wait_closed().await
+    }
+
+    pub(super) async fn wait_closed(&self) -> Result<(), String> {
+        let mut actor = self.actor.lock().await;
+        if let Some(worker) = actor.as_mut() {
+            let outcome = worker.await;
+            actor.take();
+            outcome.map_err(|error| format!("MCP connection owner failed: {error}"))?;
+        }
+        self.closed.borrow().clone().unwrap_or_else(|| {
+            Err("MCP connection owner exited without confirming transport closure".into())
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) async fn shutdown(&self) -> Result<(), String> {
+        self.drain_and_close().await
     }
 }
 
@@ -488,24 +540,168 @@ fn decode_tool_result(result: ServerResult) -> Result<McpToolResult, McpRequestE
     Ok(parsed)
 }
 
-struct CancelOnDrop(Option<(Peer<RoleClient>, RequestId)>);
+async fn run_sdk_session<T: Transport<RoleClient> + 'static>(
+    transport: RetainedTransport<T>,
+    legacy_sse: bool,
+    lifetime: CancellationToken,
+    startup_stop: CancellationToken,
+    changed: watch::Sender<u64>,
+    ready: oneshot::Sender<Result<Peer<RoleClient>, McpConnectError>>,
+    cancelled_requests: mpsc::UnboundedReceiver<RequestId>,
+) -> Result<(), String> {
+    let initialize_version = if legacy_sse {
+        ProtocolVersion::V_2024_11_05
+    } else {
+        ProtocolVersion::LATEST_WITH_INITIALIZE
+    };
+    let lifecycle = if legacy_sse {
+        ClientLifecycleMode::Initialize
+    } else {
+        ClientLifecycleMode::Auto {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            legacy_version: Some(initialize_version.clone()),
+        }
+    };
+    let initialize = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        serve_client_with_lifecycle_and_ct(
+            CatalogHandler {
+                initialize_version: initialize_version.clone(),
+                changed: changed.clone(),
+            },
+            transport,
+            lifecycle,
+            lifetime.clone(),
+        ),
+    );
+    let startup = tokio::select! {
+        biased;
+        _ = startup_stop.cancelled() => {
+            let _ = ready.send(Err(McpConnectError::Cancelled));
+            return Ok(());
+        }
+        startup = initialize => startup,
+    };
+    let running = match startup {
+        Ok(Ok(running)) => running,
+        result => {
+            let error = match result {
+                Ok(Err(error)) => error.into(),
+                _ => McpConnectError::Timeout,
+            };
+            let _ = ready.send(Err(error));
+            return Ok(());
+        }
+    };
+    let peer = running.peer().clone();
+    let Some(info) = peer.peer_info() else {
+        let _ = ready.send(Err(McpConnectError::Initialization));
+        return running
+            .cancel()
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    };
+    let max_version = if initialize_version == ProtocolVersion::V_2024_11_05 {
+        ProtocolVersion::LATEST_WITH_INITIALIZE
+    } else {
+        ProtocolVersion::V_2026_07_28
+    };
+    if !ProtocolVersion::known_up_to(&max_version).contains(&info.protocol_version) {
+        let _ = ready.send(Err(McpConnectError::Version));
+        return running
+            .cancel()
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+    if ready.send(Ok(peer.clone())).is_err() {
+        lifetime.cancel();
+    }
+    let sdk = async {
+        let result = running.waiting().await;
+        lifetime.cancel();
+        result
+            .map(|_| ())
+            .map_err(|error| format!("MCP SDK task failed: {error}"))
+    };
+    let subscriptions = async {
+        if info.protocol_version == ProtocolVersion::V_2026_07_28 && declares_list_changed(&peer) {
+            watch_tool_changes(&peer, &lifetime, &changed).await;
+        }
+    };
+    let (sdk, (), ()) = tokio::join!(
+        sdk,
+        subscriptions,
+        send_request_cancellations(&peer, &lifetime, cancelled_requests),
+    );
+    sdk
+}
+
+async fn watch_tool_changes(
+    peer: &Peer<RoleClient>,
+    lifetime: &CancellationToken,
+    changed: &watch::Sender<u64>,
+) {
+    let subscribe = peer.listen(SubscriptionFilter::builder().tools_list_changed().build());
+    let mut stream = tokio::select! {
+        _ = lifetime.cancelled() => return,
+        result = tokio::time::timeout(REQUEST_TIMEOUT, subscribe) => match result {
+            Ok(Ok(stream)) if stream.acknowledged().tools_list_changed == Some(true) => stream,
+            _ => {
+                tracing::debug!(target: "mcp", "Peer did not accept tool list notifications");
+                return;
+            }
+        }
+    };
+    loop {
+        tokio::select! {
+            _ = lifetime.cancelled() => return,
+            notification = stream.next() => match notification {
+                Ok(Some(ServerNotification::ToolListChangedNotification(_))) => invalidate(changed),
+                Ok(Some(_)) => {}
+                _ => {
+                    invalidate(changed);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn send_request_cancellations(
+    peer: &Peer<RoleClient>,
+    lifetime: &CancellationToken,
+    mut requests: mpsc::UnboundedReceiver<RequestId>,
+) {
+    loop {
+        let id = tokio::select! {
+            _ = lifetime.cancelled() => break,
+            id = requests.recv() => match id {
+                Some(id) => id,
+                None => break,
+            },
+        };
+        let notification = CancelledNotification::new(CancelledNotificationParam::new(
+            Some(id),
+            Some("Kokoro stopped waiting for the request".into()),
+        ));
+        tokio::select! {
+            _ = lifetime.cancelled() => break,
+            _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                peer.send_notification(notification.into()),
+            ) => {}
+        }
+    }
+}
+
+struct CancelOnDrop(Option<(mpsc::UnboundedSender<RequestId>, RequestId)>);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        if let Some((peer, id)) = self.0.take() {
-            let notification = CancelledNotification::new(CancelledNotificationParam::new(
-                Some(id),
-                Some("Kokoro stopped waiting for the request".into()),
-            ));
-            // Drop is synchronous, but the SDK removes the pending request on the
-            // cancellation notification. Do not hold a manager lock or retry the tool.
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    peer.send_notification(notification.into()),
-                )
-                .await;
-            });
+        if let Some((worker, id)) = self.0.take() {
+            let _ = worker.send(id);
         }
     }
 }

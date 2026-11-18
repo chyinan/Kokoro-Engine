@@ -3,17 +3,19 @@ use crate::error::KokoroError;
 use crate::ipc::wire::Response;
 use crate::imagegen::config::{load_config, save_config, ImageGenSystemConfig};
 use crate::imagegen::{ImageGenParams, ImageGenResult, ImageGenService};
-use tauri::{command, State};
+use tauri::{command, AppHandle, State};
 
 #[command]
 #[specta::specta]
 pub async fn generate_image(
+    app: AppHandle,
     state: State<'_, ImageGenService>,
     window_size_state: State<'_, WindowSizeState>,
     prompt: String,
     provider_id: Option<String>,
     params: Option<ImageGenParams>,
 ) -> Result<ImageGenResult, KokoroError> {
+    let _generation = crate::ipc::admit_operation(&app, "imagegen", "manual-generation")?;
     let window_size = window_size_state.get().await;
     state
         .generate(prompt, provider_id, params, Some(window_size))

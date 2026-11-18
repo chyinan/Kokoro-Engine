@@ -8,7 +8,7 @@ use super::openai::OpenAIWhisperProvider;
 use super::sensevoice::SenseVoiceProvider;
 use super::sensevoice_local::SenseVoiceLocalProvider;
 use super::whisper_cpp::WhisperCppProvider;
-use crate::error::KokoroError;
+use crate::{error::KokoroError, lifecycle::TaskScope};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 pub struct SttService {
     providers: Arc<RwLock<Vec<Arc<dyn SttEngine>>>>,
     config: Arc<RwLock<SttConfig>>,
+    scope: Option<TaskScope>,
 }
 
 impl Default for SttService {
@@ -30,12 +31,24 @@ impl SttService {
         Self {
             providers: Arc::new(RwLock::new(Vec::new())),
             config: Arc::new(RwLock::new(SttConfig::default())),
+            scope: None,
         }
     }
 
     /// Initialize from config, building all enabled providers.
     pub async fn init_from_config(config: &SttConfig) -> Self {
-        let service = Self::new();
+        Self::initialize(config, None).await
+    }
+
+    pub(crate) async fn init_from_config_with_scope(config: &SttConfig, scope: TaskScope) -> Self {
+        Self::initialize(config, Some(scope)).await
+    }
+
+    async fn initialize(config: &SttConfig, scope: Option<TaskScope>) -> Self {
+        let service = Self {
+            scope,
+            ..Self::new()
+        };
         {
             let mut cfg = service.config.write().await;
             *cfg = config.clone();
@@ -43,7 +56,7 @@ impl SttService {
 
         for provider_cfg in &config.providers {
             if provider_cfg.enabled {
-                if let Some(provider) = Self::build_provider(provider_cfg) {
+                if let Some(provider) = service.build_provider(provider_cfg) {
                     service.providers.write().await.push(provider);
                 }
             }
@@ -55,7 +68,7 @@ impl SttService {
     }
 
     /// Build a provider from config.
-    fn build_provider(config: &SttProviderConfig) -> Option<Arc<dyn SttEngine>> {
+    fn build_provider(&self, config: &SttProviderConfig) -> Option<Arc<dyn SttEngine>> {
         match config.provider_type.as_str() {
             "openai_whisper" | "faster_whisper" | "local_whisper" => {
                 let api_key = config.resolve_api_key().unwrap_or_default();
@@ -92,7 +105,9 @@ impl SttService {
                     }
                 }
             }
-            "sensevoice_local" => Some(Arc::new(SenseVoiceLocalProvider::new(config, None))),
+            "sensevoice_local" => Some(Arc::new(
+                SenseVoiceLocalProvider::new(config, None).with_scope(self.scope.clone()),
+            )),
             other => {
                 tracing::error!(target: "stt", "Unknown provider type: {}", other);
                 None
@@ -107,6 +122,12 @@ impl SttService {
         audio: &AudioSource,
         language_override: Option<&str>,
     ) -> Result<TranscriptionResult, SttError> {
+        let _work = self
+            .scope
+            .as_ref()
+            .map(|scope| scope.lease("transcription"))
+            .transpose()
+            .map_err(|error| SttError::EngineUnavailable(error.to_string()))?;
         let config = self.config.read().await;
         let config_language = config.language.clone();
 
@@ -128,7 +149,17 @@ impl SttService {
         drop(config);
 
         // Lock is released here, so we can await safely without blocking
-        provider.transcribe(audio, language.as_deref()).await
+        let transcription = provider.transcribe(audio, language.as_deref());
+        if let Some(scope) = &self.scope {
+            let stop = scope.token();
+            tokio::select! {
+                biased;
+                result = transcription => result,
+                _ = stop.cancelled() => Err(SttError::EngineUnavailable("STT is shutting down".into())),
+            }
+        } else {
+            transcription.await
+        }
     }
 
     /// Get the current config.
@@ -176,11 +207,17 @@ impl SttService {
 
     /// Prepare providers before committing the settings to disk and runtime.
     pub async fn save_and_reload(&self, path: &Path, config: SttConfig) -> Result<(), KokoroError> {
+        let _work = self
+            .scope
+            .as_ref()
+            .map(|scope| scope.lease("save config"))
+            .transpose()
+            .map_err(|error| KokoroError::Stt(error.to_string()))?;
         let mut new_providers: Vec<Arc<dyn SttEngine>> = Vec::new();
 
         for provider_cfg in &config.providers {
             if provider_cfg.enabled {
-                if let Some(provider) = Self::build_provider(provider_cfg) {
+                if let Some(provider) = self.build_provider(provider_cfg) {
                     new_providers.push(provider);
                 }
             }

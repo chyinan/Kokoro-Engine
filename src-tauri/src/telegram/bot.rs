@@ -4,18 +4,21 @@
 
 use super::config::TelegramConfig;
 use crate::ai::context::AIOrchestrator;
-use crate::bot::{BotChatServices, BotChatUnavailable};
+use crate::bot::{lifecycle::BotIngress, BotChatServices, BotChatUnavailable};
 use crate::chat::application::{channel_id, ChatPolicy, ChatRequest, ChatService};
 use crate::chat::persistence::{self, ExternalTurn};
 use crate::error::KokoroError;
 use crate::stt::AudioSource;
 use base64::Engine as _;
+use futures::FutureExt;
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
-use tokio::sync::{oneshot, RwLock};
+use teloxide::update_listeners::UpdateListener;
+use tokio::sync::RwLock;
 
 /// 每用户速率限制：滑动窗口内最多允许的消息数
 const RATE_LIMIT_MAX: usize = 10;
@@ -216,7 +219,16 @@ struct TelegramDelivery<'a> {
 impl TelegramReplyDelivery for TelegramDelivery<'_> {
     async fn text(&self, text: String) -> Result<(), TelegramDeliveryError> {
         for chunk in split_message(&text) {
-            send_text(self.bot, self.chat_id, self.thread, chunk).await?;
+            send_text(self.bot, self.chat_id, self.thread, chunk)
+                .await
+                .map_err(|error| match error {
+                    teloxide::RequestError::Network(error) => format!(
+                        "Telegram reply delivery is uncertain: {}",
+                        error.without_url()
+                    )
+                    .into(),
+                    error => TelegramDeliveryError::from(error),
+                })?;
         }
         Ok(())
     }
@@ -302,61 +314,58 @@ type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 const MAX_MESSAGE_CHARS: usize = 4096;
 const MAX_MEDIA_BYTES: u32 = 20 * 1024 * 1024;
 
-/// Run the long-polling loop. Blocks until `shutdown_rx` fires or an error occurs.
-pub async fn run_polling(
+/// Run the long-polling loop and let the SDK drain its message workers.
+pub(crate) async fn run_polling(
     token: String,
     config: Arc<RwLock<TelegramConfig>>,
     services: BotChatServices,
-    mut shutdown_rx: oneshot::Receiver<()>,
-) {
+    ingress: BotIngress,
+) -> Result<(), String> {
     let bot = Bot::new(&token);
+    let stop = ingress.token().clone();
+    let mut listener = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Ok(()),
+        listener = teloxide::update_listeners::polling_default(bot.clone()) => listener,
+    };
+    let listener_stop = listener.stop_token();
     let sessions = Sessions::default();
     let rate_limiter: RateLimiter = Arc::new(RwLock::new(HashMap::new()));
-
-    // Build the update handler
     let handler = Update::filter_message().endpoint(handle_message);
-
-    let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
+    let mut dispatcher = Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
-            config.clone(),
-            sessions.clone(),
-            services.clone(),
-            rate_limiter.clone()
+            config,
+            sessions,
+            services,
+            rate_limiter,
+            ingress
         ])
         .default_handler(|_upd| async {})
         .build();
 
-    // Run dispatcher in a spawned task and monitor its lifecycle.
     let shutdown_token = dispatcher.shutdown_token();
-    let mut dispatch_task = tokio::spawn(async move {
-        dispatcher.dispatch().await;
-    });
-
-    tokio::select! {
-        _ = &mut shutdown_rx => {
-            if let Ok(fut) = shutdown_token.shutdown() {
-                fut.await;
+    let dispatch = dispatcher.try_dispatch_with_listener(
+        listener,
+        teloxide::error_handlers::LoggingErrorHandler::with_custom_text("Telegram polling failed"),
+    );
+    tokio::pin!(dispatch);
+    let result = tokio::select! {
+        biased;
+        result = &mut dispatch => result,
+        _ = stop.cancelled() => {
+            // During get_me, the dispatcher has no update workers yet.
+            if shutdown_token.shutdown().is_err() {
+                return Ok(());
             }
-            let _ = (&mut dispatch_task).await;
+            listener_stop.stop();
+            dispatch.await
         }
-        dispatch_result = &mut dispatch_task => {
-            match dispatch_result {
-                Ok(_) => {
-                    tracing::error!(target: "telegram", "dispatcher exited unexpectedly");
-                }
-                Err(dispatch_err) => {
-                    tracing::error!(
-                        target: "telegram",
-                        "dispatcher task failed: {}",
-                        dispatch_err
-                    );
-                }
-            }
-        }
-    }
+    };
+    // Telegram request errors can include the token in a URL.
+    result.map_err(|_| "Telegram dispatcher could not initialize".to_owned())
 }
 
-/// Central message handler — dispatches commands and regular messages.
+/// Central message handler.
 async fn handle_message(
     bot: Bot,
     msg: Message,
@@ -364,25 +373,39 @@ async fn handle_message(
     sessions: Sessions,
     services: BotChatServices,
     rate_limiter: RateLimiter,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let result = dispatch_message(
-        &bot,
-        &msg,
-        &config,
-        &rate_limiter,
-        &TelegramMessageHandler {
-            bot: &bot,
-            sessions: &sessions,
-            services: &services,
-        },
-    )
-    .await;
-    match result {
-        Err(error) if error.is::<BotChatUnavailable>() => {
-            send_text(&bot, msg.chat.id, msg.thread_id, error.to_string()).await?;
-            Ok(())
+    ingress: BotIngress,
+) -> HandlerResult {
+    let Some(_work) = ingress.admit("Telegram message") else {
+        return Ok(());
+    };
+    let reply = AssertUnwindSafe(async {
+        let result = dispatch_message(
+            &bot,
+            &msg,
+            &config,
+            &rate_limiter,
+            &TelegramMessageHandler {
+                bot: &bot,
+                sessions: &sessions,
+                services: &services,
+            },
+        )
+        .await;
+        match result {
+            Err(error) if error.is::<BotChatUnavailable>() => {
+                send_text(&bot, msg.chat.id, msg.thread_id, error.to_string()).await?;
+                Ok(())
+            }
+            result => result,
         }
-        result => result,
+    })
+    .catch_unwind()
+    .await;
+    match reply {
+        Ok(result) => result,
+        Err(_) => {
+            Err("Telegram message handler panicked. External reply delivery is uncertain.".into())
+        }
     }
 }
 
@@ -775,6 +798,8 @@ async fn reply_bound(
             tracing::warn!(target: "telegram", "Chat generation failed: {error}");
             let feedback = if error.to_string().contains("chat_turn_busy") {
                 "Another chat is in progress. Send a new message after it finishes."
+            } else if error.to_string().contains("chat_shutting_down") {
+                "Kokoro Engine is shutting down."
             } else {
                 "Kokoro Engine could not complete this chat. Check the client for details."
             };
@@ -1368,6 +1393,7 @@ mod tests {
         let services = BotChatServices::new(None, None, None, None, Arc::new(|_: BotEvent| Ok(())));
         let sessions = Sessions::default();
         let limiter = RateLimiter::default();
+        let ingress = BotIngress::for_test();
         for (chat, id, message) in [(456, 1, "hello"), (123, 2, "/start"), (123, 3, "voice")] {
             handle_message(
                 bot.clone(),
@@ -1376,6 +1402,7 @@ mod tests {
                 sessions.clone(),
                 services.clone(),
                 limiter.clone(),
+                ingress.clone(),
             )
             .await
             .unwrap();
@@ -1519,7 +1546,12 @@ mod tests {
         let handler = RecordingMessageHandler::new().await;
         let (bot, telegram) = local_bot().await;
         let limiter = RateLimiter::default();
-        let service = crate::telegram::TelegramService::new(TelegramConfig::default());
+        let lifecycle = crate::lifecycle::AppLifecycle::new();
+        let service = crate::telegram::TelegramService::new(
+            TelegramConfig::default(),
+            lifecycle.scope(crate::lifecycle::TaskStage::Work, "Telegram"),
+            lifecycle.scope(crate::lifecycle::TaskStage::Service, "Telegram"),
+        );
         for (ids, chat, id, input, expected_calls) in [
             (vec![123], 123, 1, "hello", 1),
             (vec![-1001234567890], 123, 2, "/new", 1),

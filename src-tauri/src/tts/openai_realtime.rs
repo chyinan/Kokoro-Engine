@@ -9,10 +9,10 @@ use futures::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -25,6 +25,7 @@ pub const DEFAULT_REALTIME_VOICE: &str = "marin";
 pub const REALTIME_PCM_SAMPLE_RATE: u32 = 24_000;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 const HANDSHAKE_RETRIES: usize = 1;
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -33,17 +34,13 @@ const BASE_TTS_INSTRUCTIONS: &str = "Read the user's text aloud faithfully. Pres
 
 type RealtimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type RealtimeReader = futures::stream::SplitStream<RealtimeSocket>;
+type RealtimeWriter = Arc<AsyncMutex<Option<futures::stream::SplitSink<RealtimeSocket, Message>>>>;
 
 #[derive(Clone)]
 struct ActiveConnection {
     connection_id: String,
     response_id: String,
-    writer: mpsc::UnboundedSender<WriterCommand>,
-}
-
-enum WriterCommand {
-    Send(Value),
-    Close,
+    writer: RealtimeWriter,
 }
 
 struct RealtimeStreamState {
@@ -53,7 +50,7 @@ struct RealtimeStreamState {
     request_id: String,
     connection_id: String,
     response_id: String,
-    writer: mpsc::UnboundedSender<WriterCommand>,
+    writer: RealtimeWriter,
     active_connections: Arc<Mutex<HashMap<String, ActiveConnection>>>,
     received_audio_bytes: usize,
     finished: bool,
@@ -282,30 +279,8 @@ impl OpenAIRealtimeTtsProvider {
 
         let connection_id = Uuid::new_v4().to_string();
         let (writer_sink, reader) = socket.split();
-        let (writer, mut writer_rx) = mpsc::unbounded_channel::<WriterCommand>();
-        tokio::spawn(async move {
-            let mut sink = writer_sink;
-            while let Some(command) = writer_rx.recv().await {
-                match command {
-                    WriterCommand::Send(event) => {
-                        if sink
-                            .send(Message::Text(event.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    WriterCommand::Close => {
-                        let _ = sink.send(Message::Close(None)).await;
-                        break;
-                    }
-                }
-            }
-            let _ = sink.close().await;
-        });
-
-        self.active_connections.lock().await.insert(
+        let writer = Arc::new(AsyncMutex::new(Some(writer_sink)));
+        self.active_connections.lock().unwrap().insert(
             request_id.to_string(),
             ActiveConnection {
                 connection_id: connection_id.clone(),
@@ -459,13 +434,9 @@ impl TtsProvider for OpenAIRealtimeTtsProvider {
     }
 
     async fn cancel_request(&self, request_id: &str) {
-        let active = self.active_connections.lock().await.remove(request_id);
+        let active = self.active_connections.lock().unwrap().remove(request_id);
         if let Some(active) = active {
-            let _ = active.writer.send(WriterCommand::Send(json!({
-                "type": "response.cancel",
-                "response_id": active.response_id
-            })));
-            let _ = active.writer.send(WriterCommand::Close);
+            close_realtime_writer(&active.writer, Some(&active.response_id)).await;
         }
     }
 }
@@ -665,7 +636,7 @@ async fn next_realtime_chunk(
     let event = match next_reader_event(&mut state.reader, &mut state.cancel).await {
         Ok(event) => event,
         Err(error) => {
-            state.finish().await;
+            state.finish(true).await;
             state.finished = true;
             return Some((Err(error), state));
         }
@@ -675,7 +646,7 @@ async fn next_realtime_chunk(
         Some("response.output_audio.delta") => {
             if let Some(event_response_id) = event.get("response_id").and_then(Value::as_str) {
                 if event_response_id != state.response_id {
-                    state.finish().await;
+                    state.finish(false).await;
                     state.finished = true;
                     return Some((
                         Err(TtsError::SynthesisFailed(
@@ -692,7 +663,7 @@ async fn next_realtime_chunk(
             let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    state.finish().await;
+                    state.finish(false).await;
                     state.finished = true;
                     return Some((
                         Err(TtsError::SynthesisFailed(
@@ -747,7 +718,7 @@ async fn next_realtime_chunk(
         )),
         Some("error") => {
             let error = parse_realtime_error(&event);
-            state.finish().await;
+            state.finish(false).await;
             state.finished = true;
             Some((Err(error), state))
         }
@@ -755,7 +726,7 @@ async fn next_realtime_chunk(
             let response = event.get("response").cloned().unwrap_or(Value::Null);
             let returned_id = response.get("id").and_then(Value::as_str);
             if returned_id.is_some_and(|id| id != state.response_id) {
-                state.finish().await;
+                state.finish(false).await;
                 state.finished = true;
                 return Some((
                     Err(TtsError::SynthesisFailed(
@@ -796,7 +767,7 @@ async fn next_realtime_chunk(
                     "Realtime response ended with unexpected status '{status}'"
                 ))),
             };
-            state.finish().await;
+            state.finish(false).await;
             state.finished = true;
             result
                 .map(|error| Some((Err(error), state)))
@@ -814,15 +785,51 @@ async fn next_realtime_chunk(
 }
 
 impl RealtimeStreamState {
-    async fn finish(&self) {
-        let mut connections = self.active_connections.lock().await;
+    fn remove_active(&self) {
+        let mut connections = self.active_connections.lock().unwrap();
         if connections
             .get(&self.request_id)
             .is_some_and(|active| active.connection_id == self.connection_id)
         {
             connections.remove(&self.request_id);
         }
-        let _ = self.writer.send(WriterCommand::Close);
+    }
+
+    async fn finish(&self, cancel: bool) {
+        self.remove_active();
+        close_realtime_writer(&self.writer, cancel.then_some(self.response_id.as_str())).await;
+    }
+}
+
+impl Drop for RealtimeStreamState {
+    fn drop(&mut self) {
+        self.remove_active();
+    }
+}
+
+async fn close_realtime_writer(writer: &RealtimeWriter, response_id: Option<&str>) {
+    let mut writer = writer.lock().await;
+    let Some(mut socket) = writer.take() else {
+        return;
+    };
+    let close = async {
+        if let Some(response_id) = response_id {
+            socket
+                .send(Message::Text(
+                    json!({
+                        "type": "response.cancel",
+                        "response_id": response_id,
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await?;
+        }
+        socket.send(Message::Close(None)).await?;
+        socket.close().await
+    };
+    if !matches!(tokio::time::timeout(CLOSE_TIMEOUT, close).await, Ok(Ok(()))) {
+        tracing::warn!(target: "tts", "Could not confirm Realtime WebSocket close. Remote response outcome is uncertain.");
     }
 }
 

@@ -721,6 +721,11 @@ impl ExternalTurn {
         let previous_metadata: Option<Option<String>> = sqlx::query_scalar(
             "SELECT metadata FROM conversation_messages WHERE conversation_id=? AND role='user' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?"
         ).bind(&target.conversation_id).bind(&save_id).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        let tool_effects_pending = previous_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.as_deref())
+            .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+            .is_some_and(|metadata| metadata["external_tool_effects_pending"] == true);
         let metadata = previous_metadata.unwrap_or_else(|| metadata.map(|value| value.to_string()));
         let saved = state
             .save_external_messages_locked(
@@ -802,6 +807,11 @@ impl ExternalTurn {
                 previous_execution = pending.execution;
                 Some((pending.text, pending.translation))
             } else {
+                if tool_effects_pending {
+                    return Err(KokoroError::Chat(
+                        "chat_external_tool_effect_uncertain: The previous attempt may have produced tool side effects. No reply was saved.".into(),
+                    ));
+                }
                 return Err(KokoroError::Chat(
                     "This request has already started and has no saved reply.".into(),
                 ));
@@ -828,6 +838,27 @@ impl ExternalTurn {
             memory_ticket,
             request_id,
         })
+    }
+
+    /// A replay can recover an exact saved reply, but must expose the ambiguity
+    /// of an interrupted attempt that might already have affected another system.
+    pub(crate) async fn mark_tool_dispatch(&self) -> Result<(), String> {
+        self.scope
+            .ensure_owner_current()
+            .map_err(|error| error.to_string())?;
+        let updated = sqlx::query(
+            "UPDATE conversation_messages SET metadata = json_set(metadata, '$.external_tool_effects_pending', json('true'))
+             WHERE id = ? AND conversation_id = ? AND role = 'user'",
+        )
+        .bind(self.user_message_id)
+        .bind(&self.target.conversation_id)
+        .execute(&self.scope.db)
+        .await
+        .map_err(|error| format!("Could not record the external tool attempt: {error}"))?;
+        if updated.rows_affected() == 0 {
+            return Err("The external tool attempt has no saved request".into());
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1069,6 +1100,30 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn external_replay_reports_uncertain_tool_effects_until_reply_is_saved() {
+        let state = state().await;
+        let turn = external_turn(&state, "tool-effects", "request").await;
+        turn.mark_tool_dispatch().await.unwrap();
+
+        let replay = ExternalTurn::begin(
+            &state,
+            "default",
+            "tool-effects".into(),
+            "request".into(),
+            "request",
+            false,
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(KokoroError::Chat(message)) if message.contains("chat_external_tool_effect_uncertain"))
+        );
+
+        turn.save_reply(&state, "saved reply", None).await.unwrap();
+        let replay = external_turn(&state, "tool-effects", "request").await;
+        assert_eq!(replay.previous_reply, Some(("saved reply".into(), None)));
     }
 
     async fn desktop_turn(state: &AIOrchestrator, label: &str) -> u64 {

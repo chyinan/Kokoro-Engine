@@ -505,6 +505,7 @@ impl Default for DesktopSelection {
 
 #[derive(Clone)]
 pub struct AIOrchestrator {
+    pub(crate) lifecycle: crate::lifecycle::AppLifecycle,
     pub selection: Arc<DesktopSelection>,
     pub(crate) owners: Arc<crate::chat::ownership::RuntimeOwners>,
     pub db: SqlitePool,
@@ -553,9 +554,16 @@ pub struct AIOrchestrator {
 
 impl AIOrchestrator {
     pub async fn new(db_url: &str) -> Result<Self> {
+        Self::new_with_lifecycle(db_url, crate::lifecycle::AppLifecycle::new()).await
+    }
+
+    pub(crate) async fn new_with_lifecycle(
+        db_url: &str,
+        lifecycle: crate::lifecycle::AppLifecycle,
+    ) -> Result<Self> {
         // Create database if it doesn't exist
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?.create_if_missing(true);
-        Self::with_connect_options(options).await
+        Self::with_connect_options(options, lifecycle).await
     }
 
     /// Test-only constructor for exercising orphan inserts with SQLite foreign
@@ -565,11 +573,14 @@ impl AIOrchestrator {
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?
             .create_if_missing(true)
             .foreign_keys(fk_on);
-        Self::with_connect_options(options).await
+        Self::with_connect_options(options, crate::lifecycle::AppLifecycle::new()).await
     }
 
     /// Shared constructor body so tests can tweak connection options.
-    async fn with_connect_options(options: sqlx::sqlite::SqliteConnectOptions) -> Result<Self> {
+    async fn with_connect_options(
+        options: sqlx::sqlite::SqliteConnectOptions,
+        lifecycle: crate::lifecycle::AppLifecycle,
+    ) -> Result<Self> {
         let pool = SqlitePool::connect_with(options).await?;
 
         // Run all database migrations
@@ -596,6 +607,7 @@ impl AIOrchestrator {
         }
 
         Ok(Self {
+            lifecycle,
             selection: Arc::default(),
             owners: Arc::default(),
             db: pool,
@@ -910,6 +922,7 @@ impl AIOrchestrator {
             cadence: self.external_memory.clone(),
             owners: self.owners.clone(),
             db: self.db.clone(),
+            shutdown: self.chat_memory_work().token(),
         })
     }
 
@@ -930,7 +943,13 @@ impl AIOrchestrator {
             cadence: self.external_memory.clone(),
             owners: self.owners.clone(),
             db: self.db.clone(),
+            shutdown: self.chat_memory_work().token(),
         })
+    }
+
+    pub(crate) fn chat_memory_work(&self) -> crate::lifecycle::TaskScope {
+        self.lifecycle
+            .scope(crate::lifecycle::TaskStage::Work, "chat memory")
     }
 
     pub(crate) async fn memory_progress_for(
@@ -1203,9 +1222,16 @@ impl AIOrchestrator {
         let memory_manager = self.memory_manager.clone();
         let summary_db = self.db.clone();
         let cid = target.character_id.clone();
-        tokio::spawn(async move {
-            let database_operation_guard = acquire_database_operation_read_guard().await;
-            if !database_operation_guard.is_current() {
+        let tasks = self.chat_memory_work();
+        let _ = tasks.spawn_durable("conversation summary", async move {
+            use crate::chat::ownership::until_memory_shutdown;
+
+            let Some(database_guard) =
+                until_memory_shutdown(Some(&scope), acquire_database_operation_read_guard()).await
+            else {
+                return;
+            };
+            if !database_guard.is_current() {
                 tracing::info!(
                     target: "context",
                     "discarding conversation summary started before a database restore"
@@ -1221,39 +1247,28 @@ impl AIOrchestrator {
             {
                 Ok(Some(task)) => task,
                 Ok(None) => return,
-                Err(e) => {
-                    tracing::error!(
-                        target: "context",
-                        "[Context] Failed to prepare conversation summary task for '{}': {}",
-                        conversation_id, e
-                    );
+                Err(error) => {
+                    tracing::error!(target: "context", "Failed to prepare summary for '{conversation_id}': {error}");
                     return;
                 }
             };
 
-            if let Err(e) = memory_manager
-                .mark_conversation_summary_running(task.record_id)
-                .await
-            {
-                tracing::error!(
-                    target: "context",
-                    "[Context] Failed to mark summary task running for '{}': {}",
-                    conversation_id, e
-                );
+            if let Err(error) = memory_manager.mark_conversation_summary_running(task.record_id).await {
+                tracing::error!(target: "context", "Failed to start summary for '{conversation_id}': {error}");
                 return;
             }
-
             drop(commit_guard);
             let prompt = build_conversation_summary_prompt(&task.transcript, &summary_language);
-
-            let summary_result = tokio::time::timeout(
-                std::time::Duration::from_secs(CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS),
-                provider.chat(vec![user_text_message(prompt)], None),
-            )
-            .await;
+            let summary = until_memory_shutdown(
+                Some(&scope),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS),
+                    provider.chat(vec![user_text_message(prompt)], None),
+                ),
+            ).await;
             let Some(_commit_guard) = scope.admit().await else {
-                // Technical task cleanup only: revocation must not leave a running
-                // row blocking the next authorized summary after memory is re-enabled.
+                // Clear a running row after cancellation/revocation so it cannot
+                // block a future summary.
                 let _ = sqlx::query(
                     "DELETE FROM conversation_summaries WHERE id=? AND status='running'",
                 )
@@ -1262,41 +1277,25 @@ impl AIOrchestrator {
                 .await;
                 return;
             };
-            match summary_result {
+            let Some(summary) = summary else {
+                return;
+            };
+            let written = match summary {
                 Ok(Ok(text)) if !text.trim().is_empty() => {
-                    let summary = text.trim().to_string();
-                    if let Err(e) = memory_manager
-                        .complete_conversation_summary(task.record_id, &summary)
-                        .await
-                    {
-                        tracing::error!(
-                            target: "context",
-                            "[Context] Failed to persist conversation summary for '{}': {}",
-                            conversation_id, e
-                        );
-                    }
+                    memory_manager.complete_conversation_summary(task.record_id, text.trim()).await
                 }
-                Ok(Ok(_)) => {
-                    let _ = memory_manager
-                        .fail_conversation_summary(
-                            task.record_id,
-                            "summary provider returned empty output",
-                        )
-                        .await;
-                }
-                Ok(Err(e)) => {
-                    let _ = memory_manager
-                        .fail_conversation_summary(task.record_id, &e.to_string())
-                        .await;
-                }
-                Err(_) => {
-                    let _ = memory_manager
-                        .fail_conversation_summary(
-                            task.record_id,
-                            "conversation summary provider timed out",
-                        )
-                        .await;
-                }
+                Ok(Ok(_)) => memory_manager
+                    .fail_conversation_summary(task.record_id, "summary provider returned empty output")
+                    .await,
+                Ok(Err(error)) => memory_manager
+                    .fail_conversation_summary(task.record_id, &error.to_string())
+                    .await,
+                Err(_) => memory_manager
+                    .fail_conversation_summary(task.record_id, "conversation summary provider timed out")
+                    .await,
+            };
+            if let Err(error) = written {
+                tracing::error!(target: "context", "Failed to persist summary for '{conversation_id}': {error}");
             }
         });
     }

@@ -23,6 +23,7 @@ pub async fn init_db(_state: State<'_, AIOrchestrator>) -> Result<String, Kokoro
 pub async fn test_vector_store(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<DbTestResult>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "database", "test_vector_store")?;
     // Memories only exist for a real character instance, so the diagnostic runs
     // against the first one instead of inventing an owner.
     let character_id: Option<String> =

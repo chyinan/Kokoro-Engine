@@ -1,26 +1,71 @@
 // pattern: Imperative Shell
 //! Vision Watcher — background loop that captures screen and analyzes with VLM.
 
-use crate::ipc::{events::{ProactiveTrigger, VisionObservationEvent, VisionStatus, VisionStatusChanged}, wire::emit};
+use crate::ipc::{
+    events::{ProactiveTrigger, VisionObservationEvent, VisionStatus, VisionStatusChanged},
+    wire::emit,
+};
+use crate::lifecycle::{AppLifecycle, TaskHandle, TaskScope, TaskStage};
 use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::messages::user_message_with_images;
 use crate::llm::provider::{LlmParams, LlmProvider};
 use crate::llm::service::LlmService;
-use crate::vision::capture::{capture_screen_with_options, has_significant_change, CaptureOptions};
+use crate::vision::capture::{
+    capture_screen_with_options, has_significant_change, CaptureOptions, CapturedImage,
+};
 use crate::vision::config::VisionConfig;
 use crate::vision::context::VisionContext;
 use crate::vision::context::{AnalysisDispatch, VisionFrame};
+use futures::FutureExt;
 use reqwest::Client;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OnceCell, RwLock};
+use tokio_util::sync::CancellationToken;
+
+struct VisionRun {
+    stop: CancellationToken,
+    producer: Mutex<TaskHandle<()>>,
+    result: OnceCell<Result<(), String>>,
+}
+
+impl VisionRun {
+    fn is_running(&self) -> bool {
+        self.result.get().is_none()
+            && self
+                .producer
+                .try_lock()
+                .map_or(true, |task| !task.is_finished())
+    }
+
+    async fn joined(&self) -> Result<(), String> {
+        self.result
+            .get_or_init(|| async {
+                self.producer
+                    .lock()
+                    .await
+                    .join()
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .clone()
+    }
+}
+
+const STOP_WAIT: Duration = Duration::from_secs(2);
 
 /// Shared handle to control the watcher loop.
 #[derive(Clone)]
 pub struct VisionWatcher {
-    pub running: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     producer_generation: Arc<AtomicU64>,
+    scope: TaskScope,
+    run: Arc<Mutex<Option<Arc<VisionRun>>>>,
     pub config: Arc<RwLock<VisionConfig>>,
     pub context: VisionContext,
     pub llm_service: Option<LlmService>,
@@ -29,9 +74,15 @@ pub struct VisionWatcher {
 
 impl VisionWatcher {
     pub fn new(config: VisionConfig) -> Self {
+        Self::new_with_scope(config, AppLifecycle::new().scope(TaskStage::Work, "vision"))
+    }
+
+    pub(crate) fn new_with_scope(config: VisionConfig, scope: TaskScope) -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
             producer_generation: Arc::new(AtomicU64::new(0)),
+            scope,
+            run: Arc::new(Mutex::new(None)),
             config: Arc::new(RwLock::new(config)),
             context: VisionContext::new(),
             llm_service: None,
@@ -54,59 +105,65 @@ impl VisionWatcher {
 
     /// Start the background producer loop. VLM analysis is dispatched asynchronously
     /// with at most one in-flight request and newest-only pending frame state.
-    pub fn start(&self, app_handle: AppHandle) {
-        if self
-            .running
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_err()
-        {
+    pub(crate) async fn start(&self, app_handle: AppHandle) -> Result<(), String> {
+        let _start = self
+            .scope
+            .lease("watcher-start")
+            .map_err(|error| error.to_string())?;
+        let mut slot = self.run.lock().await;
+        if let Some(run) = slot.as_ref().filter(|run| run.is_running()) {
+            if run.stop.is_cancelled() {
+                return Err("Vision watcher is still stopping".into());
+            }
             tracing::info!(target: "vision", "Watcher already running");
-            return;
+            return Ok(());
         }
+        self.running.store(true, Ordering::Release);
         let producer_generation = self.producer_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let watcher = self.clone();
+        let stop = self.scope.token().child_token();
+        let worker_stop = stop.clone();
 
-        tokio::spawn(async move {
+        let result = self.scope.spawn_durable("watcher", async move {
+            watcher.context.clear_auto_state_on_disable().await;
+            if worker_stop.is_cancelled() || !watcher.is_producer_current(producer_generation) {
+                return;
+            }
             tracing::info!(target: "vision", "Watcher started");
             let _ = emit(&app_handle, VisionStatusChanged(VisionStatus::Active));
             let mut prev_screenshot: Option<Vec<u8>> = None;
             let mut last_capture_warning: Option<String> = None;
+            let mut analyses = Vec::new();
 
-            loop {
-                if !watcher.is_producer_current(producer_generation) {
-                    break;
-                }
-
+            while !worker_stop.is_cancelled() && watcher.is_producer_current(producer_generation) {
+                analyses.retain(|task: &TaskHandle<()>| !task.is_finished());
                 let config = watcher.config.read().await.clone();
                 if !config.vlm_enabled || !config.auto_vision_enabled {
                     watcher.context.clear_auto_state_on_disable().await;
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    sleep_or_stop(&worker_stop, Duration::from_secs(2)).await;
                     continue;
                 }
 
                 if watcher.context.should_pause_auto_capture().await {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    sleep_or_stop(&worker_stop, Duration::from_millis(250)).await;
                     continue;
                 }
 
+                let interval = Duration::from_secs(config.capture_interval_secs as u64);
                 let capture_options = CaptureOptions {
                     display_id: config.display_id.clone(),
                     region: config.vlm_region,
                 };
-                let captured = match capture_screen_with_options(&capture_options) {
+                let capture = watcher.capture(capture_options).await;
+                if worker_stop.is_cancelled() {
+                    break;
+                }
+                let captured = match capture {
                     Ok(image) => image,
                     Err(error) => {
                         tracing::error!(target: "vision", "Capture failed: {}", error);
                         watcher.context.set_last_error(error).await;
-                        tokio::time::sleep(std::time::Duration::from_secs(
-                            config.capture_interval_secs as u64,
-                        ))
-                        .await;
+                        sleep_or_stop(&worker_stop, interval).await;
                         continue;
                     }
                 };
@@ -131,10 +188,7 @@ impl VisionWatcher {
 
                 if !changed {
                     tracing::info!(target: "vision", "No significant change, skipping analysis");
-                    tokio::time::sleep(std::time::Duration::from_secs(
-                        config.capture_interval_secs as u64,
-                    ))
-                    .await;
+                    sleep_or_stop(&worker_stop, interval).await;
                     continue;
                 }
 
@@ -153,29 +207,50 @@ impl VisionWatcher {
                 {
                     let analysis_watcher = watcher.clone();
                     let analysis_app = app_handle.clone();
-                    tokio::spawn(async move {
+                    let analysis_stop = worker_stop.clone();
+                    let Ok(task) = watcher.scope.spawn("analysis", async move {
                         run_analysis_chain(
                             analysis_watcher,
                             analysis_app,
                             frame,
                             generation,
                             producer_generation,
+                            analysis_stop,
                         )
                         .await;
-                    });
+                    }) else {
+                        break;
+                    };
+                    analyses.push(task);
                 }
 
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    config.capture_interval_secs as u64,
-                ))
-                .await;
+                sleep_or_stop(&worker_stop, interval).await;
             }
 
+            worker_stop.cancel();
+            for mut task in analyses {
+                let _ = task.join().await;
+            }
             tracing::info!(target: "vision", "Watcher stopped");
             if watcher.is_producer_current(producer_generation) {
-                let _ = emit(&app_handle, VisionStatusChanged(VisionStatus::Inactive));
+                watcher.running.store(false, Ordering::Release);
+                watcher.context.clear_auto_state_on_disable().await;
             }
+            let _ = emit(&app_handle, VisionStatusChanged(VisionStatus::Inactive));
         });
+        let producer = match result {
+            Ok(task) => task,
+            Err(error) => {
+                self.running.store(false, Ordering::Release);
+                return Err(error.to_string());
+            }
+        };
+        *slot = Some(Arc::new(VisionRun {
+            stop,
+            producer: Mutex::new(producer),
+            result: OnceCell::new(),
+        }));
+        Ok(())
     }
 
     fn is_producer_current(&self, generation: u64) -> bool {
@@ -183,19 +258,145 @@ impl VisionWatcher {
             && self.producer_generation.load(Ordering::Acquire) == generation
     }
 
-    /// Stop the background vision loop.
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
-        let stopped_generation = self.producer_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let producer_generation = self.producer_generation.clone();
-        let ctx = self.context.clone();
-        let context_generation = ctx.invalidate_auto_generation();
-        tokio::spawn(async move {
-            if producer_generation.load(Ordering::Acquire) == stopped_generation {
-                ctx.clear_auto_state_if_current(context_generation).await;
-            }
-        });
+    /// Stop capture and inference and confirm their run has finished before restarting.
+    pub(crate) async fn stop(&self) -> Result<(), String> {
+        tokio::time::timeout(STOP_WAIT, self.stop_and_wait())
+            .await
+            .map_err(|_| "Vision watcher is still stopping; capture has not finished".to_string())?
     }
+
+    async fn stop_and_wait(&self) -> Result<(), String> {
+        let (run, context_generation) = {
+            let slot = self.run.lock().await;
+            self.running.store(false, Ordering::Release);
+            self.producer_generation.fetch_add(1, Ordering::SeqCst);
+            let context_generation = self.context.invalidate_auto_generation();
+            if let Some(run) = slot.as_ref() {
+                run.stop.cancel();
+            }
+            (slot.clone(), context_generation)
+        };
+        self.context
+            .clear_auto_state_if_current(context_generation)
+            .await;
+        let Some(run) = run else {
+            return Ok(());
+        };
+        let outcome = run.joined().await;
+        let mut slot = self.run.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &run))
+        {
+            *slot = None;
+        }
+        outcome
+    }
+
+    pub(crate) async fn capture(&self, options: CaptureOptions) -> Result<CapturedImage, String> {
+        let mut task = self
+            .scope
+            .spawn_blocking("screen-capture", move || {
+                capture_screen_with_options(&options)
+            })
+            .map_err(|error| error.to_string())?;
+        task.join().await.map_err(|error| error.to_string())?
+    }
+
+    pub(crate) fn work_scope(&self) -> &TaskScope {
+        &self.scope
+    }
+}
+
+async fn sleep_or_stop(stop: &CancellationToken, duration: Duration) {
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => {},
+        _ = tokio::time::sleep(duration) => {},
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_keeps_the_old_run_owned_until_capture_ends() {
+        let watcher = VisionWatcher::new(VisionConfig::default());
+        let stop = watcher.scope.token().child_token();
+        let (release, capture_end) = tokio::sync::oneshot::channel();
+        let producer = watcher
+            .scope
+            .spawn_durable("simulated native capture", async move {
+                capture_end.await.unwrap();
+            })
+            .unwrap();
+        let run = Arc::new(VisionRun {
+            stop: stop.clone(),
+            producer: Mutex::new(producer),
+            result: OnceCell::new(),
+        });
+        *watcher.run.lock().await = Some(run.clone());
+
+        let error = watcher.stop().await.unwrap_err();
+        assert!(error.contains("still stopping"));
+        assert!(stop.is_cancelled());
+        assert!(run.is_running());
+        assert!(watcher.run.lock().await.is_some());
+
+        release.send(()).unwrap();
+        watcher.stop().await.unwrap();
+        assert!(!run.is_running());
+        assert!(watcher.run.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_panic_releases_analysis_slot_and_keeps_newest_frame() {
+        let context = VisionContext::new();
+        let frame = |id: &str| VisionFrame {
+            id: id.into(),
+            captured_at: chrono::Utc::now(),
+            jpeg_bytes: Vec::new(),
+            display_id: None,
+            region: None,
+            image_hash: id.into(),
+        };
+        let first = frame("first");
+        let AnalysisDispatch::Dispatch { generation, .. } =
+            context.submit_auto_frame(first.clone()).await
+        else {
+            panic!("the first analysis must be admitted");
+        };
+        context.submit_auto_frame(frame("newest")).await;
+
+        let failed = observe_provider_result(async { panic!("controlled provider failure") }).await;
+        assert_eq!(failed, Err("Vision analysis provider panicked".into()));
+        let completion = context
+            .finish_auto_analysis(generation, &first, failed)
+            .await;
+        assert!(!completion.recorded);
+        let newest = completion.next_frame.unwrap();
+        assert_eq!(newest.id, "newest");
+        context
+            .finish_auto_analysis(generation, &newest, Ok("next observation".into()))
+            .await;
+        assert!(matches!(
+            context.submit_auto_frame(frame("later")).await,
+            AnalysisDispatch::Dispatch { .. }
+        ));
+    }
+}
+
+// Internal provider failure must still go through finish_auto_analysis;
+// otherwise the frame queue would keep its in-flight marker indefinitely.
+async fn observe_provider_result<F>(analysis: F) -> Result<String, String>
+where
+    F: Future<Output = Result<String, String>>,
+{
+    AssertUnwindSafe(analysis)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err("Vision analysis provider panicked".into()))
 }
 
 async fn run_analysis_chain(
@@ -204,9 +405,13 @@ async fn run_analysis_chain(
     first_frame: VisionFrame,
     generation: crate::vision::context::AutoAnalysisGeneration,
     producer_generation: u64,
+    stop: CancellationToken,
 ) {
     let mut current = first_frame;
     loop {
+        if stop.is_cancelled() {
+            break;
+        }
         if !watcher.is_producer_current(producer_generation) || !watcher.auto_capture_active().await
         {
             if !watcher.is_producer_current(producer_generation) {
@@ -218,13 +423,16 @@ async fn run_analysis_chain(
 
         tracing::info!(target: "vision", "Screen changed, analyzing with VLM...");
         let config = watcher.config.read().await.clone();
-        let result = analyze_screenshot(
-            &watcher.client,
-            &config,
-            &current.jpeg_bytes,
-            watcher.llm_service.as_ref(),
-        )
-        .await;
+        let result = tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            result = observe_provider_result(analyze_screenshot(
+                &watcher.client,
+                &config,
+                &current.jpeg_bytes,
+                watcher.llm_service.as_ref(),
+            )) => result,
+        };
 
         match &result {
             Ok(description) => {
@@ -290,10 +498,9 @@ async fn emit_proactive_vision_comment(app_handle: &AppHandle) {
     let Ok(scope) = state.desktop_admission_scope().await else {
         return;
     };
-    let Some(request_id) = chat.submit_proactive_bound(
-        build_proactive_vision_instruction().into(),
-        scope.clone(),
-    ) else {
+    let Some(request_id) =
+        chat.submit_proactive_bound(build_proactive_vision_instruction().into(), scope.clone())
+    else {
         return;
     };
     let _ = emit(

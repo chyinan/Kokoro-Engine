@@ -5,6 +5,7 @@ use crate::ai::context::{database_operation_generation, AIOrchestrator, Message}
 use crate::ai::memory_event_ingress::{build_cooldown_key, MemoryIngressDecision};
 use crate::ai::memory_extractor::{self, MemoryExtractionOptions};
 use crate::imagegen::ImageGenService;
+use crate::lifecycle::{TaskScope, TaskStage};
 use crate::chat::event_payloads::{ChatEventScope, ChatImageGenError, ImageGenDone};
 use crate::llm::messages::{system_message, user_text_message};
 use crate::llm::provider::LlmProvider;
@@ -94,20 +95,34 @@ impl DesktopPostCommit {
         if self.memory.is_some() {
             let mut memory = self.clone();
             memory.background = None;
-            memory.spawn(state.clone(), events.clone());
+            memory.spawn(
+                state.chat_memory_work(),
+                "desktop memory dispatch",
+                state.clone(),
+                events.clone(),
+            );
         }
         if self.background.is_some() {
             let mut background = self;
             background.memory = None;
-            background.spawn(state, events);
+            let images = state.lifecycle.scope(TaskStage::Work, "chat image");
+            background.spawn(images, "background image", state, events);
         }
     }
 
-    fn spawn(self, state: Arc<AIOrchestrator>, events: ChatEvents) {
-        tokio::spawn(async move {
+    fn spawn(
+        self,
+        tasks: TaskScope,
+        name: &'static str,
+        state: Arc<AIOrchestrator>,
+        events: ChatEvents,
+    ) {
+        let worker_tasks = tasks.clone();
+        let shutdown = tasks.token();
+        let _ = tasks.spawn(name, async move {
             // Memory operations acquire their own database guards. Holding one
             // here across a nested acquisition can deadlock a queued restore.
-            if !self.is_current(&state).await {
+            if shutdown.is_cancelled() || !self.is_current(&state).await {
                 return;
             }
             if let Some(work) = self.memory.as_ref().filter(|_| self.memory_current(&state)) {
@@ -131,9 +146,10 @@ impl DesktopPostCommit {
                 for (trigger, structured) in extractions {
                     let task = self.clone();
                     let state = state.clone();
-                    tokio::spawn(async move {
+                    let shutdown = shutdown.clone();
+                    let _ = worker_tasks.spawn_durable("desktop memory extraction", async move {
                         let work = task.memory.as_ref().expect("memory task");
-                        if !task.memory_current(&state) || !task.is_current(&state).await {
+                        if shutdown.is_cancelled() || !task.memory_current(&state) || !task.is_current(&state).await {
                             return;
                         }
                         let started = std::time::Instant::now();
@@ -174,9 +190,10 @@ impl DesktopPostCommit {
                 {
                     let task = self.clone();
                     let state = state.clone();
-                    tokio::spawn(async move {
+                    let shutdown = shutdown.clone();
+                    let _ = worker_tasks.spawn_durable("desktop memory consolidation", async move {
                         let work = task.memory.as_ref().expect("memory task");
-                        if !task.memory_current(&state) || !task.is_current(&state).await {
+                        if shutdown.is_cancelled() || !task.memory_current(&state) || !task.is_current(&state).await {
                             return;
                         }
                         let _ = state
@@ -210,16 +227,15 @@ impl DesktopPostCommit {
                 if !self.is_current(&state).await {
                     return;
                 }
-                let result = self
-                    .provider
-                    .chat(
+                let Some(result) = shutdown.run_until_cancelled(self.provider.chat(
                         vec![
                             system_message(crate::ai::prompts::BG_IMAGE_ANALYZER_PROMPT.to_owned()),
                             user_text_message(format!("Character reply: {}", background.reply)),
                         ],
                         None,
-                    )
-                    .await;
+                    )).await else {
+                    return;
+                };
                 let text = match result {
                     Ok(text) => text,
                     Err(error) => {
@@ -246,11 +262,12 @@ impl DesktopPostCommit {
                 let Some(prompt) = analysis.image_prompt.filter(|text| !text.is_empty()) else {
                     return;
                 };
-                match background
-                    .service
-                    .generate(prompt, None, None, Some(background.size))
-                    .await
-                {
+                let Some(result) = shutdown.run_until_cancelled(
+                    background.service.generate(prompt, None, None, Some(background.size)),
+                ).await else {
+                    return;
+                };
+                match result {
                     Ok(result) if self.is_current(&state).await => {
                         events.notify(ChatEvent::ImageGenerated(ImageGenDone {
                             result,

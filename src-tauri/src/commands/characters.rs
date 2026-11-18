@@ -277,6 +277,7 @@ const CHARACTER_COLUMNS: &str =
 pub async fn list_characters(
     orchestrator: State<'_, AIOrchestrator>,
 ) -> Result<Response<Vec<CharacterRecord>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "list_characters")?;
     list_characters_from_pool(&orchestrator.db).await
         .map(Response)
 }
@@ -290,6 +291,7 @@ pub async fn prepare_character_activation(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<Response<CharacterActivationToken>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "prepare_character_activation")?;
     let app_data = resolve_app_data(&app)?;
     let tts_config = crate::tts::config::load_config(&app_data.join("tts_config.json"));
     let backend = OrchestratorActivationBackend {
@@ -323,6 +325,7 @@ pub async fn commit_character_activation(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<Response<CommittedCharacterRuntime>, KokoroError> {
+    let _activation = crate::ipc::admit_operation(&app, "characters", "activation-commit")?;
     let app_data = resolve_app_data(&app)?;
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
@@ -339,6 +342,7 @@ pub async fn get_committed_character_runtime(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<Response<Option<CommittedCharacterRuntime>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "get_committed_character_runtime")?;
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
         app_data: resolve_app_data(&app)?,
@@ -393,6 +397,7 @@ pub async fn create_character(
     request: CreateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "create_character")?;
     create_character_in_pool(&orchestrator.db, request).await
 }
 
@@ -404,6 +409,7 @@ pub async fn create_character_with_avatar(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "create_character_with_avatar")?;
     let app_data = resolve_app_data(&app)?;
     create_character_with_avatar_in_pool(&orchestrator.db, &app_data, request, &avatar_bytes).await
 }
@@ -416,6 +422,7 @@ pub async fn update_character_with_avatar(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "update_character_with_avatar")?;
     let app_data = resolve_app_data(&app)?;
     update_character_with_avatar_in_pool(&orchestrator.db, &app_data, request, &avatar_bytes).await
 }
@@ -427,6 +434,7 @@ pub async fn update_character(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "update_character")?;
     let app_data = resolve_app_data(&app)?;
     update_character_with_resources_in_pool(&orchestrator.db, &app_data, request).await
 }
@@ -438,6 +446,7 @@ pub async fn delete_character(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "delete_character")?;
     let _memory_commit = orchestrator.owners.memory_commit.write().await;
     let _selection = orchestrator.selection.conversation_switch_lock.lock().await;
     let app_data = resolve_app_data(&app)?;
@@ -453,6 +462,7 @@ pub async fn duplicate_character(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "duplicate_character")?;
     let app_data = resolve_app_data(&app)?;
     duplicate_character_with_resources_in_pool(&orchestrator.db, &app_data, request).await
 }
@@ -464,6 +474,7 @@ pub async fn restore_character_defaults(
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "restore_character_defaults")?;
     let app_data = resolve_app_data(&app)?;
     restore_character_defaults_with_resources_in_pool(&orchestrator.db, &app_data, request).await
 }
@@ -483,6 +494,7 @@ pub async fn instantiate_character_template(
     orchestrator: State<'_, AIOrchestrator>,
     catalog: State<'_, CharacterCatalog>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "instantiate_character_template")?;
     instantiate_character_template_in_pool(&orchestrator.db, &catalog, request).await
 }
 
@@ -493,6 +505,7 @@ pub async fn reconcile_character_template(
     orchestrator: State<'_, AIOrchestrator>,
     catalog: State<'_, CharacterCatalog>,
 ) -> Result<Response<ReconcileCharacterTemplatePreview>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "reconcile_character_template")?;
     reconcile_character_template_from_pool(&orchestrator.db, &catalog, request).await
         .map(Response)
 }
@@ -505,6 +518,7 @@ pub async fn apply_character_template_reconciliation(
     catalog: State<'_, CharacterCatalog>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "apply_character_template_reconciliation")?;
     let app_data = resolve_app_data(&app)?;
     apply_character_template_reconciliation_with_resources_in_pool(
         &orchestrator.db,

@@ -62,6 +62,11 @@ async fn stdio_launches_drains_stderr_pages_tools_and_refreshes_actions() {
     }
     config.command = executable;
     config.args = vec![path.to_string_lossy().into_owned()];
+    let pid_file = dir.path().join("connected.pid");
+    config.env.insert(
+        "KOKORO_MCP_TEST_PID_FILE".into(),
+        pid_file.to_string_lossy().into_owned(),
+    );
     let parent_path = std::env::var_os("PATH").unwrap_or_default();
     let child_path = std::env::join_paths(
         std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&parent_path)),
@@ -117,6 +122,56 @@ async fn stdio_launches_drains_stderr_pages_tools_and_refreshes_actions() {
         .await
         .unwrap();
     assert!(!client.is_connected());
+    assert!(registry.read().await.list_actions().is_empty());
+    assert!(fixture_process_has_exited(&pid_file).await);
+}
+
+async fn fixture_process_has_exited(pid_file: &std::path::Path) -> bool {
+    let pid = std::fs::read_to_string(pid_file).unwrap();
+    tokio::process::Command::new("node")
+        .args(["-e", "try { process.kill(Number(process.argv[1]), 0); process.exitCode = 1 } catch (e) { process.exitCode = e.code === 'ESRCH' ? 0 : 2 }", &pid])
+        .status()
+        .await
+        .unwrap()
+        .success()
+}
+
+#[tokio::test]
+async fn shutdown_during_stdio_negotiation_reaps_the_child() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-stdio.mjs");
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("starting.pid");
+    let mut config = config("starting child", "stdio", None);
+    config.command = "node".into();
+    config.args = vec![fixture.to_string_lossy().into_owned()];
+    config.env.insert(
+        "KOKORO_MCP_TEST_PID_FILE".into(),
+        pid_file.to_string_lossy().into_owned(),
+    );
+    config
+        .env
+        .insert("KOKORO_MCP_TEST_HOLD_STARTUP".into(), "true".into());
+    let manager = Arc::new(Mutex::new(McpManager::new(
+        dir.path().join("mcp.json").to_str().unwrap(),
+    )));
+    let registry = Arc::new(RwLock::new(ActionRegistry::new()));
+    bridge::add_server(&manager, &registry, config)
+        .await
+        .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while !pid_file.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(manager.lock().await.list_status()[0].status, "connecting");
+    tokio::time::timeout(TEST_TIMEOUT, bridge::shutdown(&manager, &registry))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(fixture_process_has_exited(&pid_file).await);
     assert!(registry.read().await.list_actions().is_empty());
 }
 
@@ -314,7 +369,7 @@ async fn streamable_http_distinguishes_results_and_never_replays_expired_calls()
             .await,
         Err(McpRequestError::Disconnected)
     ));
-    client.shutdown().await;
+    client.shutdown().await.unwrap();
     let requests = requests.lock().unwrap();
     assert!(requests
         .iter()
@@ -369,6 +424,7 @@ fn sse_response(first: Option<&str>, receiver: mpsc::UnboundedReceiver<String>) 
 #[tokio::test]
 async fn legacy_sse_uses_endpoint_and_cancels_an_abandoned_call() {
     let stream = Arc::new(BlockingMutex::new(None::<mpsc::UnboundedSender<String>>));
+    let controls = stream.clone();
     let (sent, mut received) = mpsc::unbounded_channel::<Value>();
     let for_get = stream.clone();
     let get = warp::get().and(warp::path!("nested" / "sse")).map(move || {
@@ -427,8 +483,43 @@ async fn legacy_sse_uses_endpoint_and_cancels_an_abandoned_call() {
     call.abort();
     let cancel = get_rpc(&mut received, "notifications/cancelled").await;
     assert_eq!(cancel["params"]["requestId"], tool_request["id"]);
-    client.shutdown().await;
-    assert!(!client.is_connected());
+
+    let admitted = client.clone();
+    let reply = tokio::spawn(async move {
+        admitted
+            .call_tool(revision, "wait", Default::default())
+            .await
+    });
+    let request = get_rpc(&mut received, "tools/call").await;
+    let closing = client.clone();
+    let stop = tokio::spawn(async move { closing.shutdown().await });
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while client.is_connected() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!stop.is_finished());
+    assert!(matches!(
+        client.call_tool(revision, "wait", Default::default()).await,
+        Err(McpRequestError::Stopping)
+    ));
+    let result = rpc_reply(
+        &request,
+        json!({"content":[{"type":"text","text":"final output"}]}),
+    );
+    let sse = controls.lock().unwrap().as_ref().unwrap().clone();
+    sse.send(format!("event: message\ndata: {result}\n\n"))
+        .unwrap();
+    assert_eq!(
+        reply.await.unwrap().unwrap().content,
+        [json!({"type":"text","text":"final output"})]
+    );
+    stop.await.unwrap().unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, sse.closed())
+        .await
+        .unwrap();
 }
 
 async fn get_rpc(receiver: &mut mpsc::UnboundedReceiver<Value>, method: &str) -> Value {
@@ -547,7 +638,7 @@ async fn modern_http_negotiates_stateless_tool_notifications() {
         .list_actions()
         .iter()
         .any(|tool| tool.name == "initial"));
-    bridge::shutdown(&manager).await;
+    bridge::shutdown(&manager, &registry).await.unwrap();
 }
 
 #[tokio::test]
@@ -592,7 +683,7 @@ async fn an_unsupported_version_fails_but_a_peer_without_tools_can_connect() {
     assert!(client.is_connected());
     assert_eq!(client.tool_count(), 0);
     assert_eq!(tool_lists.load(Ordering::Relaxed), 0);
-    client.shutdown().await;
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -659,8 +750,8 @@ async fn a_completed_old_generation_cannot_replace_live_actions() {
     bridge::publish_catalog(&manager, &registry).await;
     bridge::publish_catalog(&manager, &registry).await;
     assert_eq!(registry.read().await.generation(), generation);
-    late.shutdown().await;
-    bridge::shutdown(&manager).await;
+    late.shutdown().await.unwrap();
+    bridge::shutdown(&manager, &registry).await.unwrap();
 }
 
 #[tokio::test]
@@ -717,7 +808,7 @@ async fn request_timeout_cancels_the_original_id_without_replay() {
     let cancel = get_rpc(&mut received, "notifications/cancelled").await;
     assert_eq!(cancel["params"]["requestId"], original["id"]);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    client.shutdown().await;
+    client.shutdown().await.unwrap();
     tokio::time::timeout(TEST_TIMEOUT, server)
         .await
         .unwrap()

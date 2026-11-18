@@ -1,8 +1,8 @@
 //! Publish negotiated MCP tools as actions with the existing strict approval policy.
 
 use super::{
-    client::{McpClient, McpToolResult},
-    manager::{ConnectionAttempt, McpManager, McpServerConfig},
+    client::{McpClient, McpConnectError, McpToolResult},
+    manager::{ConnectionAttempt, ConnectionError, McpManager, McpServerConfig},
 };
 use crate::{
     actions::registry::{
@@ -10,6 +10,7 @@ use crate::{
         ActionRegistry, ActionResult, ActionRiskTag,
     },
     error::KokoroError,
+    lifecycle::TaskHandle,
 };
 use async_trait::async_trait;
 use rmcp::model::JsonObject;
@@ -17,8 +18,13 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::{Arc, Weak},
+    time::Duration,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    sync::{Mutex, OnceCell, RwLock},
+    time::Instant,
+};
+use tokio_util::sync::CancellationToken;
 
 type Manager = Arc<Mutex<McpManager>>;
 type Registry = Arc<RwLock<ActionRegistry>>;
@@ -187,7 +193,6 @@ pub(super) async fn publish_catalog(manager: &Manager, registry: &Registry) {
 async fn watch_catalog(
     manager: Weak<Mutex<McpManager>>,
     registry: Weak<RwLock<ActionRegistry>>,
-    name: String,
     client: Arc<McpClient>,
 ) {
     let lifetime = client.lifetime();
@@ -214,80 +219,199 @@ async fn watch_catalog(
             changed = changes.changed() => if changed.is_err() { break; },
         }
     }
-    if let (Some(manager), Some(registry)) = (manager.upgrade(), registry.upgrade()) {
-        manager.lock().await.mark_disconnected(&name, &client);
-        publish_catalog(&manager, &registry).await;
+}
+
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone)]
+pub(super) struct ConnectionWorker {
+    stop: CancellationToken,
+    task: Arc<Mutex<TaskHandle<Result<(), String>>>>,
+    result: Arc<OnceCell<Result<(), String>>>,
+}
+
+impl ConnectionWorker {
+    pub(super) fn stop(&self) {
+        self.stop.cancel();
+    }
+
+    async fn join(&self) -> Result<(), String> {
+        self.result
+            .get_or_init(|| async {
+                self.task
+                    .lock()
+                    .await
+                    .join()
+                    .await
+                    .map_err(|error| format!("MCP connection task failed: {error}"))?
+            })
+            .await
+            .clone()
     }
 }
 
 fn spawn_attempt(
+    state: &mut McpManager,
     manager: &Manager,
     registry: &Registry,
     attempt: ConnectionAttempt,
-    previous: Option<Arc<McpClient>>,
-) {
-    let manager = manager.clone();
-    let registry = registry.clone();
-    tokio::spawn(async move {
-        if let Some(previous) = previous {
-            previous.shutdown().await;
-        }
-        if !manager.lock().await.attempt_is_current(&attempt) {
-            return;
-        }
-        let client = match attempt.connect().await {
-            Ok(client) => Arc::new(client),
-            Err(error) => {
-                let message = match error {
-                    KokoroError::Config(message) | KokoroError::ExternalService(message) => message,
-                    _ => error.to_string(),
-                };
+) -> Result<(), KokoroError> {
+    let name = attempt.name().to_owned();
+    let stop = attempt.lifetime.clone();
+    let manager = Arc::downgrade(manager);
+    let registry = Arc::downgrade(registry);
+    let task = state
+        .scope
+        .spawn_durable(&name, run_connection(manager, registry, attempt))
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    state.workers.insert(
+        name,
+        ConnectionWorker {
+            stop,
+            task: Arc::new(Mutex::new(task)),
+            result: Arc::new(OnceCell::new()),
+        },
+    );
+    Ok(())
+}
+
+async fn run_connection(
+    manager: Weak<Mutex<McpManager>>,
+    registry: Weak<RwLock<ActionRegistry>>,
+    attempt: ConnectionAttempt,
+) -> Result<(), String> {
+    let name = attempt.name().to_string();
+    let client = match attempt.connect().await {
+        Ok(client) => Arc::new(client),
+        Err(error) => {
+            let cleanup_failed = matches!(
+                &error,
+                ConnectionError::Session(McpConnectError::Cleanup(_))
+            );
+            let message = match error {
+                ConnectionError::Config(
+                    KokoroError::Config(message) | KokoroError::ExternalService(message),
+                ) => message,
+                error => error.to_string(),
+            };
+            if let Some(manager) = manager.upgrade() {
                 manager
                     .lock()
                     .await
-                    .finish_connection_error(&attempt, message);
-                return;
+                    .finish_connection_error(&attempt, message.clone());
             }
-        };
-        let committed = manager.lock().await.commit_client(&attempt, client.clone());
-        if committed {
-            let manager = Arc::downgrade(&manager);
-            let registry = Arc::downgrade(&registry);
-            tokio::spawn(watch_catalog(
-                manager,
-                registry,
-                attempt.name().to_string(),
-                client,
-            ));
-        } else {
-            // A failed or superseded startup must not resurrect the server.
-            manager.lock().await.finish_connection_error(
-                &attempt,
-                "MCP transport disconnected during initialization".into(),
-            );
-            client.shutdown().await;
+            if cleanup_failed {
+                return Err(message);
+            }
+            return Ok(());
         }
-    });
+    };
+
+    let committed = match manager.upgrade() {
+        Some(manager) => manager.lock().await.commit_client(&attempt, client.clone()),
+        None => false,
+    };
+    let closed = client.lifetime();
+    if committed {
+        let watch = watch_catalog(manager.clone(), registry.clone(), client.clone());
+        tokio::select! {
+            biased;
+            _ = attempt.lifetime.cancelled() => {}
+            _ = closed.cancelled() => {}
+            _ = watch => {}
+        }
+    } else if let Some(manager) = manager.upgrade() {
+        manager.lock().await.finish_connection_error(
+            &attempt,
+            "MCP transport disconnected during initialization".into(),
+        );
+    }
+    // Keep the connection alive while calls admitted before stop finish.
+    let result = client.drain_and_close().await;
+    if let (Some(manager), Some(registry)) = (manager.upgrade(), registry.upgrade()) {
+        manager.lock().await.mark_disconnected(
+            &name,
+            &client,
+            result.as_ref().err().map(String::as_str),
+        );
+        publish_catalog(&manager, &registry).await;
+    }
+    result
 }
 
 pub async fn start_enabled(manager: &Manager, registry: &Registry) {
-    let attempts = manager.lock().await.prepare_connect_all();
+    let control = manager.lock().await.control.clone();
+    let _control = control.lock().await;
+    let mut state = manager.lock().await;
+    if !state.scope.is_running() || state.is_closed() {
+        return;
+    }
+    let attempts = state.prepare_connect_all();
     for attempt in attempts {
-        spawn_attempt(manager, registry, attempt, None);
+        if let Err(error) = spawn_attempt(&mut state, manager, registry, attempt) {
+            tracing::warn!(target: "mcp", %error, "MCP auto-start was unable to run");
+        }
     }
 }
 
-async fn apply_connection_change(
+async fn change_connection(
     manager: &Manager,
     registry: &Registry,
-    attempt: Option<ConnectionAttempt>,
-    previous: Option<Arc<McpClient>>,
-) {
+    name: &str,
+    connect: bool,
+    change: impl FnOnce(&mut McpManager) -> Result<Option<Arc<McpClient>>, KokoroError>,
+) -> Result<(), KokoroError> {
+    let deadline = Instant::now() + CONTROL_TIMEOUT;
+    let control = manager.lock().await.control.clone();
+    let _control = tokio::time::timeout_at(deadline, control.lock())
+        .await
+        .map_err(|_| {
+            KokoroError::ExternalService("Another MCP control operation is still running".into())
+        })?;
+    let (previous, worker) = {
+        let mut state = manager.lock().await;
+        check_controls(&state)?;
+        let previous = change(&mut state)?;
+        let worker = state.workers.get(name).cloned();
+        if let Some(worker) = &worker {
+            worker.stop();
+        }
+        (previous, worker)
+    };
     publish_catalog(manager, registry).await;
-    if let Some(attempt) = attempt {
-        spawn_attempt(manager, registry, attempt, previous);
-    } else if let Some(previous) = previous {
-        previous.shutdown().await;
+
+    let completion = async {
+        if let Some(worker) = worker {
+            worker.join().await
+        } else if let Some(previous) = previous {
+            previous.drain_and_close().await
+        } else {
+            Ok(())
+        }
+    };
+    tokio::time::timeout_at(deadline, completion)
+        .await
+        .map_err(|_| KokoroError::ExternalService(format!(
+            "MCP server '{name}' is still stopping. Confirmed shutdown is pending and any outstanding external tool outcome is uncertain."
+        )))?
+        .map_err(KokoroError::ExternalService)?;
+    let mut state = manager.lock().await;
+    state.workers.remove(name);
+    if connect {
+        check_controls(&state)?;
+        let attempt = state.prepare_connection(name)?;
+        spawn_attempt(&mut state, manager, registry, attempt)?;
+    }
+    Ok(())
+}
+
+fn check_controls(state: &McpManager) -> Result<(), KokoroError> {
+    if state.scope.is_running() && !state.is_closed() {
+        Ok(())
+    } else {
+        Err(KokoroError::ExternalService(
+            "MCP service is shutting down".into(),
+        ))
     }
 }
 
@@ -296,18 +420,11 @@ pub async fn add_server(
     registry: &Registry,
     config: McpServerConfig,
 ) -> Result<(), KokoroError> {
-    let (attempt, previous) = {
-        let mut manager = manager.lock().await;
-        let enabled = config.enabled;
-        let name = config.name.clone();
-        let previous = manager.upsert_server_config(config)?;
-        let attempt = enabled
-            .then(|| manager.prepare_connection(&name))
-            .transpose()?;
-        (attempt, previous)
-    };
-    apply_connection_change(manager, registry, attempt, previous).await;
-    Ok(())
+    let name = config.name.clone();
+    change_connection(manager, registry, &name, config.enabled, |state| {
+        state.upsert_server_config(config)
+    })
+    .await
 }
 
 pub async fn remove_server(
@@ -315,9 +432,10 @@ pub async fn remove_server(
     registry: &Registry,
     name: &str,
 ) -> Result<(), KokoroError> {
-    let previous = manager.lock().await.remove_server_config(name)?;
-    apply_connection_change(manager, registry, None, previous).await;
-    Ok(())
+    change_connection(manager, registry, name, false, |state| {
+        state.remove_server_config(name)
+    })
+    .await
 }
 
 pub async fn reconnect_server(
@@ -325,14 +443,11 @@ pub async fn reconnect_server(
     registry: &Registry,
     name: &str,
 ) -> Result<(), KokoroError> {
-    let (attempt, previous) = {
-        let mut manager = manager.lock().await;
-        let attempt = manager.prepare_connection(name)?;
-        let previous = manager.detach_live_client(name);
-        (attempt, previous)
-    };
-    apply_connection_change(manager, registry, Some(attempt), previous).await;
-    Ok(())
+    change_connection(manager, registry, name, true, |state| {
+        state.ensure_enabled(name)?;
+        Ok(state.detach_client(name))
+    })
+    .await
 }
 
 pub async fn toggle_server(
@@ -341,25 +456,21 @@ pub async fn toggle_server(
     name: &str,
     enabled: bool,
 ) -> Result<(), KokoroError> {
-    let (attempt, previous) = {
-        let mut manager = manager.lock().await;
-        let previous = manager.set_server_enabled(name, enabled)?;
-        let attempt = enabled
-            .then(|| manager.prepare_connection(name))
-            .transpose()?;
-        (attempt, previous)
-    };
-    apply_connection_change(manager, registry, attempt, previous).await;
-    Ok(())
+    change_connection(manager, registry, name, enabled, |state| {
+        state.set_server_enabled(name, enabled)
+    })
+    .await
 }
 
 pub async fn refresh_all(manager: &Manager, registry: &Registry) -> Result<(), KokoroError> {
-    let clients: Vec<_> = manager
-        .lock()
-        .await
-        .connected_clients()
-        .map(|(_, client)| client.clone())
-        .collect();
+    let clients: Vec<_> = {
+        let state = manager.lock().await;
+        check_controls(&state)?;
+        state
+            .connected_clients()
+            .map(|(_, client)| client.clone())
+            .collect()
+    };
     for client in &clients {
         client.invalidate_tools();
     }
@@ -374,7 +485,31 @@ pub async fn refresh_all(manager: &Manager, registry: &Registry) -> Result<(), K
         .map_err(|error| KokoroError::ExternalService(error.to_string()))
 }
 
-pub async fn shutdown(manager: &Manager) {
-    let clients = manager.lock().await.begin_shutdown();
-    futures::future::join_all(clients.iter().map(|client| client.shutdown())).await;
+pub async fn shutdown(manager: &Manager, registry: &Registry) -> Result<(), KokoroError> {
+    let (clients, workers) = {
+        let mut state = manager.lock().await;
+        let clients = state.begin_shutdown();
+        let workers: Vec<_> = state.workers.values().cloned().collect();
+        for worker in &workers {
+            worker.stop();
+        }
+        (clients, workers)
+    };
+    publish_catalog(manager, registry).await;
+    // A worker joins its SDK and transport. Also close any clients attached
+    // directly to the manager before the worker was installed.
+    let (connections, clients) = tokio::join!(
+        futures::future::join_all(workers.iter().map(ConnectionWorker::join)),
+        futures::future::join_all(clients.iter().map(|client| client.drain_and_close())),
+    );
+    let failures: Vec<_> = connections
+        .into_iter()
+        .chain(clients)
+        .filter_map(Result::err)
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(KokoroError::ExternalService(failures.join(", ")))
+    }
 }

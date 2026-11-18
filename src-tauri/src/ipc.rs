@@ -1,8 +1,9 @@
+use crate::lifecycle::{AppLifecycle, Phase, Stopping, TaskStage, WorkLease};
 use crate::{commands, stt};
 use specta_typescript::Typescript;
 use std::path::Path;
 use tauri::ipc::{Invoke, InvokeBody};
-use tauri::Wry;
+use tauri::{AppHandle, Manager, Wry};
 use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 
 pub(crate) mod events;
@@ -288,6 +289,17 @@ pub(crate) fn invoke_handler(
 ) -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static + use<'_> {
     let dispatch = builder.invoke_handler();
     move |invoke| {
+        let is_shutting_down = invoke
+            .message
+            .webview()
+            .try_state::<AppLifecycle>()
+            .is_some_and(|lifecycle| lifecycle.phase() != Phase::Running);
+        if is_shutting_down && !is_shutdown_control(invoke.message.command()) {
+            invoke
+                .resolver
+                .reject(crate::error::KokoroError::Internal(Stopping.to_string()));
+            return true;
+        }
         if let InvokeBody::Json(value) = invoke.message.payload() {
             if let Err(error) = wire::validate_json(value) {
                 invoke
@@ -298,6 +310,50 @@ pub(crate) fn invoke_handler(
         }
         dispatch(invoke)
     }
+}
+
+/// Let existing UI owners stop or acknowledge already admitted work as the
+/// window remains responsive during the drain. These commands cannot start work.
+fn is_shutdown_control(command: &str) -> bool {
+    matches!(
+        command,
+        "cancel_chat_turn"
+            | "finish_chat_playback"
+            | "reject_tool_approval"
+            | "cancel_tts"
+            | "stop_native_mic"
+            | "stop_native_wake_word"
+            | "stop_vision_watcher"
+            | "stop_bot_platform"
+            | "stop_telegram_bot"
+            | "hide_pet_window"
+            | "hide_bubble_window"
+    )
+}
+
+/// Foreground work that may hold a service dependency or commit after an await
+/// must keep a lease through completion. The global IPC check only stops new
+/// dispatches; this admission also makes already accepted work visible at exit.
+pub(crate) fn admit_operation(
+    app: &AppHandle,
+    domain: &'static str,
+    name: &str,
+) -> Result<WorkLease, crate::error::KokoroError> {
+    let lifecycle = app.try_state::<AppLifecycle>().ok_or_else(|| {
+        crate::error::KokoroError::Internal("application lifecycle was not initialized".into())
+    })?;
+    admit_in(&lifecycle, domain, name)
+}
+
+pub(crate) fn admit_in(
+    lifecycle: &AppLifecycle,
+    domain: &'static str,
+    name: &str,
+) -> Result<WorkLease, crate::error::KokoroError> {
+    lifecycle
+        .scope(TaskStage::Work, domain)
+        .lease(name)
+        .map_err(|error| crate::error::KokoroError::Internal(error.to_string()))
 }
 
 /// Export the same application-owned IPC interface installed at startup.

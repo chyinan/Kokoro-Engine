@@ -109,6 +109,7 @@ pub async fn get_chat_view(
     runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
     known_version: Option<crate::chat::runtime::ChatViewVersion>,
 ) -> Result<Response<Option<crate::chat::runtime::ChatViewSnapshot>>, KokoroError> {
+    let _view = crate::ipc::admit_in(&state.lifecycle, "chat-ipc", "view")?;
     crate::chat::runtime::get_chat_view(&state, &runtime, known_version).await
         .map(Response)
 }
@@ -121,6 +122,7 @@ pub async fn recover_chat_draft_submission(
     character_id: String,
     client_request_id: String,
 ) -> Result<Response<ChatDraftSubmissionStatus>, KokoroError> {
+    let _draft = crate::ipc::admit_in(&state.lifecycle, "chat-ipc", "recover-draft")?;
     recover_chat_draft_submission_inner(&state.db, &runtime, &character_id, &client_request_id)
         .await
         .map(Response)

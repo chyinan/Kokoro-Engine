@@ -1,7 +1,5 @@
 use crate::error::KokoroError;
-use crate::vision::capture::{
-    capture_screen_with_options, list_screens, CaptureOptions, ScreenInfo,
-};
+use crate::vision::capture::{list_screens, CaptureOptions, ScreenInfo};
 use crate::vision::config::VisionConfig;
 use crate::vision::context::{VisionObservation, VisionObservationSource};
 use crate::vision::server::VisionServer;
@@ -13,10 +11,12 @@ use tokio::sync::Mutex;
 #[tauri::command]
 #[specta::specta]
 pub async fn upload_vision_image(
+    app_handle: AppHandle,
     state: State<'_, Arc<Mutex<VisionServer>>>,
     file_bytes: Vec<u8>,
     filename: String,
 ) -> Result<String, KokoroError> {
+    let _upload = crate::ipc::admit_operation(&app_handle, "vision", "local-upload")?;
     let server = state.lock().await;
     server
         .upload(&file_bytes, &filename)
@@ -34,8 +34,17 @@ pub async fn get_vision_config(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_vision_screens() -> Result<Vec<ScreenInfo>, KokoroError> {
-    list_screens().map_err(KokoroError::ExternalService)
+pub async fn list_vision_screens(
+    state: State<'_, VisionWatcher>,
+) -> Result<Vec<ScreenInfo>, KokoroError> {
+    let mut task = state
+        .work_scope()
+        .spawn_blocking("enumerate-screens", list_screens)
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    task.join()
+        .await
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?
+        .map_err(KokoroError::ExternalService)
 }
 
 #[tauri::command]
@@ -45,6 +54,10 @@ pub async fn save_vision_config(
     state: State<'_, VisionWatcher>,
     config: VisionConfig,
 ) -> Result<(), KokoroError> {
+    let _save = state
+        .work_scope()
+        .lease("save-config")
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
     let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
@@ -57,9 +70,12 @@ pub async fn save_vision_config(
     *state.config.write().await = config.clone();
     let auto_enabled = config.vlm_enabled && config.auto_vision_enabled;
     if auto_enabled && !was_auto_enabled {
-        state.start(app_handle.clone());
+        state
+            .start(app_handle)
+            .await
+            .map_err(KokoroError::ExternalService)?;
     } else if !auto_enabled && was_auto_enabled {
-        state.stop();
+        state.stop().await.map_err(KokoroError::ExternalService)?;
     } else if !auto_enabled {
         state.context.clear_auto_state_on_disable().await;
     }
@@ -72,15 +88,16 @@ pub async fn start_vision_watcher(
     app_handle: AppHandle,
     state: State<'_, VisionWatcher>,
 ) -> Result<(), KokoroError> {
-    state.start(app_handle);
-    Ok(())
+    state
+        .start(app_handle)
+        .await
+        .map_err(KokoroError::ExternalService)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn stop_vision_watcher(state: State<'_, VisionWatcher>) -> Result<(), KokoroError> {
-    state.stop();
-    Ok(())
+    state.stop().await.map_err(KokoroError::ExternalService)
 }
 
 #[tauri::command]
@@ -99,30 +116,41 @@ pub async fn capture_screen_now(
     state: State<'_, VisionWatcher>,
     llm_service: State<'_, crate::llm::service::LlmService>,
 ) -> Result<String, KokoroError> {
+    let work = state.work_scope();
+    let _analysis = work
+        .lease("manual-analysis")
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    let stop = work.token();
     let config = state.config.read().await.clone();
     if !config.vlm_enabled {
         return Err(KokoroError::ExternalService(
             "Screen VLM is disabled".to_string(),
         ));
     }
-    let captured = capture_screen_with_options(&CaptureOptions {
-        display_id: config.display_id.clone(),
-        region: config.vlm_region,
-    })
-    .map_err(|e| KokoroError::ExternalService(e.to_string()))?;
+    let captured = state
+        .capture(CaptureOptions {
+            display_id: config.display_id.clone(),
+            region: config.vlm_region,
+        })
+        .await
+        .map_err(KokoroError::ExternalService)?;
     if let Some(warning) = captured.warning.clone() {
         state.context.set_last_error(warning).await;
     }
     let client = state.client.clone();
     let captured_at = chrono::Utc::now();
-    let description = crate::vision::watcher::analyze_screenshot(
-        &client,
-        &config,
-        &captured.jpeg_bytes,
-        Some(&llm_service),
-    )
-    .await
-    .map_err(|e| KokoroError::ExternalService(e.to_string()))?;
+    let description = tokio::select! {
+        biased;
+        _ = stop.cancelled() => {
+            return Err(KokoroError::ExternalService(crate::lifecycle::Stopping.to_string()));
+        }
+        result = crate::vision::watcher::analyze_screenshot(
+            &client,
+            &config,
+            &captured.jpeg_bytes,
+            Some(&llm_service),
+        ) => result.map_err(KokoroError::ExternalService)?,
+    };
     state
         .context
         .record_manual_observation(VisionObservation {

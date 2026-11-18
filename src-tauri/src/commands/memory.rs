@@ -31,6 +31,7 @@ pub async fn list_memories(
     request: ListMemoriesRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<ListMemoriesResponse>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "list_memories")?;
     tracing::info!(
         target: "memory",
         "[Memory] list_memories called for character_id='{}', limit={}, offset={}",
@@ -65,6 +66,7 @@ pub async fn update_memory(
     request: UpdateMemoryRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "update_memory")?;
     if request.character_id.trim().is_empty() {
         return Err(KokoroError::Validation(
             "character_id must not be empty".to_string(),
@@ -94,6 +96,7 @@ pub async fn delete_memory(
     request: DeleteMemoryRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "delete_memory")?;
     if request.character_id.trim().is_empty() {
         return Err(KokoroError::Validation(
             "character_id must not be empty".to_string(),
@@ -119,6 +122,7 @@ pub async fn update_memory_tier(
     request: UpdateMemoryTierRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "update_memory_tier")?;
     if request.character_id.trim().is_empty() {
         return Err(KokoroError::Validation(
             "character_id must not be empty".to_string(),
@@ -173,6 +177,10 @@ pub async fn run_dream_now(
     state: State<'_, AIOrchestrator>,
     llm_state: State<'_, LlmService>,
 ) -> Result<Response<crate::ai::memory::MemoryDreamRunResult>, KokoroError> {
+    let _dream = state
+        .chat_memory_work()
+        .lease("manual-dream")
+        .map_err(|error| KokoroError::Internal(error.to_string()))?;
     let provider = llm_state.system_provider().await;
     let target_language = state.response_language.lock().await.clone();
     state
@@ -194,6 +202,7 @@ pub async fn get_dreaming_summary(
     request: DreamCharacterRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<crate::ai::memory::MemoryDreamingSummary>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "get_dreaming_summary")?;
     state
         .memory_manager
         .dreaming_summary(&request.character_id)
@@ -208,6 +217,7 @@ pub async fn list_dream_jobs(
     request: ListDreamJobsRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<Vec<crate::ai::memory::MemoryDreamJobRecord>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "list_dream_jobs")?;
     state
         .memory_manager
         .list_dream_jobs(&request.character_id, request.limit)
@@ -222,6 +232,7 @@ pub async fn list_dream_proposals(
     request: ListDreamProposalsRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<Vec<crate::ai::memory::MemoryDreamProposalRecord>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "list_dream_proposals")?;
     state
         .memory_manager
         .list_dream_proposals(
@@ -240,6 +251,7 @@ pub async fn approve_dream_proposal(
     request: DreamProposalRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "approve_dream_proposal")?;
     state
         .memory_manager
         .approve_dream_proposal(request.id)
@@ -253,6 +265,7 @@ pub async fn reject_dream_proposal(
     request: DreamProposalRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "reject_dream_proposal")?;
     state
         .memory_manager
         .reject_dream_proposal(request.id)
@@ -272,7 +285,7 @@ pub async fn get_memory_embedding_model_status(
 pub async fn download_memory_embedding_model(
     app: tauri::AppHandle,
 ) -> Result<crate::ai::memory::MemoryEmbeddingModelStatus, KokoroError> {
-
+    let _download = crate::ipc::admit_operation(&app, "memory-model", "embedding-download")?;
     crate::ai::memory::download_memory_embedding_model(move |progress| {
         emit(&app, progress).map_err(|error| error.to_string())
     })

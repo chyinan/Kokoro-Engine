@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager};
 #[tauri::command]
 #[specta::specta]
 pub async fn import_live2d_zip(app: AppHandle, zip_path: String) -> Result<String, KokoroError> {
+    let _import = crate::ipc::admit_operation(&app, "live2d-library", "zip-import")?;
     model_store(&app)
         .map_err(KokoroError::Internal)?
         .import_zip(zip_path)
@@ -23,6 +24,7 @@ pub async fn list_live2d_models(app: AppHandle) -> Result<Vec<Live2dModelInfo>, 
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_live2d_model(app: AppHandle, model_name: String) -> Result<(), KokoroError> {
+    let _remove = crate::ipc::admit_operation(&app, "live2d-library", "delete")?;
     model_store(&app)
         .map_err(KokoroError::Internal)?
         .delete_model(model_name)
@@ -35,6 +37,8 @@ pub async fn rename_live2d_model(
     model_path: String,
     new_name: String,
 ) -> Result<String, String> {
+    let _rename = crate::ipc::admit_operation(&app, "live2d-library", "rename")
+        .map_err(|error| error.to_string())?;
     model_store(&app)?.rename_model(model_path, new_name)
 }
 
@@ -44,6 +48,7 @@ pub async fn import_live2d_folder(
     app: AppHandle,
     model_json_path: String,
 ) -> Result<String, KokoroError> {
+    let _import = crate::ipc::admit_operation(&app, "live2d-library", "folder-import")?;
     model_store(&app)
         .map_err(KokoroError::Internal)?
         .import_folder(model_json_path)
@@ -56,6 +61,8 @@ pub async fn export_live2d_model(
     model_path: String,
     export_path: String,
 ) -> Result<String, String> {
+    let _export = crate::ipc::admit_operation(&app, "live2d-library", "export")
+        .map_err(|error| error.to_string())?;
     model_store(&app)?.export_model(model_path, export_path)
 }
 

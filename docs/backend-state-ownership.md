@@ -2,6 +2,8 @@
 
 本次工作最初从本地 `main`（`118c5fc75de7b038ec25d3f7f59fb1d80a5ada68`）建立 `codex/backend-state-ownership`。沿用 SQLx、已有聊天应用入口、原子保存、角色激活协调器和 `ChatRuntimeState`；没有引入状态管理框架或新的持久化系统。
 
+进程级任务准入、排空、服务依赖和 SQLite 的实际退出顺序见[应用后台任务与退出顺序](background-task-lifecycle.md)。
+
 ## 不变量与身份路径
 
 `Desktop / Pet / Mod / proactive / Telegram / Webhook / Discord → submit_chat → resolve_request_scope → TurnIdentity → execute_chat_with_pending → persistence / tools / post_commit / events`。

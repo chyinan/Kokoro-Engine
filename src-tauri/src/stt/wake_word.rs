@@ -1,17 +1,22 @@
 use crate::ipc::events::{SttWakeWordDetected, SttWakeWordError};
+use crate::lifecycle::TaskScope;
 use crate::stt::mic::create_voice_activity_detector;
+use crate::stt::native_worker::{self, NativeWorker};
 use crate::stt::stream::SAMPLE_RATE;
 use crate::stt::{AudioChunk, AudioSource, SttService};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc as tokio_mpsc, oneshot},
+};
+use tokio_util::sync::CancellationToken;
 
 const DETECTION_COOLDOWN: Duration = Duration::from_secs(2);
 const RESAMPLER_CHUNK_SIZE: usize = 256;
@@ -21,42 +26,27 @@ enum WorkerCommand {
         wake_word: String,
         trigger_on_speech: bool,
         owner: Option<u64>,
-        response: SyncSender<Result<(), String>>,
+        response: oneshot::Sender<Result<(), String>>,
     },
     Stop {
         owner: Option<u64>,
-        response: SyncSender<Result<(), String>>,
+        response: oneshot::Sender<Result<(), String>>,
     },
 }
 
-#[derive(Default)]
 pub struct NativeWakeWordState {
-    control_tx: Mutex<Option<Sender<WorkerCommand>>>,
-    active_owner: Arc<AtomicU64>,
+    worker: NativeWorker<WorkerCommand>,
 }
 
 impl NativeWakeWordState {
-    pub fn new() -> Self {
+    pub(crate) fn new(work: TaskScope, service: TaskScope) -> Self {
         Self {
-            control_tx: Mutex::new(None),
-            active_owner: Arc::new(AtomicU64::new(0)),
+            worker: NativeWorker::new("native wake word microphone and recognition", work, service),
         }
     }
 
-    fn ensure_worker(&self, app: &AppHandle) -> Result<Sender<WorkerCommand>, String> {
-        let mut guard = self
-            .control_tx
-            .lock()
-            .map_err(|_| "Failed to lock wake word state".to_string())?;
-
-        if let Some(tx) = guard.as_ref() {
-            return Ok(tx.clone());
-        }
-
-        let (tx, rx) = mpsc::channel();
-        spawn_wake_word_worker(rx, app.clone(), self.active_owner.clone());
-        *guard = Some(tx.clone());
-        Ok(tx)
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        self.worker.shutdown().await
     }
 }
 
@@ -121,12 +111,15 @@ struct WakeWordFrameProcessor {
 }
 
 impl WakeWordFrameProcessor {
-    fn new(segment_tx: tokio_mpsc::Sender<Vec<f32>>) -> Result<Self, String> {
+    fn new(
+        segment_tx: tokio_mpsc::Sender<Vec<f32>>,
+        stop: &CancellationToken,
+    ) -> Result<Self, String> {
         Ok(Self {
             segment_tx,
             vad_logged: false,
             frame_counter: 0,
-            detector: create_voice_activity_detector()?,
+            detector: create_voice_activity_detector(stop)?,
         })
     }
 
@@ -166,8 +159,7 @@ struct WakeWordTranscriber {
     wake_word_normalized: String,
     trigger_on_speech: bool,
     last_detection_at: Option<Instant>,
-    active_owner: Arc<AtomicU64>,
-    owner: u64,
+    stop: CancellationToken,
 }
 
 impl WakeWordTranscriber {
@@ -175,21 +167,19 @@ impl WakeWordTranscriber {
         app: AppHandle,
         wake_word: String,
         trigger_on_speech: bool,
-        active_owner: Arc<AtomicU64>,
-        owner: u64,
+        stop: CancellationToken,
     ) -> Self {
         Self {
             app,
             wake_word_normalized: normalize_text(&wake_word),
             trigger_on_speech,
             last_detection_at: None,
-            active_owner,
-            owner,
+            stop,
         }
     }
 
     async fn check_segment(&mut self, samples: Vec<f32>) -> Result<(), String> {
-        if self.active_owner.load(Ordering::SeqCst) != self.owner {
+        if self.stop.is_cancelled() {
             return Ok(());
         }
         if self
@@ -212,7 +202,7 @@ impl WakeWordTranscriber {
 
         // A stop or replacement may have happened while transcription was in
         // flight; never emit a detection for an obsolete native owner.
-        if self.active_owner.load(Ordering::SeqCst) != self.owner {
+        if self.stop.is_cancelled() {
             return Ok(());
         }
 
@@ -239,123 +229,128 @@ impl WakeWordTranscriber {
     }
 }
 
-pub fn start_native_wake_word(
+pub(crate) async fn start_native_wake_word(
     app: &AppHandle,
-    wake_word_state: &NativeWakeWordState,
+    state: &NativeWakeWordState,
     wake_word: String,
     trigger_on_speech: bool,
     owner: Option<u64>,
 ) -> Result<(), String> {
-    let tx = wake_word_state.ensure_worker(app)?;
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let _lease = state.worker.admit("start")?;
+    let app = app.clone();
+    let tx = state
+        .worker
+        .commands(move |rx, stop| run_wake_word_worker(rx, app, stop))?;
+    let (response, result) = oneshot::channel();
     tx.send(WorkerCommand::Start {
         wake_word,
         trigger_on_speech,
         owner,
-        response: response_tx,
+        response,
     })
     .map_err(|_| "Native wake word worker is unavailable".to_string())?;
-
-    response_rx
-        .recv()
-        .map_err(|_| "Native wake word worker did not respond".to_string())?
+    native_worker::response(result, "Native wake word").await
 }
 
-pub fn stop_native_wake_word(
-    app: &AppHandle,
-    wake_word_state: &NativeWakeWordState,
+pub(crate) async fn stop_native_wake_word(
+    state: &NativeWakeWordState,
     owner: Option<u64>,
 ) -> Result<(), String> {
-    let tx = wake_word_state.ensure_worker(app)?;
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
-    tx.send(WorkerCommand::Stop {
-        owner,
-        response: response_tx,
-    })
-    .map_err(|_| "Native wake word worker is unavailable".to_string())?;
-
-    response_rx
-        .recv()
-        .map_err(|_| "Native wake word worker did not respond".to_string())?
+    let Ok(_lease) = state.worker.admit("stop") else {
+        return state.worker.confirm_app_stop().await;
+    };
+    let Some(tx) = state.worker.running_commands() else {
+        return Ok(());
+    };
+    let (response, result) = oneshot::channel();
+    tx.send(WorkerCommand::Stop { owner, response })
+        .map_err(|_| "Native wake word worker is unavailable".to_string())?;
+    native_worker::response(result, "Native wake word").await
 }
 
-fn spawn_wake_word_worker(
+fn run_wake_word_worker(
     rx: Receiver<WorkerCommand>,
     app: AppHandle,
-    active_owner: Arc<AtomicU64>,
-) {
-    std::thread::spawn(move || {
-        let mut stream: Option<(Stream, u64)> = None;
-
-        while let Ok(command) = rx.recv() {
-            match command {
-                WorkerCommand::Start {
-                    wake_word,
-                    trigger_on_speech,
-                    owner,
-                    response,
-                } => {
-                    let owner_key = owner.unwrap_or(0);
-                    // A newer owner replaces an older stream. Dropping the
-                    // old stream is safe because its frame/transcription
-                    // workers consult active_owner before emitting results.
-                    if stream
-                        .as_ref()
-                        .is_some_and(|(_, current_owner)| *current_owner != owner_key)
-                    {
-                        // Invalidate the old producer before any new device
-                        // setup. If building the replacement fails, no old
-                        // frame or transcription task may emit in the gap.
-                        active_owner.store(0, Ordering::SeqCst);
-                        stream.take();
-                    }
-                    let result = if stream.is_some() {
-                        active_owner.store(owner_key, Ordering::SeqCst);
-                        Ok(())
-                    } else {
-                        match build_native_wake_word_stream(
-                            &app,
-                            wake_word,
-                            trigger_on_speech,
-                            active_owner.clone(),
-                            owner_key,
-                        ) {
-                            Ok(new_stream) => {
-                                if let Err(err) = new_stream.play() {
-                                    Err(format!("Failed to start wake word microphone: {err}"))
-                                } else {
-                                    active_owner.store(owner_key, Ordering::SeqCst);
-                                    stream = Some((new_stream, owner_key));
-                                    Ok(())
-                                }
-                            }
-                            Err(err) => Err(err),
-                        }
-                    };
-                    let _ = response.send(result);
+    stop: CancellationToken,
+) -> Result<(), String> {
+    let mut capture: Option<(Stream, WakeWordTasks, u64)> = None;
+    while let Some(command) = native_worker::receive(&rx, &stop) {
+        match command {
+            WorkerCommand::Start {
+                wake_word,
+                trigger_on_speech,
+                owner,
+                response,
+            } => {
+                if response.is_closed() {
+                    continue;
                 }
-                WorkerCommand::Stop { owner, response } => {
-                    let owner_key = owner.unwrap_or(0);
-                    if owner.is_none()
-                        || active_owner.load(Ordering::SeqCst) == owner_key
-                    {
-                        stream.take();
-                        active_owner.store(0, Ordering::SeqCst);
-                    }
+                let owner = owner.unwrap_or(0);
+                if capture
+                    .as_ref()
+                    .is_some_and(|(_, _, current)| *current == owner)
+                {
                     let _ = response.send(Ok(()));
+                    continue;
+                }
+                let result = (|| {
+                    close_capture(&mut capture)?;
+                    if stop.is_cancelled() || response.is_closed() {
+                        return Err("Native wake word start was cancelled".into());
+                    }
+                    let (stream, tasks) = build_native_wake_word_stream(
+                        &app,
+                        wake_word,
+                        trigger_on_speech,
+                        stop.child_token(),
+                    )?;
+                    if stop.is_cancelled() || response.is_closed() {
+                        drop(stream);
+                        tasks.stop()?;
+                        return Err("Native wake word start was cancelled".into());
+                    }
+                    stream.play().map_err(|error| {
+                        format!("Failed to start wake word microphone: {error}")
+                    })?;
+                    capture = Some((stream, tasks, owner));
+                    Ok(())
+                })();
+                if let Err(Ok(())) = response.send(result) {
+                    close_capture(&mut capture)?;
                 }
             }
+            WorkerCommand::Stop { owner, response } => {
+                let result = if owner.is_none()
+                    || capture
+                        .as_ref()
+                        .is_some_and(|(_, _, current)| owner == Some(*current))
+                {
+                    close_capture(&mut capture)
+                } else {
+                    Ok(())
+                };
+                let _ = response.send(result);
+            }
         }
-    });
+    }
+    close_capture(&mut capture)
+}
+
+fn close_capture(capture: &mut Option<(Stream, WakeWordTasks, u64)>) -> Result<(), String> {
+    if let Some((stream, tasks, _)) = capture.take() {
+        tasks.cancel.cancel();
+        drop(stream);
+        tasks.stop()?;
+    }
+    Ok(())
 }
 
 fn build_native_wake_word_stream(
     app: &AppHandle,
     wake_word: String,
     trigger_on_speech: bool,
-    active_owner: Arc<AtomicU64>,
-    owner: u64,
-) -> Result<Stream, String> {
+    stop: CancellationToken,
+) -> Result<(Stream, WakeWordTasks), String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -378,8 +373,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::I16 => build_input_stream::<i16>(
             &device,
@@ -389,8 +383,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::I32 => build_input_stream::<i32>(
             &device,
@@ -400,8 +393,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::I64 => build_input_stream::<i64>(
             &device,
@@ -411,8 +403,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::U8 => build_input_stream::<u8>(
             &device,
@@ -422,8 +413,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::U16 => build_input_stream::<u16>(
             &device,
@@ -433,8 +423,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::U32 => build_input_stream::<u32>(
             &device,
@@ -444,8 +433,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::U64 => build_input_stream::<u64>(
             &device,
@@ -455,8 +443,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::F32 => build_input_stream::<f32>(
             &device,
@@ -466,8 +453,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         SampleFormat::F64 => build_input_stream::<f64>(
             &device,
@@ -477,8 +463,7 @@ fn build_native_wake_word_stream(
             app_handle,
             wake_word,
             trigger_on_speech,
-            active_owner.clone(),
-            owner,
+            stop,
         ),
         sample_format => Err(format!(
             "Unsupported wake word microphone sample format: {sample_format}"
@@ -495,9 +480,8 @@ fn build_input_stream<T>(
     app: AppHandle,
     wake_word: String,
     trigger_on_speech: bool,
-    active_owner: Arc<AtomicU64>,
-    owner: u64,
-) -> Result<Stream, String>
+    stop: CancellationToken,
+) -> Result<(Stream, WakeWordTasks), String>
 where
     T: SizedSample + Sample + Send + 'static,
     f32: FromSample<T>,
@@ -505,19 +489,15 @@ where
     let mut processor = NativeInputProcessor::new(sample_rate, channels)?;
     let err_app = app.clone();
     let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<f32>>(32);
-    spawn_frame_processor(
-        app,
-        frame_rx,
-        wake_word,
-        trigger_on_speech,
-        active_owner,
-        owner,
-    )?;
-
-    device
+    let callback_stop = stop.clone();
+    let error_stop = stop.clone();
+    let stream = device
         .build_input_stream(
             config,
             move |data: &[T], _| {
+                if callback_stop.is_cancelled() {
+                    return;
+                }
                 if let Some(frame) = processor.process_input(data) {
                     match frame_tx.try_send(frame) {
                         Ok(()) => {}
@@ -531,12 +511,56 @@ where
                 }
             },
             move |err| {
+                if error_stop.is_cancelled() {
+                    return;
+                }
                 tracing::error!(target: "stt", "[WakeWord][native] microphone stream error: {err}");
                 let _ = SttWakeWordError(format!("Native wake word stream error: {err}")).emit(&err_app);
             },
             None,
         )
-        .map_err(|err| format!("Failed to build wake word microphone stream: {err}"))
+        .map_err(|err| format!("Failed to build wake word microphone stream: {err}"))?;
+    let tasks = spawn_frame_processor(app, frame_rx, wake_word, trigger_on_speech, stop)?;
+    Ok((stream, tasks))
+}
+
+struct WakeWordTasks {
+    cancel: CancellationToken,
+    frames: Option<std::thread::JoinHandle<()>>,
+    transcription: Option<tokio::task::JoinHandle<()>>,
+    runtime: Handle,
+}
+
+impl WakeWordTasks {
+    fn stop(mut self) -> Result<(), String> {
+        self.join()
+    }
+
+    fn join(&mut self) -> Result<(), String> {
+        self.cancel.cancel();
+        let frames = self.frames.take().map(|thread| thread.join());
+        let transcription = self
+            .transcription
+            .take()
+            .map(|task| self.runtime.block_on(task));
+        if frames.is_some_and(|outcome| outcome.is_err()) {
+            return Err("Native wake word frame processor panicked".into());
+        }
+        if let Some(Err(error)) = transcription {
+            return Err(format!(
+                "Native wake word transcription worker failed: {error}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WakeWordTasks {
+    fn drop(&mut self) {
+        if let Err(error) = self.join() {
+            tracing::error!(target: "stt", %error, "Could not confirm native wake word worker completion");
+        }
+    }
 }
 
 fn spawn_frame_processor(
@@ -544,65 +568,61 @@ fn spawn_frame_processor(
     frame_rx: Receiver<Vec<f32>>,
     wake_word: String,
     trigger_on_speech: bool,
-    active_owner: Arc<AtomicU64>,
-    owner: u64,
-) -> Result<(), String> {
-    let _ = create_voice_activity_detector()?;
-    let (segment_tx, segment_rx) = tokio_mpsc::channel::<Vec<f32>>(1);
-    spawn_transcription_worker(
-        app.clone(),
-        segment_rx,
-        wake_word,
-        trigger_on_speech,
-        active_owner.clone(),
-        owner,
-    );
-
-    std::thread::spawn(move || {
-        let mut processor = match WakeWordFrameProcessor::new(segment_tx) {
-            Ok(processor) => processor,
-            Err(err) => {
-                tracing::error!(target: "stt", "[WakeWord][native] frame processor init failed: {err}");
-                return;
+    stop: CancellationToken,
+) -> Result<WakeWordTasks, String> {
+    let (segment_tx, mut segment_rx) = tokio_mpsc::channel::<Vec<f32>>(1);
+    let (initialized, ready) = mpsc::sync_channel(1);
+    let frame_stop = stop.clone();
+    let frames = std::thread::Builder::new()
+        .name("wake-word-frames".into())
+        .spawn(move || {
+            let mut processor = match WakeWordFrameProcessor::new(segment_tx, &frame_stop) {
+                Ok(processor) => {
+                    let _ = initialized.send(Ok(()));
+                    processor
+                }
+                Err(error) => {
+                    let _ = initialized.send(Err(error));
+                    return;
+                }
+            };
+            while let Some(frame) = native_worker::receive(&frame_rx, &frame_stop) {
+                processor.process_frame(frame);
             }
-        };
+        })
+        .map_err(|error| format!("Could not start native wake word frame processor: {error}"))?;
 
-        while let Ok(frame) = frame_rx.recv() {
-            if active_owner.load(Ordering::SeqCst) != owner {
-                continue;
-            }
-            processor.process_frame(frame);
+    match ready.recv() {
+        Ok(Ok(())) => {}
+        result => {
+            let _ = frames.join();
+            return Err(result
+                .ok()
+                .and_then(Result::err)
+                .unwrap_or_else(|| "Native wake word frame processor exited during setup".into()));
         }
-    });
-
-    Ok(())
-}
-
-fn spawn_transcription_worker(
-    app: AppHandle,
-    mut segment_rx: tokio_mpsc::Receiver<Vec<f32>>,
-    wake_word: String,
-    trigger_on_speech: bool,
-    active_owner: Arc<AtomicU64>,
-    owner: u64,
-) {
-    tauri::async_runtime::spawn(async move {
-        let mut transcriber = WakeWordTranscriber::new(
-            app,
-            wake_word,
-            trigger_on_speech,
-            active_owner.clone(),
-            owner,
-        );
-        while let Some(segment) = segment_rx.recv().await {
-            if active_owner.load(Ordering::SeqCst) != owner {
-                continue;
-            }
-            if let Err(err) = transcriber.check_segment(segment).await {
-                tracing::error!(target: "stt", "[WakeWord][native] Segment transcription failed: {err}");
+    }
+    let runtime = Handle::current();
+    let transcriber_stop = stop.clone();
+    let transcription = runtime.spawn(async move {
+        let mut transcriber =
+            WakeWordTranscriber::new(app, wake_word, trigger_on_speech, transcriber_stop.clone());
+        while let Some(segment) = tokio::select! {
+            biased;
+            _ = transcriber_stop.cancelled() => None,
+            next = segment_rx.recv() => next,
+        } {
+            if let Err(error) = transcriber.check_segment(segment).await {
+                tracing::error!(target: "stt", %error, "Native wake word transcription failed");
             }
         }
     });
+    Ok(WakeWordTasks {
+        cancel: stop,
+        frames: Some(frames),
+        transcription: Some(transcription),
+        runtime,
+    })
 }
 
 fn normalize_text(text: &str) -> String {
