@@ -2,6 +2,7 @@
 
 use crate::ai::context::AIOrchestrator;
 use crate::ai::initiative::InitiativeDecision;
+use crate::chat::application::ChatService;
 use chrono::Timelike;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -46,7 +47,7 @@ fn time_of_day_context() -> &'static str {
 }
 
 /// Main heartbeat loop. Spawned once at app startup.
-pub async fn heartbeat_loop(app_handle: AppHandle) {
+pub(crate) async fn heartbeat_loop(app_handle: AppHandle, chat: ChatService) {
     let config = HeartbeatConfig::default();
     let _last_time_period = current_time_period();
 
@@ -160,8 +161,11 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                     .try_state::<crate::llm::service::LlmService>()
                     .map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
-                    let database_guard = crate::ai::context::acquire_database_operation_read_guard().await;
-                    if !database_guard.is_current() { return; }
+                    let database_guard =
+                        crate::ai::context::acquire_database_operation_read_guard().await;
+                    if !database_guard.is_current() {
+                        return;
+                    }
                     let provider = if let Some(llm_state) = provider {
                         Some(llm_state.system_provider().await)
                     } else {
@@ -208,6 +212,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                 InitiativeDecision::AskQuestion { topic } => {
                     trigger_proactive_message(
                         &app_handle,
+                        &chat,
                         &orchestrator,
                         &scope,
                         idle_secs,
@@ -225,6 +230,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
                     };
                     trigger_proactive_message(
                         &app_handle,
+                        &chat,
                         &orchestrator,
                         &scope,
                         idle_secs,
@@ -244,6 +250,7 @@ pub async fn heartbeat_loop(app_handle: AppHandle) {
 
 async fn trigger_proactive_message(
     app_handle: &AppHandle,
+    chat: &ChatService,
     orchestrator: &AIOrchestrator,
     scope: &(String, Option<String>, u64),
     idle_secs: u64,
@@ -265,11 +272,8 @@ async fn trigger_proactive_message(
         trigger_type, instruction
     );
 
-    let Some(request_id) = crate::chat::application::submit_proactive_bound(
-        app_handle.clone(),
-        full_instruction.clone(),
-        scope.clone(),
-    ) else {
+    let Some(request_id) = chat.submit_proactive_bound(full_instruction.clone(), scope.clone())
+    else {
         return;
     };
 

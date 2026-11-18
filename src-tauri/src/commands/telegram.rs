@@ -1,5 +1,6 @@
 //! Telegram Bot IPC commands — frontend ↔ backend bridge.
 
+use crate::bot::{self, BotChatServices};
 use crate::error::KokoroError;
 use crate::telegram::TelegramService;
 use serde::Serialize;
@@ -24,20 +25,18 @@ pub async fn save_telegram_config(
     state: State<'_, TelegramService>,
     config: crate::telegram::TelegramConfig,
 ) -> Result<(), KokoroError> {
-    let config = crate::commands::bot::normalize_telegram_config_env(config);
-    let mut bot_config = crate::commands::bot::load_bot_config();
-    bot_config.telegram = config.clone();
-    crate::commands::bot::save_bot_config_file(&bot_config)?;
-    state.update_config(config).await;
-    Ok(())
+    bot::save_telegram_config(&state, config).await
 }
 
 #[tauri::command]
 pub async fn start_telegram_bot(
     state: State<'_, TelegramService>,
-    app: tauri::AppHandle,
+    services: State<'_, BotChatServices>,
 ) -> Result<(), KokoroError> {
-    state.start(app).await.map_err(KokoroError::ExternalService)
+    state
+        .start(services.inner().clone())
+        .await
+        .map_err(KokoroError::ExternalService)
 }
 
 #[tauri::command]

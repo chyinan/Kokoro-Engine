@@ -75,7 +75,7 @@ pub(super) async fn schedule_external_memory_tasks(
                     ),
                     target_language: Some(memory_target_language.clone()),
                 };
-                tauri::async_runtime::spawn(async move {
+                tokio::spawn(async move {
                     if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
                         || !external_memory.is_current(work)
                     {
@@ -116,7 +116,7 @@ pub(super) async fn schedule_external_memory_tasks(
             structured_memory_enabled: false,
             target_language: Some(memory_target_language.clone()),
         };
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
                 || !external_memory.is_current(work)
             {
@@ -151,7 +151,7 @@ pub(super) async fn schedule_external_memory_tasks(
         let scope = scope.clone();
         let source = platform.to_string();
         let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst)
                 || !external_memory.is_current(work)
             {

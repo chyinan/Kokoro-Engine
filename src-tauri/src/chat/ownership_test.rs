@@ -1,18 +1,29 @@
 use super::channels_test::{until_request_started, ControlledProvider};
 use crate::ai::context::AIOrchestrator;
 use crate::characters::activation::ActivationCoordinator;
-use crate::chat::{application::ChatRequest, runtime::ChatRuntimeState};
+use crate::chat::{
+    application::{ChatPolicy, ChatRequest, ChatService, StreamChatResponse},
+    runtime::ChatRuntimeState,
+};
+use crate::commands::chat::retry_chat_persistence;
 use crate::telegram::bot::{submit_message, SessionMode};
 use std::{sync::Arc, time::Duration};
 use tauri::{Emitter, Listener, Manager};
 use teloxide::types::ChatId;
+
+async fn submit_chat(
+    app: tauri::AppHandle,
+    request: ChatRequest,
+    policy: ChatPolicy,
+) -> Result<StreamChatResponse, crate::error::KokoroError> {
+    app.state::<ChatService>().submit(request, policy).await
+}
 
 pub(super) async fn verify_state_ownership(
     app: &tauri::AppHandle,
     provider: &Arc<ControlledProvider>,
     directory: &std::path::Path,
 ) {
-    use crate::chat::application::{submit_chat, ChatPolicy};
     use crate::chat::persistence::ConversationTarget;
     use crate::commands::conversation::{
         load_conversation, DeleteConversationRequest, LoadConversationRequest,
@@ -85,7 +96,7 @@ pub(super) async fn verify_state_ownership(
         conversation_id: "ownership-a".into(),
     };
     let busy = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(42),
         100,
         "same session from Telegram",
@@ -243,7 +254,7 @@ pub(super) async fn verify_state_ownership(
     .unwrap();
     assert_eq!(state.memory_progress_for(&a).await.0, 2);
     submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(42),
         101,
         "shared after release",
@@ -324,7 +335,7 @@ pub(super) async fn verify_state_ownership(
     let app_a = app.clone();
     let bot_a = tokio::spawn(async move {
         submit_message(
-            &app_a,
+            app_a.state::<ChatService>().inner(),
             ChatId(701),
             1,
             "[wait] bot A isolation",
@@ -336,7 +347,7 @@ pub(super) async fn verify_state_ownership(
     });
     until_request_started(provider).await;
     let bot_b = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(702),
         1,
         "bot B isolation",
@@ -347,20 +358,14 @@ pub(super) async fn verify_state_ownership(
     .await
     .unwrap_err();
     assert!(bot_b.to_string().contains("chat_turn_busy"));
-    crate::commands::chat::cancel_chat_turn(
-        "unrelated-request".into(),
-        None,
-        app.state(),
-        app.state(),
-        app.state(),
-    )
-    .await
-    .unwrap();
+    crate::commands::chat::cancel_chat_turn("unrelated-request".into(), None, app.clone())
+        .await
+        .unwrap();
     assert!(!bot_a.is_finished());
     provider.finish_pending.notify_one();
     let a_reply = bot_a.await.unwrap().unwrap();
     let b_reply = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(702),
         2,
         "bot B after A",
@@ -422,7 +427,10 @@ pub(super) async fn verify_state_ownership(
     .await
     .unwrap();
     assert_eq!(rows, 0);
-    crate::telegram::bot::verify_bound_session_submission(app).await;
+    crate::telegram::bot::verify_bound_session_submission(
+        app.state::<crate::bot::BotChatServices>().inner(),
+    )
+    .await;
     scopes.0.lock().unwrap().clear();
     verify_pending_reply_snapshots(app).await;
     verify_cue_snapshot(app, directory).await;
@@ -505,7 +513,6 @@ impl crate::tts::interface::TtsProvider for SnapshotVoice {
     }
 }
 async fn verify_pending_reply_snapshots(app: &tauri::AppHandle) {
-    use crate::chat::application::{submit_chat, ChatPolicy};
     let state = app.state::<AIOrchestrator>();
     state.set_memory_enabled(true).await;
     let profile = serde_json::json!({"response_language":"Japanese","tts":{"provider_id":"browser","voice":"old-voice","speed":1.25}});
@@ -617,7 +624,6 @@ async fn verify_pending_reply_snapshots(app: &tauri::AppHandle) {
 
 async fn verify_cue_snapshot(app: &tauri::AppHandle, directory: &std::path::Path) {
     use crate::actions::registry::ActionHandler;
-    use crate::chat::application::{submit_chat, ChatPolicy};
     let state = app.state::<AIOrchestrator>();
     state.set_memory_enabled(false).await;
     let package_root = directory.join("cue-packages");
@@ -718,7 +724,10 @@ async fn verify_cue_snapshot(app: &tauri::AppHandle, directory: &std::path::Path
         ))),
         request_id: Some("cue-snapshot-turn".into()),
         turn_id: fallback["turn_id"].as_str().map(str::to_owned),
-        app: app.clone(),
+        services: app
+            .state::<Arc<crate::actions::registry::ActionServices>>()
+            .inner()
+            .clone(),
         character_id: "cue-owner".into(),
         conversation_id: Some(conversation),
         source: Some("chat".into()),
@@ -766,7 +775,6 @@ async fn verify_deleted_approval(app: &tauri::AppHandle) {
         registry::{ActionPermissionLevel, ActionRegistry},
         tool_settings::ToolSettings,
     };
-    use crate::chat::application::{submit_chat, ChatPolicy};
     use crate::commands::conversation::{
         load_conversation, DeleteConversationRequest, LoadConversationRequest,
     };
@@ -872,7 +880,6 @@ pub(super) async fn verify_admission_selection_generation(
     app: &tauri::AppHandle,
     provider: &ControlledProvider,
 ) {
-    use crate::chat::application::{retry_chat_persistence, submit_chat, ChatPolicy};
     use crate::commands::conversation::{
         create_conversation, load_conversation, LoadConversationRequest,
     };
@@ -1091,7 +1098,6 @@ pub(super) async fn verify_reserved_memory_tools(
     app: &tauri::AppHandle,
     provider: &ControlledProvider,
 ) {
-    use crate::chat::application::{submit_chat, ChatPolicy};
     use crate::commands::conversation::{
         create_conversation, delete_conversation, load_conversation, DeleteConversationRequest,
         LoadConversationRequest,
@@ -1149,7 +1155,10 @@ pub(super) async fn verify_reserved_memory_tools(
                 cue_names: None,
                 request_id: Some(request_id.clone()),
                 turn_id: scope.turn_id.clone(),
-                app: app.clone(),
+                services: app
+                    .state::<Arc<crate::actions::registry::ActionServices>>()
+                    .inner()
+                    .clone(),
                 character_id: owner.clone(),
                 conversation_id: Some(conversation.clone()),
                 source: Some("chat".into()),
@@ -1360,13 +1369,7 @@ pub(super) async fn verify_snapshot_preparation_cancellation(
             Some(
                 tokio::time::timeout(
                     Duration::from_secs(3),
-                    cancel_chat_turn(
-                        request_id.clone(),
-                        None,
-                        app.state(),
-                        app.state(),
-                        app.state(),
-                    ),
+                    cancel_chat_turn(request_id.clone(), None, app.clone()),
                 )
                 .await,
             )
@@ -1550,7 +1553,6 @@ impl crate::tts::interface::TtsProvider for RetryRoleVoice {
     }
 }
 async fn verify_inactive_role_user_save_retry(app: &tauri::AppHandle, directory: &std::path::Path) {
-    use crate::chat::application::{retry_chat_persistence, submit_chat, ChatPolicy};
     use crate::commands::conversation::create_conversation;
     let state = app.state::<AIOrchestrator>();
     let coordinator = app.state::<ActivationCoordinator>();
@@ -1917,7 +1919,6 @@ async fn speech_observation_waits_for_selected_media_even_after_the_terminal() {
 }
 
 async fn verify_automatic_speech_selection(app: &tauri::AppHandle, directory: &std::path::Path) {
-    use crate::chat::application::{submit_chat, ChatPolicy};
     use crate::commands::conversation::{load_conversation, LoadConversationRequest};
     let state = app.state::<AIOrchestrator>();
     let tts = app.state::<crate::tts::TtsService>();

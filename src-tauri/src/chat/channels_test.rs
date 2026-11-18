@@ -2,10 +2,12 @@ use super::ownership_test::verify_state_ownership;
 use crate::actions::registry::{ActionError, ActionHandler, ActionParam, ActionPermissionLevel};
 use crate::actions::{tool_settings::ToolSettings, ActionContext, ActionRegistry, ActionResult};
 use crate::ai::context::AIOrchestrator;
+use crate::bot::{handle_generic_webhook, BotChatServices, WebhookBotConfig};
 use crate::characters::activation::ActivationCoordinator;
-use crate::chat::application::{ChatRequest, PendingToolApprovalState, TurnCancellationState};
+use crate::chat::application::{
+    ChatRequest, ChatService, PendingToolApprovalState, TurnCancellationState,
+};
 use crate::chat::runtime::ChatRuntimeState;
-use crate::commands::bot::{handle_generic_webhook, WebhookBotConfig};
 use crate::error::KokoroError;
 use crate::imagegen::{ImageGenService, WindowSizeState};
 use crate::llm::provider::{
@@ -334,7 +336,7 @@ async fn webhook_body(app: &tauri::AppHandle, body: Value) -> (u16, Value) {
         config,
         Some("Bearer fixture-token".into()),
         body.to_string().into(),
-        app.clone(),
+        app.state::<BotChatServices>().inner(),
     )
     .await;
     let status = response.status().as_u16();
@@ -394,6 +396,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     ));
     handle.manage(imagegen);
     handle.manage(crate::tts::TtsService::new());
+    handle.manage(crate::stt::SttService::new());
     handle.manage(WindowSizeState::default());
     handle.manage(crate::vision::watcher::VisionWatcher::new(
         Default::default(),
@@ -404,6 +407,12 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     handle.manage(Arc::new(RwLock::new(registry)));
     handle.manage(Arc::new(RwLock::new(ToolSettings::default())));
     handle.manage(LlmService::for_test(provider.clone()));
+    let desktop_host = Arc::new(handle.clone());
+    crate::desktop_chat::install_services(
+        &handle,
+        temp.path(),
+        crate::desktop_chat::TauriChatDesktop::new(&desktop_host),
+    );
 
     verify_persisted_external_contracts(&handle, &provider, &tool_executions).await;
 
@@ -432,7 +441,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let after_webhook = provider.prompts.lock().unwrap().len();
     let private = SessionMode::Private;
     let telegram_answer = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         2,
         text,
@@ -482,7 +491,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         },
         None,
         br#"{"text":"[unauthorized]"}"#.as_slice().into(),
-        handle.clone(),
+        handle.state::<BotChatServices>().inner(),
     )
     .await;
     assert_eq!(no_auth.status().as_u16(), 401);
@@ -508,7 +517,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let (status, webhook_text) = webhook(&handle, "request", "two", "ordinary text", None).await;
     assert_eq!(status, 200);
     let other_peer = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(11),
         2,
         "ordinary text",
@@ -547,7 +556,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     sqlx::query("CREATE TRIGGER refuse_assistant BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(FAIL, 'fixture save failed'); END")
         .execute(&state.db).await.unwrap();
     let save_failure = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         3,
         "save me",
@@ -588,7 +597,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let before = provider.prompts.lock().unwrap().len();
     let submit_failing_exchange = || {
         submit_message(
-            &handle,
+            handle.state::<ChatService>().inner(),
             ChatId(10),
             12,
             "[native-exchange-failure]",
@@ -663,7 +672,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     ] {
         let submit = || {
             submit_message(
-                &handle,
+                handle.state::<ChatService>().inner(),
                 ChatId(10),
                 id,
                 message,
@@ -707,7 +716,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let calls_before_recovery = provider.prompts.lock().unwrap().len();
     let tools_before_recovery = tool_executions.load(Ordering::Relaxed);
     let recovered = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         14,
         "[after-tool-final-save]",
@@ -731,7 +740,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         id: "fresh-session".into(),
     };
     let fresh_answer = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         6,
         "telegram fresh",
@@ -786,7 +795,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     let first = tokio::spawn(desktop("pending", "[wait] desktop owner", None));
     until_request_started(&provider).await;
     let other = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         4,
         "same conversation",
@@ -851,7 +860,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
         .iter()
         .any(|snapshot| snapshot.message == "same conversation"));
     let rejected_again = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         4,
         "same conversation",
@@ -863,7 +872,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     .unwrap_err();
     assert_eq!(rejected_again.to_string(), other.to_string());
     let conflicting_replay = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         4,
         "changed rejected input",
@@ -884,7 +893,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     );
     let activation = state.acquire_activation_lock().await;
     let during_activation = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         7,
         "during activation",
@@ -900,7 +909,7 @@ async fn desktop_webhook_and_telegram_execute_the_same_bound_chat() {
     drop(activation);
 
     let answer = submit_message(
-        &handle,
+        handle.state::<ChatService>().inner(),
         ChatId(10),
         5,
         "shared once free",
@@ -1104,7 +1113,7 @@ async fn verify_persisted_external_contracts(
         conversation_id: "desktop".into(),
     };
     submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(777),
         1,
         "[origin-shared-external]",
@@ -1121,7 +1130,7 @@ async fn verify_persisted_external_contracts(
         tools.load(Ordering::Relaxed),
     );
     let rejected = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(777),
         1,
         "[origin-shared-external]",
@@ -1150,7 +1159,7 @@ async fn verify_persisted_external_contracts(
             .bind(json!({"source":"telegram","client_request_id":legacy}).to_string()).execute(&state.db).await.unwrap();
         runtime.forget_completed_for_restart_test();
         let rejected = submit_message(
-            app,
+            app.state::<ChatService>().inner(),
             ChatId(777),
             id,
             "old Telegram input",
@@ -1319,7 +1328,7 @@ async fn verify_legacy_metadata_and_retired_media(
         conversation_id: "legacy-replay".into(),
     };
     let first = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(778),
         1,
         "fresh legacy turn",
@@ -1336,7 +1345,7 @@ async fn verify_legacy_metadata_and_retired_media(
     );
     runtime.forget_completed_for_restart_test();
     let replay = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(778),
         1,
         "fresh legacy turn",
@@ -1389,7 +1398,7 @@ async fn verify_legacy_metadata_and_retired_media(
     };
     evict(0);
     let conflict = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(778),
         1,
         "changed text",
@@ -1402,7 +1411,7 @@ async fn verify_legacy_metadata_and_retired_media(
         matches!(conflict, Err(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
     );
     let replay = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(778),
         1,
         "fresh legacy turn",
@@ -1425,7 +1434,7 @@ async fn verify_legacy_metadata_and_retired_media(
         .await
         .unwrap();
     let missing = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(778),
         1,
         "fresh legacy turn",
@@ -1496,7 +1505,7 @@ async fn verify_external_failure_memory_origin(
         conversation_id: "desktop".into(),
     };
     let failure = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(779),
         1,
         "[after-tool-stream-failure]",
@@ -1552,7 +1561,7 @@ async fn verify_external_failure_memory_origin(
         Err(KokoroError::Validation(_))
     ));
     assert!(submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(779),
         1,
         "[after-tool-stream-failure]",
@@ -1618,7 +1627,7 @@ async fn verify_shared_native_memory_origin(
     sqlx::query("CREATE TRIGGER reject_memory_batch BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' AND json_extract(NEW.metadata,'$.type') IS NULL BEGIN SELECT RAISE(ABORT,'memory batch failure'); END").execute(&state.db).await.unwrap();
     assert!(matches!(
         submit_message(
-            app,
+            app.state::<ChatService>().inner(),
             ChatId(777),
             2,
             "[memory-native] external",
@@ -1638,7 +1647,7 @@ async fn verify_shared_native_memory_origin(
         .await
         .unwrap();
     let external = submit_message(
-        app,
+        app.state::<ChatService>().inner(),
         ChatId(777),
         2,
         "[memory-native] external",
@@ -1870,9 +1879,7 @@ async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsi
             crate::commands::chat::cancel_chat_turn(
                 turn.client_request_id.clone(),
                 None,
-                app.state(),
-                app.state(),
-                app.state(),
+                app.clone(),
             )
             .await
             .unwrap();
@@ -1902,7 +1909,7 @@ async fn verify_hidden_turn_scope(app: &tauri::AppHandle, executions: &AtomicUsi
                 .execute(&state.db)
                 .await
                 .unwrap();
-            let recovered = super::application::retry_chat_persistence(
+            let recovered = crate::commands::chat::retry_chat_persistence(
                 app.clone(),
                 request.client_request_id.clone().unwrap(),
             )
@@ -2033,7 +2040,7 @@ async fn verify_external_tool_only_replies(
         let session = SessionMode::Private;
         let submit = || {
             submit_message(
-                app,
+                app.state::<ChatService>().inner(),
                 // Keep each language/tool-mode fixture free of earlier tool history.
                 ChatId(100 + index as i64),
                 100 + index as i32,
@@ -2122,7 +2129,11 @@ async fn verify_audio_admission(app: &tauri::AppHandle, provider: &ControlledPro
         .unwrap()],
         ..Default::default()
     };
-    app.manage(crate::stt::SttService::init_from_config(&config).await);
+    let stt_config = tempfile::tempdir().unwrap();
+    app.state::<crate::stt::SttService>()
+        .save_and_reload(&stt_config.path().join("stt_config.json"), config)
+        .await
+        .unwrap();
     let body = json!({"request_id": "audio-first", "conversation_id": "audio", "audio_base64": "AQID", "audio_format": "wav"});
     let first = webhook_body(app, body.clone()).await;
     assert_eq!(first.0, 200, "{first:?}");

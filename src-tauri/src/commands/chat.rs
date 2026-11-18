@@ -1,13 +1,14 @@
 use crate::ai::context::AIOrchestrator;
 use crate::chat::application::{
-    approve_tool_approval_inner, cancel_chat_turn_inner, recover_chat_draft_submission_inner,
-    reject_tool_approval_inner, submit_chat, ChatDraftSubmissionStatus, ChatRequest,
+    approve_tool_approval_inner, cancel_and_wait, recover_chat_draft_submission_inner,
+    reject_tool_approval_inner, ChatDraftSubmissionStatus, ChatPolicy, ChatRequest, ChatService,
     PendingToolApprovalState, StreamChatResponse, TurnCancellationState,
 };
+use crate::chat::events::ChatEvents;
+use crate::chat::settings::ContextSettings;
 use crate::error::KokoroError;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{command, Emitter, Manager, State};
+use tauri::{command, Manager, State};
 
 #[command]
 pub async fn approve_tool_approval(
@@ -30,37 +31,20 @@ pub async fn reject_tool_approval(
 pub async fn cancel_chat_turn(
     turn_id: String,
     reason: Option<String>,
-    cancel_state: State<'_, Arc<TurnCancellationState>>,
-    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
-    approval_state: State<'_, Arc<PendingToolApprovalState>>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let outcome = runtime.outcome(&turn_id);
-    cancel_chat_turn_inner(
+    if let Some(chat) = app.try_state::<ChatService>() {
+        return chat.cancel(turn_id, reason).await;
+    }
+    // Cancellation is still available when the AI database did not initialize.
+    cancel_and_wait(
         turn_id,
         reason,
-        cancel_state.inner().clone(),
-        &approval_state,
+        &app.state::<Arc<crate::chat::runtime::ChatRuntimeState>>(),
+        app.state::<Arc<TurnCancellationState>>().inner().clone(),
+        &app.state::<Arc<PendingToolApprovalState>>(),
     )
-    .await?;
-    if let Some(mut outcome) = outcome {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                if outcome.borrow().is_some() {
-                    return Ok::<(), String>(());
-                }
-                outcome
-                    .changed()
-                    .await
-                    .map_err(|_| "chat worker stopped".to_string())?;
-            }
-        })
-        .await
-        .map_err(|_| {
-            "chat_cancel_pending: cleanup is still running; retry after the terminal state"
-                .to_string()
-        })??;
-    }
-    Ok(())
+    .await
 }
 
 #[tauri::command]
@@ -68,21 +52,11 @@ pub fn is_chat_busy(state: State<'_, AIOrchestrator>) -> bool {
     state.is_chat_busy()
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ContextSettings {
-    pub strategy: String,
-    pub max_message_chars: usize,
-}
-
 #[tauri::command]
 pub async fn get_context_settings(
     state: State<'_, AIOrchestrator>,
 ) -> Result<ContextSettings, KokoroError> {
-    let (strategy, max_message_chars) = state.get_context_settings().await;
-    Ok(ContextSettings {
-        strategy,
-        max_message_chars,
-    })
+    Ok(ContextSettings::current(&state).await)
 }
 
 #[tauri::command]
@@ -90,46 +64,24 @@ pub async fn set_context_settings(
     state: State<'_, AIOrchestrator>,
     settings: ContextSettings,
 ) -> Result<(), KokoroError> {
-    // Validate strategy
-    let strategy = if settings.strategy == "summary" {
-        "summary".to_string()
-    } else {
-        "window".to_string()
-    };
-    // Clamp max_message_chars to safe range
-    let max_chars = settings.max_message_chars.clamp(100, 50_000);
-
-    state
-        .set_context_settings(strategy.clone(), max_chars)
-        .await;
-
-    // Persist to disk
     let app_data = crate::utils::paths::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("com.chyin.kokoro");
-    let _ = std::fs::create_dir_all(&app_data);
-    let path = app_data.join("context_settings.json");
-    let json = serde_json::json!({
-        "strategy": strategy,
-        "max_message_chars": max_chars,
-    });
-    if let Err(e) = std::fs::write(&path, json.to_string()) {
-        tracing::error!(target: "context", "[Context] Failed to persist context_settings: {}", e);
-    }
+    settings
+        .save(&state, &app_data.join("context_settings.json"))
+        .await;
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn finish_chat_playback(
+pub(crate) fn finish_chat_playback(
     window: tauri::Window,
     request_id: String,
     error: Option<String>,
-    runtime: State<'_, Arc<crate::chat::runtime::ChatRuntimeState>>,
+    events: State<'_, ChatEvents>,
 ) {
-    if let Some(snapshot) = runtime.finish_playback(&request_id, window.label(), error) {
-        let _ = window.app_handle().emit("chat-runtime-changed", snapshot);
-    }
+    events.finish_playback(&request_id, window.label(), error);
 }
 
 #[tauri::command]
@@ -168,7 +120,10 @@ pub async fn stream_chat(
     app: tauri::AppHandle,
     request: ChatRequest,
 ) -> Result<StreamChatResponse, KokoroError> {
-    submit_chat(app, request, crate::chat::application::ChatPolicy::Desktop).await
+    let chat = app
+        .try_state::<ChatService>()
+        .ok_or_else(|| KokoroError::Chat("AI is not available".into()))?;
+    chat.submit(request, ChatPolicy::Desktop).await
 }
 
 #[tauri::command]
@@ -176,5 +131,8 @@ pub async fn retry_chat_persistence(
     app: tauri::AppHandle,
     client_request_id: String,
 ) -> Result<StreamChatResponse, KokoroError> {
-    crate::chat::application::retry_chat_persistence(app, client_request_id).await
+    let chat = app
+        .try_state::<ChatService>()
+        .ok_or_else(|| KokoroError::Chat("AI is not available".into()))?;
+    chat.retry_chat_persistence(client_request_id).await
 }

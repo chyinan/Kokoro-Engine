@@ -1,4 +1,7 @@
 // pattern: Imperative Shell
+#[cfg(test)]
+use super::script_queue::SCRIPT_EVENT_CAPACITY;
+use super::script_queue::{ModScriptQueue, ScriptCommand, ScriptModule};
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, ModHookPayload};
 use crate::mods::api::ScriptEvent;
 use crate::mods::manifest::ModManifest;
@@ -11,11 +14,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 const SCRIPT_EXECUTION_BUDGET: Duration = Duration::from_secs(5);
 const SCRIPT_EVENT_BUDGET: Duration = Duration::from_millis(250);
-const SCRIPT_EVENT_CAPACITY: usize = 32;
 
 fn install_script_interrupt_handler(runtime: &rquickjs::Runtime) -> Arc<Mutex<Option<Instant>>> {
     let deadline = Arc::new(Mutex::new(None));
@@ -90,99 +91,6 @@ fn safe_join(base_dir: &Path, file_path: &str) -> Result<PathBuf, String> {
             file_path,
             canonical.display()
         ))
-    }
-}
-
-struct ScriptModule {
-    id: String,
-    scripts: Vec<(String, String)>,
-}
-
-enum ScriptCommand {
-    DispatchEvent {
-        event: String,
-        payload: JsonValue,
-        slot: Option<OwnedSemaphorePermit>,
-    },
-    ReplaceListeners {
-        module: Option<ScriptModule>,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-}
-
-/// All commands enter the same FIFO so a listener replacement cannot overtake
-/// previously accepted events. Only completions and serialized lifecycle
-/// changes bypass the limit; chat fragments and cues may be shed under load.
-#[derive(Clone)]
-pub(crate) struct ModScriptQueue {
-    tx: mpsc::UnboundedSender<ScriptCommand>,
-    event_slots: Arc<Semaphore>,
-}
-
-impl ModScriptQueue {
-    fn channel() -> (Self, mpsc::UnboundedReceiver<ScriptCommand>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            Self {
-                tx,
-                event_slots: Arc::new(Semaphore::new(SCRIPT_EVENT_CAPACITY)),
-            },
-            rx,
-        )
-    }
-
-    pub(crate) fn enqueue_chat_event(&self, name: &str, payload: JsonValue) {
-        let event = match name {
-            "chat-turn-delta" => "chat",
-            "chat-turn-finish" => "chat-done",
-            "chat-cue" => "cue",
-            _ => return,
-        };
-        let slot = if event == "chat-done" {
-            None
-        } else {
-            let Ok(slot) = self.event_slots.clone().try_acquire_owned() else {
-                return;
-            };
-            Some(slot)
-        };
-        // The receiver can only disconnect if the runtime has stopped.
-        let _ = self.send_event(event, payload, slot);
-    }
-
-    fn send_event(
-        &self,
-        event: &str,
-        payload: JsonValue,
-        slot: Option<OwnedSemaphorePermit>,
-    ) -> Result<(), String> {
-        self.tx
-            .send(ScriptCommand::DispatchEvent {
-                event: event.into(),
-                payload,
-                slot,
-            })
-            .map_err(|_| "Script runtime disconnected".to_string())
-    }
-
-    async fn dispatch_event(&self, event: &str, payload: JsonValue) -> Result<(), String> {
-        let slot = self
-            .event_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|err| err.to_string())?;
-        self.send_event(event, payload, Some(slot))
-    }
-
-    async fn replace_listeners(&self, module: Option<ScriptModule>) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.tx
-            .send(ScriptCommand::ReplaceListeners { module, reply })
-            .map_err(|_| "Script runtime disconnected".to_string())?;
-        result
-            .await
-            .map_err(|_| "Script runtime disconnected".to_string())?
     }
 }
 
@@ -966,7 +874,7 @@ mod tests {
                 ["second-done", ""]
             ]),
         );
-        assert_eq!(queue.event_slots.available_permits(), SCRIPT_EVENT_CAPACITY);
+        assert_eq!(queue.available_event_slots(), SCRIPT_EVENT_CAPACITY);
     }
 
     /// Helper: create a temp dir with a fake mod inside

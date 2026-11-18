@@ -5,10 +5,11 @@ pub mod config;
 
 pub use config::{load_config, save_config, TelegramConfig};
 
+use crate::bot::BotChatServices;
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 
-/// Managed Tauri state for the Telegram bot service.
+/// Application-owned Telegram polling service.
 #[derive(Clone)]
 pub struct TelegramService {
     config: Arc<RwLock<TelegramConfig>>,
@@ -41,7 +42,7 @@ impl TelegramService {
     }
 
     /// Start the bot polling loop. Returns Err if already running or no token.
-    pub async fn start(&self, app: tauri::AppHandle) -> Result<(), String> {
+    pub async fn start(&self, services: BotChatServices) -> Result<(), String> {
         if self.is_running().await {
             return Err("Telegram bot is already running".to_string());
         }
@@ -61,9 +62,9 @@ impl TelegramService {
         // Pass the shared Arc so config changes take effect without restart
         let shared_config = self.config.clone();
 
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             tracing::info!(target: "telegram", "Bot polling started");
-            bot::run_polling(token, shared_config, app, rx).await;
+            bot::run_polling(token, shared_config, services, rx).await;
             tracing::info!(target: "telegram", "Bot polling stopped");
             // Clear the shutdown sender so is_running() returns false
             let mut guard = shutdown_flag.write().await;

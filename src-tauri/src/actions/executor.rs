@@ -11,7 +11,6 @@ use crate::hooks::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::Manager;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -1284,12 +1283,12 @@ pub(crate) struct ToolExecutionScope<'a> {
     pub character_id: &'a str,
     pub conversation_id: Option<&'a str>,
     pub source: &'a str,
-    pub allow_hooks: bool,
+    pub hooks: Option<&'a HookRuntime>,
     pub allowed_tool_ids: Option<&'a std::collections::HashSet<String>>,
 }
 
 pub(crate) async fn execute_tool_calls_with_cancellation(
-    app: &tauri::AppHandle,
+    services: Arc<super::registry::ActionServices>,
     registry_state: &Arc<RwLock<ActionRegistry>>,
     tool_settings_state: &Arc<RwLock<ToolSettings>>,
     scope: &ToolExecutionScope<'_>,
@@ -1298,10 +1297,7 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
     tool_timeout: Option<std::time::Duration>,
 ) -> Result<Vec<ToolExecutionOutcome>, ToolCancellationError> {
     let mut outcomes = Vec::with_capacity(tool_calls.len());
-    let hook_runtime = scope
-        .allow_hooks
-        .then(|| app.try_state::<HookRuntime>())
-        .flatten();
+    let hook_runtime = scope.hooks;
     let conversation_id = || scope.conversation_id.map(str::to_owned);
 
     for tool_call in tool_calls {
@@ -1460,7 +1456,7 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                                                 cue_names: scope.cue_names.cloned(),
                                                 request_id: Some(scope.request_id.to_owned()),
                                                 turn_id: Some(scope.turn_id.to_owned()),
-                                                app: app.clone(),
+                                                services: services.clone(),
                                                 character_id: scope.character_id.to_owned(),
                                                 conversation_id: conversation_id(),
                                                 source: Some(scope.source.to_owned()),

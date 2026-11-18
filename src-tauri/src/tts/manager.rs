@@ -17,30 +17,42 @@ use super::queue::TtsQueue;
 use super::router::TtsRouter;
 use super::voice_registry::VoiceRegistry;
 
-use crate::chat::runtime::ChatRuntimeState;
+use crate::ai::context::AIOrchestrator;
+use crate::chat::runtime::ChatPlaybackScope;
+use crate::error::KokoroError;
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, TtsHookPayload};
 use futures::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{watch, Mutex, RwLock};
 
 const MAX_CANCELLED_TTS_REQUESTS: usize = 128;
 
-// ── Tauri Event Payloads ───────────────────────────────
+pub(crate) trait TtsPlayback: Send + Sync {
+    fn emit(&self, event: TtsPlaybackEvent) -> Result<(), String>;
+}
 
-#[derive(Clone, Serialize)]
-struct TtsStartEvent {
-    request_id: String,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chat_scope: Option<crate::chat::runtime::ChatPlaybackScope>,
+pub(crate) enum TtsPlaybackEvent {
+    Start(TtsStartEvent),
+    Audio(TtsAudioEvent),
+    End(TtsEndEvent),
+    Error(TtsErrorEvent),
+    BrowserDelegate(TtsBrowserDelegateEvent),
 }
 
 #[derive(Clone, Serialize)]
-struct TtsAudioEvent {
+pub(crate) struct TtsStartEvent {
+    pub(crate) request_id: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_scope: Option<ChatPlaybackScope>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct TtsAudioEvent {
     request_id: String,
     sentence_id: usize,
     sequence: u64,
@@ -50,7 +62,7 @@ struct TtsAudioEvent {
 }
 
 #[derive(Clone, Serialize)]
-struct TtsEndEvent {
+pub(crate) struct TtsEndEvent {
     request_id: String,
     text: String,
     status: TtsFinishStatus,
@@ -65,13 +77,13 @@ enum TtsFinishStatus {
 }
 
 #[derive(Clone, Serialize)]
-struct TtsErrorEvent {
+pub(crate) struct TtsErrorEvent {
     request_id: String,
     error: String,
 }
 
 #[derive(Clone, Serialize)]
-struct TtsBrowserDelegateEvent {
+pub(crate) struct TtsBrowserDelegateEvent {
     request_id: String,
     sentence_id: usize,
     text: String,
@@ -372,9 +384,10 @@ impl TtsService {
     }
 
     /// Main synthesis method with cache → queue → route → synthesize pipeline.
-    pub async fn speak(
+    pub(crate) async fn speak(
         &self,
-        app: AppHandle,
+        playback: &dyn TtsPlayback,
+        hooks: Option<&HookRuntime>,
         text: String,
         provider_id: Option<String>,
         params: Option<TtsParams>,
@@ -386,7 +399,8 @@ impl TtsService {
 
         let result = self
             .speak_request(
-                app,
+                playback,
+                hooks,
                 text,
                 provider_id,
                 params.unwrap_or_default(),
@@ -408,21 +422,23 @@ impl TtsService {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn speak_snapshot(
         &self,
-        app: AppHandle,
+        playback: &dyn TtsPlayback,
+        hooks: Option<&HookRuntime>,
         text: String,
         request_id: String,
         snapshot: Arc<TtsExecutionSnapshot>,
-        scope: crate::chat::runtime::ChatPlaybackScope,
+        scope: &ChatPlaybackScope,
+        selection: &AIOrchestrator,
     ) -> Result<(), String> {
         let cancel = {
-            let state = app.state::<crate::ai::context::AIOrchestrator>();
-            let Ok(_activation) = state.enter_chat_turn() else {
+            let Ok(_activation) = selection.enter_chat_turn() else {
                 return Ok(());
             };
-            let _selection = state.selection.conversation_switch_lock.lock().await;
-            if !scope.matches_selection(&state).await {
+            let _selection = selection.selection.conversation_switch_lock.lock().await;
+            if !scope.matches_selection(selection).await {
                 return Ok(());
             }
             // Only short in-memory registration is covered. A late A request cannot
@@ -434,14 +450,15 @@ impl TtsService {
         };
         let result = self
             .speak_request(
-                app,
+                playback,
+                hooks,
                 text,
                 None,
                 snapshot.params.clone(),
                 request_id,
                 &cancel,
                 Some(&snapshot),
-                Some(&scope),
+                Some((scope, selection)),
             )
             .await;
         let mut requests = self.requests.lock().await;
@@ -498,8 +515,6 @@ impl TtsService {
     async fn publish_playback_start(
         &self,
         cancel: &watch::Sender<bool>,
-        window: &str,
-        runtime: Option<&ChatRuntimeState>,
         emit_start: impl FnOnce(&str) -> Result<(), String>,
     ) -> Result<bool, String> {
         let requests = self.requests.lock().await;
@@ -512,37 +527,24 @@ impl TtsService {
         };
         let request_id = &current.request_id;
         // A replacement or cancellation must wait until ownership and tts:start are published.
-        if let Some(runtime) = runtime {
-            runtime.begin_playback(request_id, window);
-        }
-        if let Err(error) = emit_start(request_id) {
-            if let Some(runtime) = runtime {
-                runtime.finish_playback(request_id, window, None);
-            }
-            return Err(error);
-        }
+        emit_start(request_id)?;
         Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn speak_request(
         &self,
-        app: AppHandle,
+        playback: &dyn TtsPlayback,
+        hooks: Option<&HookRuntime>,
         text: String,
         preferred_provider_id: Option<String>,
         params: TtsParams,
         request_id: String,
         cancellation: &watch::Sender<bool>,
         snapshot: Option<&TtsExecutionSnapshot>,
-        chat_scope: Option<&crate::chat::runtime::ChatPlaybackScope>,
+        chat_scope: Option<(&ChatPlaybackScope, &AIOrchestrator)>,
     ) -> Result<(), String> {
         let mut cancel = cancellation.subscribe();
-        let playback_window = if app.get_webview_window("main").is_some() {
-            "main"
-        } else {
-            "pet"
-        };
-        let hook_runtime = app.try_state::<HookRuntime>();
         let (route, provider) = if let Some(snapshot) = snapshot {
             let provider = snapshot.provider()?.clone();
             (
@@ -576,7 +578,7 @@ impl TtsService {
             return Ok(());
         }
 
-        if let Some(hooks) = hook_runtime.as_ref() {
+        if let Some(hooks) = hooks {
             hooks
                 .emit_best_effort(
                     &HookEvent::BeforeTtsPlay,
@@ -588,30 +590,19 @@ impl TtsService {
                 .await;
         }
 
-        if let Some(scope) = chat_scope {
-            if !scope.is_selected(&app).await {
+        if let Some((scope, selection)) = chat_scope {
+            if !scope.is_selected(selection).await {
                 return Ok(());
             }
         }
-        let runtime = app.try_state::<Arc<ChatRuntimeState>>();
         if !self
-            .publish_playback_start(
-                cancellation,
-                playback_window,
-                runtime.as_ref().map(|state| state.inner().as_ref()),
-                |request_id| {
-                    app.emit_to(
-                        playback_window,
-                        "tts:start",
-                        TtsStartEvent {
-                            request_id: request_id.to_owned(),
-                            text: text.clone(),
-                            chat_scope: chat_scope.cloned(),
-                        },
-                    )
-                    .map_err(|error| error.to_string())
-                },
-            )
+            .publish_playback_start(cancellation, |request_id| {
+                playback.emit(TtsPlaybackEvent::Start(TtsStartEvent {
+                    request_id: request_id.to_owned(),
+                    text: text.clone(),
+                    chat_scope: chat_scope.map(|(scope, _)| scope.clone()),
+                }))
+            })
             .await?
         {
             return Ok(());
@@ -700,7 +691,7 @@ impl TtsService {
         'sentences: while let Some(result) = sentences.next().await {
             if *cancel.borrow()
                 || match chat_scope {
-                    Some(scope) => !scope.is_selected(&app).await,
+                    Some((scope, selection)) => !scope.is_selected(selection).await,
                     None => false,
                 }
             {
@@ -722,8 +713,8 @@ impl TtsService {
                                 match chunk {
                                     Some(Ok(chunk)) if chunk.data.is_empty() => continue,
                                     Some(Ok(chunk)) => {
-                                        if let Some(scope) = chat_scope {
-                                            if !scope.is_selected(&app).await {
+                                        if let Some((scope, selection)) = chat_scope {
+                                            if !scope.is_selected(selection).await {
                                                 cancelled = true;
                                                 provider.cancel_request(&request_id).await;
                                                 break;
@@ -731,14 +722,14 @@ impl TtsService {
                                         }
                                         full_audio.extend_from_slice(&chunk.data);
                                         sequence += 1;
-                                        if let Err(error) = app.emit_to(playback_window, "tts:audio", TtsAudioEvent {
+                                        if let Err(error) = playback.emit(TtsPlaybackEvent::Audio(TtsAudioEvent {
                                             request_id: request_id.clone(),
                                             sentence_id,
                                             sequence,
                                             response_id: chunk.response_id,
                                             format: chunk.format.or_else(|| provider_output_format.clone()),
                                             data: chunk.data,
-                                        }) {
+                                        })) {
                                             synthesis_error = Some(format!("failed to deliver TTS audio: {error}"));
                                             provider.cancel_request(&request_id).await;
                                             break;
@@ -773,19 +764,14 @@ impl TtsService {
                     }
                 }
                 Ok((sentence_id, sentence, None, None)) => {
-                    app.emit_to(
-                        playback_window,
-                        "tts:browser-delegate",
-                        TtsBrowserDelegateEvent {
-                            request_id: request_id.clone(),
-                            sentence_id,
-                            text: sentence,
-                            voice: params.voice.clone(),
-                            speed: params.speed,
-                            pitch: params.pitch,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
+                    playback.emit(TtsPlaybackEvent::BrowserDelegate(TtsBrowserDelegateEvent {
+                        request_id: request_id.clone(),
+                        sentence_id,
+                        text: sentence,
+                        voice: params.voice.clone(),
+                        speed: params.speed,
+                        pitch: params.pitch,
+                    }))?;
                 }
                 Ok((_, _, None, Some(_))) => {
                     synthesis_error = Some("TTS provider returned no audio stream".to_string());
@@ -817,31 +803,22 @@ impl TtsService {
         };
 
         if let Some(error) = synthesis_error.as_ref() {
-            let _ = app.emit_to(
-                playback_window,
-                "tts:error",
-                TtsErrorEvent {
-                    request_id: request_id.clone(),
-                    error: error.clone(),
-                },
-            );
-        }
-        app.emit_to(
-            playback_window,
-            "tts:end",
-            TtsEndEvent {
+            let _ = playback.emit(TtsPlaybackEvent::Error(TtsErrorEvent {
                 request_id: request_id.clone(),
-                text: text.clone(),
-                status: finish_status,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+                error: error.clone(),
+            }));
+        }
+        playback.emit(TtsPlaybackEvent::End(TtsEndEvent {
+            request_id: request_id.clone(),
+            text: text.clone(),
+            status: finish_status,
+        }))?;
 
         if let Some(error) = synthesis_error {
             return Err(error);
         }
         if !cancelled {
-            if let Some(hooks) = hook_runtime.as_ref() {
+            if let Some(hooks) = hooks {
                 hooks
                     .emit_best_effort(
                         &HookEvent::AfterTtsPlay,
@@ -886,6 +863,17 @@ impl TtsService {
             available: provider.is_available().await,
             capabilities: provider.capabilities(),
         })
+    }
+
+    pub(crate) async fn save_and_reload_config(
+        &self,
+        path: &Path,
+        config: &TtsSystemConfig,
+    ) -> Result<(), KokoroError> {
+        super::config::save_config(path, config)?;
+        self.reload_from_config(config)
+            .await
+            .map_err(|error| KokoroError::Tts(format!("failed to reload TTS providers: {error}")))
     }
 
     /// Hot-reload: rebuild providers first, then atomically swap runtime state.
@@ -971,8 +959,7 @@ impl TtsService {
         Ok(())
     }
 
-    /// Synthesize text to raw audio bytes without requiring an AppHandle.
-    /// Used by services that need audio data directly (e.g. Telegram bot).
+    /// Synthesize text to audio bytes for file-oriented consumers.
     pub async fn synthesize_text(
         &self,
         text: &str,
@@ -1123,10 +1110,256 @@ fn record_tts_error(current: &mut Option<String>, error: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        record_tts_error, wrap_pcm_s16le_as_wav, ChatRuntimeState, TtsService,
-        MAX_CANCELLED_TTS_REQUESTS,
-    };
+    use super::*;
+    use crate::chat::runtime::ChatRuntimeState;
+    use std::sync::Mutex as SyncMutex;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct RecordingPlayback {
+        events: SyncMutex<Vec<TtsPlaybackEvent>>,
+        started: Notify,
+        reject_audio: bool,
+    }
+
+    impl TtsPlayback for RecordingPlayback {
+        fn emit(&self, event: TtsPlaybackEvent) -> Result<(), String> {
+            if self.reject_audio && matches!(event, TtsPlaybackEvent::Audio(_)) {
+                return Err("audio output closed".into());
+            }
+            if matches!(event, TtsPlaybackEvent::Start(_)) {
+                self.started.notify_one();
+            }
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct PlaybackProvider {
+        id: &'static str,
+        sample: u8,
+        pending: bool,
+        error: Option<TtsError>,
+        calls: SyncMutex<Vec<TtsParams>>,
+        cancellations: SyncMutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TtsProvider for PlaybackProvider {
+        fn id(&self) -> String {
+            self.id.into()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        fn voices(&self) -> Vec<VoiceProfile> {
+            vec![]
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn synthesize(&self, _: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
+            self.calls.lock().unwrap().push(params);
+            if self.pending {
+                return std::future::pending().await;
+            }
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(vec![self.sample]),
+            }
+        }
+
+        async fn cancel_request(&self, request_id: &str) {
+            self.cancellations
+                .lock()
+                .unwrap()
+                .push(request_id.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_uses_the_requested_provider_and_emits_ordered_audio() {
+        let service = TtsService::new();
+        let default = Arc::new(PlaybackProvider {
+            id: "default",
+            sample: 2,
+            ..Default::default()
+        });
+        let requested = Arc::new(PlaybackProvider {
+            id: "requested",
+            sample: 3,
+            ..Default::default()
+        });
+        service.register_provider(default.clone()).await;
+        service.register_provider(requested.clone()).await;
+        let playback = RecordingPlayback::default();
+        service
+            .speak(
+                &playback,
+                None,
+                "First. Second.".into(),
+                Some("requested".into()),
+                Some(TtsParams {
+                    voice: Some("requested-voice".into()),
+                    ..Default::default()
+                }),
+                "request".into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(default.calls.lock().unwrap().is_empty());
+        let calls = requested.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|call| call.voice.as_deref() == Some("requested-voice")));
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(start), TtsPlaybackEvent::Audio(first), TtsPlaybackEvent::Audio(second), TtsPlaybackEvent::End(end)] =
+            events.as_slice()
+        else {
+            panic!("expected start, two audio events and end");
+        };
+        assert_eq!(start.request_id, "request");
+        assert!(start.chat_scope.is_none());
+        assert_eq!(
+            (first.sentence_id, first.sequence, first.data.as_slice()),
+            (1, 1, &[3][..])
+        );
+        assert_eq!(
+            (second.sentence_id, second.sequence, second.data.as_slice()),
+            (2, 2, &[3][..])
+        );
+        assert!(matches!(end.status, TtsFinishStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn provider_failure_emits_error_end_without_audio() {
+        let service = TtsService::new();
+        let provider = Arc::new(PlaybackProvider {
+            id: "test",
+            error: Some(TtsError::SynthesisFailed("voice unavailable".into())),
+            ..Default::default()
+        });
+        service.register_provider(provider.clone()).await;
+        let playback = RecordingPlayback::default();
+        let result = service
+            .speak(
+                &playback,
+                None,
+                "message".into(),
+                None,
+                None,
+                "request".into(),
+            )
+            .await;
+
+        let expected = "TTS synthesis failed: Synthesis failed: voice unavailable";
+        assert_eq!(result.unwrap_err(), expected);
+        assert_eq!(
+            provider.cancellations.lock().unwrap().as_slice(),
+            ["request"]
+        );
+        assert!(service.requests.lock().await.active.is_none());
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(_), TtsPlaybackEvent::Error(error), TtsPlaybackEvent::End(end)] =
+            events.as_slice()
+        else {
+            panic!("expected start, error and end");
+        };
+        assert_eq!(error.error, expected);
+        assert!(matches!(end.status, TtsFinishStatus::Error));
+    }
+
+    #[tokio::test]
+    async fn failed_audio_output_cancels_the_provider_and_emits_error_end() {
+        let service = TtsService::new();
+        let provider = Arc::new(PlaybackProvider {
+            id: "test",
+            sample: 1,
+            ..Default::default()
+        });
+        service.register_provider(provider.clone()).await;
+        let playback = RecordingPlayback {
+            reject_audio: true,
+            ..Default::default()
+        };
+        let result = service
+            .speak(
+                &playback,
+                None,
+                "message".into(),
+                None,
+                None,
+                "request".into(),
+            )
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "failed to deliver TTS audio: audio output closed"
+        );
+        assert_eq!(
+            provider.cancellations.lock().unwrap().as_slice(),
+            ["request"]
+        );
+        assert!(service.requests.lock().await.active.is_none());
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(_), TtsPlaybackEvent::Error(error), TtsPlaybackEvent::End(end)] =
+            events.as_slice()
+        else {
+            panic!("expected start, error and end");
+        };
+        assert_eq!(error.request_id, "request");
+        assert!(matches!(end.status, TtsFinishStatus::Error));
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_start_ends_playback_without_audio_or_error() {
+        let service = TtsService::new();
+        let provider = Arc::new(PlaybackProvider {
+            id: "test",
+            pending: true,
+            ..Default::default()
+        });
+        service.register_provider(provider.clone()).await;
+        let playback = RecordingPlayback::default();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (result, ()) = tokio::join!(
+                service.speak(
+                    &playback,
+                    None,
+                    "message".into(),
+                    None,
+                    None,
+                    "request".into()
+                ),
+                async {
+                    playback.started.notified().await;
+                    assert!(service.cancel_request(Some("request")).await);
+                }
+            );
+            result.unwrap();
+        })
+        .await
+        .expect("cancel must wake the waiting synthesis");
+
+        assert_eq!(
+            provider.cancellations.lock().unwrap().as_slice(),
+            ["request"]
+        );
+        assert!(service.requests.lock().await.active.is_none());
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(_), TtsPlaybackEvent::End(end)] = events.as_slice() else {
+            panic!("expected start and end");
+        };
+        assert!(matches!(end.status, TtsFinishStatus::Cancelled));
+    }
 
     #[tokio::test]
     async fn role_execution_snapshot_preserves_disabled_preset_and_unavailable_modes() {
@@ -1381,7 +1614,8 @@ mod tests {
                 old_paused.send(()).unwrap();
                 wait_for_new.await.unwrap();
                 assert!(!service
-                    .publish_playback_start(&old, "main", Some(&runtime), |id| {
+                    .publish_playback_start(&old, |id| {
+                        runtime.begin_playback(id, "main");
                         old_start = Some(id.to_owned());
                         Ok(())
                     })
@@ -1392,7 +1626,8 @@ mod tests {
                 wait_for_old.await.unwrap();
                 let new = service.register_request("chat_new-turn").await.unwrap();
                 assert!(service
-                    .publish_playback_start(&new, "main", Some(&runtime), |id| {
+                    .publish_playback_start(&new, |id| {
+                        runtime.begin_playback(id, "main");
                         new_start = Some(id.to_owned());
                         Ok(())
                     })
@@ -1418,7 +1653,7 @@ mod tests {
         let request = service.register_request("chat_cancelled").await.unwrap();
         assert!(service.cancel_request(Some("chat_cancelled")).await);
         assert!(!service
-            .publish_playback_start(&request, "main", None, |_| {
+            .publish_playback_start(&request, |_| {
                 panic!("cancelled request must not publish start")
             })
             .await

@@ -1,13 +1,13 @@
 //! Application-owned chat journal. A WebView is a subscriber, never the owner.
+use super::events::{ChatEvent, ChatEvents};
 use super::persistence::{PendingChatSave, PendingUserSave};
 use crate::chat::application::{ChatPolicy, ChatRequest, StreamChatResponse};
 use crate::error::KokoroError;
-use crate::mods::manager::ModScriptQueue;
+use crate::mods::script_queue::ModScriptQueue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
 use tokio::sync::watch;
 
 const HISTORY_REVISION: &str = "SELECT revision FROM chat_history_revision WHERE id = 1";
@@ -149,14 +149,13 @@ impl ChatRuntimeState {
         })?;
         Self::update_speech_error(&mut journal, &client_id, error)
     }
-    pub fn is_playing(&self, app: &tauri::AppHandle) -> bool {
+    pub fn is_playing(&self, window_is_open: impl FnOnce(&str) -> bool) -> bool {
         self.1
             .lock()
             .unwrap()
             .as_ref()
             .is_some_and(|(_, window, started)| {
-                started.elapsed() < std::time::Duration::from_secs(600)
-                    && app.get_webview_window(window).is_some()
+                started.elapsed() < std::time::Duration::from_secs(600) && window_is_open(window)
             })
     }
     /// Duplicate delivery shares the original outcome, including rejection. No queue.
@@ -796,55 +795,6 @@ pub(crate) fn relay_chat_event(
     snapshot
 }
 
-/// Journal first, notify second. No subscriber or closed window can fail a turn.
-pub async fn emit_chat_event<S: Serialize + Clone>(
-    app: &tauri::AppHandle,
-    name: &str,
-    payload: S,
-) -> Result<(), tauri::Error> {
-    let mut emitted = serde_json::to_value(&payload).unwrap_or(Value::Null);
-    if let Some(runtime) = app.try_state::<Arc<ChatRuntimeState>>() {
-        if let Some(id) = emitted["client_request_id"]
-            .as_str()
-            .or_else(|| emitted["turn_id"].as_str())
-        {
-            if let Some(scope) = runtime.turn_scope(id) {
-                emitted["character_id"] = scope.character_id.into();
-                if emitted.get("conversation_id").is_none_or(Value::is_null) {
-                    emitted["conversation_id"] = scope.conversation_id.into();
-                }
-                emitted["client_request_id"] = scope.client_request_id.into();
-                if emitted
-                    .get("conversation_generation")
-                    .is_none_or(Value::is_null)
-                {
-                    emitted["conversation_generation"] = scope.conversation_generation.into();
-                }
-                if emitted.get("turn_id").is_none() {
-                    emitted["turn_id"] = scope.turn_id.into();
-                }
-            }
-        }
-    }
-    {
-        let value = emitted.clone();
-        let runtime = app.try_state::<Arc<ChatRuntimeState>>();
-        let queue = app.try_state::<ModScriptQueue>();
-        if let Some(snapshot) = relay_chat_event(
-            runtime.as_ref().map(|state| state.inner().as_ref()),
-            queue.as_ref().map(|state| state.inner()),
-            name,
-            value,
-        ) {
-            let _ = app.emit("chat-runtime-changed", snapshot);
-        }
-    }
-    if let Err(error) = app.emit(name, emitted) {
-        tracing::warn!(target: "chat", "event {name} delivery failed: {error}");
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ChatViewVersion {
     pub revision: u64,
@@ -956,13 +906,12 @@ pub(crate) struct ChatPlaybackScope {
 }
 
 impl ChatPlaybackScope {
-    pub(crate) async fn is_selected(&self, app: &tauri::AppHandle) -> bool {
-        let state = app.state::<crate::ai::context::AIOrchestrator>();
+    pub(crate) async fn is_selected(&self, state: &crate::ai::context::AIOrchestrator) -> bool {
         let Ok(_activation) = state.enter_chat_turn() else {
             return false;
         };
         let _selection = state.selection.conversation_switch_lock.lock().await;
-        self.matches_selection(&state).await
+        self.matches_selection(state).await
     }
 
     /// Caller holds activation and the selection lock, including through request registration.
@@ -983,8 +932,12 @@ impl ChatPlaybackScope {
 }
 
 /// One execution owner schedules speech; restoring a view never synthesizes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn speak_completed_turn(
-    app: tauri::AppHandle,
+    state: Arc<crate::ai::context::AIOrchestrator>,
+    events: ChatEvents,
+    tts: Option<crate::tts::TtsService>,
+    hooks: Option<crate::hooks::HookRuntime>,
     client_request_id: String,
     turn_id: String,
     text: String,
@@ -1006,8 +959,7 @@ pub(crate) async fn speak_completed_turn(
     let Some(snapshot) = snapshot else {
         return;
     };
-    let runtime = app.state::<Arc<ChatRuntimeState>>();
-    let Some(turn) = runtime.turn_scope(&client_request_id) else {
+    let Some(turn) = events.runtime.turn_scope(&client_request_id) else {
         return;
     };
     let (Some(character_id), Some(conversation_id)) = (turn.character_id, turn.conversation_id)
@@ -1015,7 +967,6 @@ pub(crate) async fn speak_completed_turn(
         return;
     };
     let scope = {
-        let state = app.state::<crate::ai::context::AIOrchestrator>();
         let Ok(_activation) = state.enter_chat_turn() else {
             return;
         };
@@ -1039,26 +990,35 @@ pub(crate) async fn speak_completed_turn(
             selection_generation: state.current_conversation_generation(),
         }
     };
-    tauri::async_runtime::spawn(async move {
-        let Some(tts) = app.try_state::<crate::tts::TtsService>() else {
+    tokio::spawn(async move {
+        let Some(tts) = tts else {
+            return;
+        };
+        let Some(playback) = events
+            .desktop
+            .as_ref()
+            .and_then(|desktop| desktop.playback(events.runtime.clone()))
+        else {
             return;
         };
         let result = tts
             .speak_snapshot(
-                app.clone(),
+                playback.as_ref(),
+                hooks.as_ref(),
                 text,
                 format!("chat_{turn_id}"),
                 snapshot,
-                scope,
+                &scope,
+                &state,
             )
             .await;
         if let Err(error) = result {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");
-            let runtime = app.state::<Arc<ChatRuntimeState>>();
-            if let Some(snapshot) =
-                runtime.record_speech_error(&client_request_id, error.to_string())
+            if let Some(snapshot) = events
+                .runtime
+                .record_speech_error(&client_request_id, error.to_string())
             {
-                let _ = app.emit("chat-runtime-changed", snapshot);
+                events.notify(ChatEvent::RuntimeChanged, snapshot);
             }
         }
     });
