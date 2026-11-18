@@ -14,7 +14,7 @@ use async_openai::types::chat::{
 };
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use futures::{channel::mpsc, Stream, StreamExt};
+use futures::{channel::mpsc, SinkExt, Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,8 +23,7 @@ use std::pin::Pin;
 
 use crate::llm::messages::extract_message_text;
 use crate::llm::provider::{
-    cancellable_unbounded_channel, LlmParams, LlmProvider, LlmStreamEvent, LlmToolCall,
-    LlmToolDefinition,
+    driven_stream, LlmParams, LlmProvider, LlmStreamEvent, LlmToolCall, LlmToolDefinition,
 };
 
 const DEFAULT_ANTHROPIC_SERVER_BASE_URL: &str = "https://api.anthropic.com";
@@ -127,25 +126,16 @@ impl AnthropicProvider {
 
         let response = ensure_success(response).await?;
         let mut stream = response.bytes_stream().eventsource();
-        let (mut tx, rx, mut cancel_rx) =
-            cancellable_unbounded_channel::<Result<LlmStreamEvent, String>>();
-
-        tokio::spawn(async move {
+        Ok(Box::pin(driven_stream(|mut tx| async move {
             let mut pending_tool_calls: HashMap<usize, PendingAnthropicToolCall> = HashMap::new();
 
-            loop {
-                let event_result = tokio::select! {
-                    _ = cancel_rx.changed() => return,
-                    event_result = stream.next() => event_result,
-                };
-                let Some(event_result) = event_result else {
-                    break;
-                };
+            while let Some(event_result) = stream.next().await {
                 let event = match event_result {
                     Ok(event) => event,
                     Err(error) => {
-                        let _ =
-                            tx.start_send(Err(format!("Anthropic SSE stream error: {}", error)));
+                        let _ = tx
+                            .send(Err(format!("Anthropic SSE stream error: {}", error)))
+                            .await;
                         return;
                     }
                 };
@@ -157,10 +147,12 @@ impl AnthropicProvider {
                 let parsed = match serde_json::from_str::<AnthropicStreamEvent>(&event.data) {
                     Ok(parsed) => parsed,
                     Err(error) => {
-                        let _ = tx.start_send(Err(format!(
-                            "Failed to parse Anthropic stream event JSON: {}",
-                            error
-                        )));
+                        let _ = tx
+                            .send(Err(format!(
+                                "Failed to parse Anthropic stream event JSON: {}",
+                                error
+                            )))
+                            .await;
                         return;
                     }
                 };
@@ -171,7 +163,7 @@ impl AnthropicProvider {
                             if let Some(block) = parsed.content_block {
                                 if block.block_type == "text" {
                                     if let Some(text) = block.text.filter(|text| !text.is_empty()) {
-                                        if tx.start_send(Ok(LlmStreamEvent::Text(text))).is_err() {
+                                        if tx.send(Ok(LlmStreamEvent::Text(text))).await.is_err() {
                                             return;
                                         }
                                     }
@@ -194,7 +186,7 @@ impl AnthropicProvider {
                             match delta.delta_type.as_deref() {
                                 Some("text_delta") => {
                                     if let Some(text) = delta.text.filter(|text| !text.is_empty()) {
-                                        if tx.start_send(Ok(LlmStreamEvent::Text(text))).is_err() {
+                                        if tx.send(Ok(LlmStreamEvent::Text(text))).await.is_err() {
                                             return;
                                         }
                                     }
@@ -218,14 +210,15 @@ impl AnthropicProvider {
                                 match finalize_tool_call(call) {
                                     Ok(tool_call) => {
                                         if tx
-                                            .start_send(Ok(LlmStreamEvent::ToolCall(tool_call)))
+                                            .send(Ok(LlmStreamEvent::ToolCall(tool_call)))
+                                            .await
                                             .is_err()
                                         {
                                             return;
                                         }
                                     }
                                     Err(error) => {
-                                        let _ = tx.start_send(Err(error));
+                                        let _ = tx.send(Err(error)).await;
                                         return;
                                     }
                                 }
@@ -237,17 +230,15 @@ impl AnthropicProvider {
                             parsed.error.map(|error| error.message).unwrap_or_else(|| {
                                 "Anthropic stream returned an error event".to_string()
                             });
-                        let _ = tx.start_send(Err(message));
+                        let _ = tx.send(Err(message)).await;
                         return;
                     }
                     _ => {}
                 }
             }
 
-            let _ = emit_pending_tool_calls(&mut tx, pending_tool_calls);
-        });
-
-        Ok(Box::pin(rx))
+            let _ = emit_pending_tool_calls(&mut tx, pending_tool_calls).await;
+        })))
     }
 
     fn request_builder(&self, url: String) -> reqwest::RequestBuilder {
@@ -768,8 +759,8 @@ fn finalize_tool_call(pending: PendingAnthropicToolCall) -> Result<LlmToolCall, 
     })
 }
 
-fn emit_pending_tool_calls(
-    tx: &mut mpsc::UnboundedSender<Result<LlmStreamEvent, String>>,
+async fn emit_pending_tool_calls(
+    tx: &mut mpsc::Sender<Result<LlmStreamEvent, String>>,
     pending_tool_calls: HashMap<usize, PendingAnthropicToolCall>,
 ) -> Result<(), ()> {
     let mut indexed = pending_tool_calls.into_iter().collect::<Vec<_>>();
@@ -777,7 +768,8 @@ fn emit_pending_tool_calls(
 
     for (_, pending) in indexed {
         let tool_call = finalize_tool_call(pending).map_err(|_| ())?;
-        tx.start_send(Ok(LlmStreamEvent::ToolCall(tool_call)))
+        tx.send(Ok(LlmStreamEvent::ToolCall(tool_call)))
+            .await
             .map_err(|_| ())?;
     }
 

@@ -145,6 +145,7 @@ pub(crate) struct MemoryWriteScope {
     pub cadence: Arc<crate::chat::external_memory::ExternalMemory>,
     pub owners: Arc<RuntimeOwners>,
     pub db: sqlx::SqlitePool,
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl std::fmt::Debug for MemoryWriteScope {
@@ -174,7 +175,9 @@ impl MemoryWriteScope {
     }
 
     pub async fn admit(&self) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
-        let guard = self.owners.memory_commit.clone().read_owned().await;
+        let guard =
+            until_memory_shutdown(Some(self), self.owners.memory_commit.clone().read_owned())
+                .await?;
         if !self.owner_is_current()
             || !self.enabled.load(std::sync::atomic::Ordering::SeqCst)
             || self.cadence.epoch() != self.epoch
@@ -194,7 +197,22 @@ impl MemoryWriteScope {
                 .await
                 .unwrap_or(false)
         };
-        exists.then_some(guard)
+        (exists && !self.shutdown.is_cancelled()).then_some(guard)
+    }
+}
+
+pub(crate) async fn until_memory_shutdown<F: std::future::Future>(
+    scope: Option<&MemoryWriteScope>,
+    future: F,
+) -> Option<F::Output> {
+    if let Some(scope) = scope {
+        tokio::select! {
+            biased;
+            _ = scope.shutdown.cancelled() => None,
+            result = future => Some(result),
+        }
+    } else {
+        Some(future.await)
     }
 }
 

@@ -140,7 +140,15 @@ pub async fn extract_and_store_memories_with_options(
     character_id: String,
     options: MemoryExtractionOptions,
 ) {
-    let database_operation_guard = acquire_database_operation_read_guard().await;
+    use crate::chat::ownership::until_memory_shutdown;
+    let Some(database_operation_guard) = until_memory_shutdown(
+        options.scope.as_deref(),
+        acquire_database_operation_read_guard(),
+    )
+    .await
+    else {
+        return;
+    };
     if !database_operation_guard.is_current() {
         tracing::info!(
             target: "memory",
@@ -221,7 +229,12 @@ pub async fn extract_and_store_memories_with_options(
         user_text_message(format!("Conversation to analyze:\n\n{}", transcript)),
     ];
 
-    match provider.chat(messages, None).await {
+    let Some(reply) =
+        until_memory_shutdown(options.scope.as_deref(), provider.chat(messages, None)).await
+    else {
+        return;
+    };
+    match reply {
         Ok(response) => {
             if options.structured_memory_enabled {
                 let structured = parse_structured_response(&response);

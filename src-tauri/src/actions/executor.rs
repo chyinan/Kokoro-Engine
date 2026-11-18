@@ -3,7 +3,9 @@
 use crate::actions::permission::{
     evaluate_permission_decision, risk_tag_label, PermissionDecision,
 };
-use crate::actions::registry::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
+use crate::actions::registry::{
+    ActionContext, ActionError, ActionInfo, ActionRegistry, ActionResult, ActionRiskTag,
+};
 use crate::actions::tool_settings::ToolSettings;
 use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{
@@ -1276,6 +1278,7 @@ pub(crate) async fn emit_after_action_invoke_with_protection(
 }
 
 pub(crate) struct ToolExecutionScope<'a> {
+    pub external_turn: Option<&'a crate::chat::persistence::ExternalTurn>,
     pub memory_scope: Option<&'a Arc<crate::chat::ownership::MemoryWriteScope>>,
     pub cue_names: Option<&'a Arc<std::collections::HashSet<String>>>,
     pub request_id: &'a str,
@@ -1461,26 +1464,44 @@ pub(crate) async fn execute_tool_calls_with_cancellation(
                                                 conversation_id: conversation_id(),
                                                 source: Some(scope.source.to_owned()),
                                             };
-                                            let exec_res = tokio::select! {
-                                                biased;
-                                                _ = wait_for_cancel_event(&mut cancel_rx) => {
-                                                    return Err(ToolCancellationError);
-                                                }
-                                                res = async {
-                                                    if let Some(timeout) = tool_timeout {
-                                                        tokio::time::timeout(timeout, crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx))
-                                                            .await
-                                                            .map_err(|_| {
-                                                                format!(
-                                                                    "Tool '{}' execution timed out after {}s",
-                                                                    tool_call.name,
-                                                                    timeout.as_secs()
-                                                                )
-                                                            })
-                                                    } else {
-                                                        Ok(crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx).await)
+                                            let record = if let Some(turn) =
+                                                scope.external_turn.filter(|_| {
+                                                    action.risk_tags.iter().any(|tag| {
+                                                        matches!(
+                                                            tag,
+                                                            ActionRiskTag::Write
+                                                                | ActionRiskTag::External
+                                                        )
+                                                    })
+                                                }) {
+                                                turn.mark_tool_dispatch().await
+                                            } else {
+                                                Ok(())
+                                            };
+                                            let exec_res = if let Err(error) = record {
+                                                Ok(Err(ActionError(error)))
+                                            } else {
+                                                tokio::select! {
+                                                    biased;
+                                                    _ = wait_for_cancel_event(&mut cancel_rx) => {
+                                                        return Err(ToolCancellationError);
                                                     }
-                                                } => res,
+                                                    res = async {
+                                                        if let Some(timeout) = tool_timeout {
+                                                            tokio::time::timeout(timeout, crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx))
+                                                                .await
+                                                                .map_err(|_| {
+                                                                    format!(
+                                                                        "Tool '{}' execution timed out after {}s",
+                                                                        tool_call.name,
+                                                                        timeout.as_secs()
+                                                                    )
+                                                                })
+                                                        } else {
+                                                            Ok(crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx).await)
+                                                        }
+                                                    } => res,
+                                                }
                                             };
                                             match exec_res {
                                                 Ok(Ok(res)) => (Some(permission_decision), Ok(res)),

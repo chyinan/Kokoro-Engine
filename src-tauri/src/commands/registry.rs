@@ -345,6 +345,7 @@ pub async fn install_character_from_registry(
     version: String,
     registry_url: Option<String>,
 ) -> Result<InstalledCharacterPackage, KokoroError> {
+    let _install = crate::ipc::admit_operation(&app, "registry", "character-install")?;
     let source_url = normalize_registry_url(registry_url)?;
     let index = fetch_index(&source_url).await?;
     let entry = index
@@ -377,6 +378,7 @@ pub async fn install_character_from_url(
     app: AppHandle,
     url: String,
 ) -> Result<InstalledCharacterPackage, KokoroError> {
+    let _install = crate::ipc::admit_operation(&app, "registry", "character-url-install")?;
     let bytes = fetch_bytes(&url).await?;
     let verified =
         verify_character_archive(&bytes, None, &engine_version()).map_err(client_error)?;
@@ -485,6 +487,7 @@ pub async fn remove_character_package(
     coordinator: State<'_, crate::characters::activation::ActivationCoordinator>,
     orchestrator: State<'_, crate::ai::context::AIOrchestrator>,
 ) -> Result<CharacterPackageRemoval, KokoroError> {
+    let _remove = crate::ipc::admit_operation(&app, "registry", "character-uninstall")?;
     let app_data = app_data_dir(&app)?;
     let catalog = CharacterCatalog::new(app_data.join("characters"), engine_version());
     let active = read_active_character_id(&app_data);

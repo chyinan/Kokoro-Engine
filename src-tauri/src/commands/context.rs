@@ -87,6 +87,7 @@ pub async fn get_memory_upgrade_config() -> Result<Response<MemoryUpgradeConfig>
 pub async fn get_memory_observability_summary(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<crate::ai::memory::MemoryObservabilitySummary>, KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "read memory summary")?;
     state
         .memory_manager
         .memory_observability_summary()
@@ -100,6 +101,7 @@ pub async fn get_memory_observability_summary(
 pub async fn get_latest_memory_write_event(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<Option<crate::ai::memory::MemoryWriteEventRecord>>, KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "read memory write event")?;
     state
         .memory_manager
         .latest_memory_write_event()
@@ -113,6 +115,8 @@ pub async fn get_latest_memory_write_event(
 pub async fn get_latest_memory_retrieval_log(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<Option<crate::ai::memory::MemoryRetrievalLogRecord>>, KokoroError> {
+    let _admission =
+        crate::ipc::admit_in(&state.lifecycle, "context", "read memory retrieval log")?;
     state
         .memory_manager
         .latest_memory_retrieval_log()
@@ -126,6 +130,7 @@ pub async fn get_latest_memory_retrieval_log(
 pub async fn get_latest_memory_retrieval_eval_summary(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<Option<crate::ai::memory::MemoryRetrievalEvalSummary>>, KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "read memory evaluations")?;
     state
         .memory_manager
         .latest_memory_retrieval_eval_summary()
@@ -275,6 +280,7 @@ pub async fn set_user_name(
     app: AppHandle,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "set user name")?;
     let _activation = state.acquire_activation_lock().await;
     update_user_profile_settings(&app, |settings| {
         settings.user_name = name.clone();
@@ -308,6 +314,7 @@ pub async fn set_user_language(
     language: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "set user language")?;
     let _activation = state.acquire_activation_lock().await;
     state.set_user_language(language).await;
     Ok(())
@@ -326,6 +333,7 @@ pub async fn set_jailbreak_prompt(
     prompt: String,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "set jailbreak prompt")?;
     let _activation = state.acquire_activation_lock().await;
     // Persist to disk first to avoid split-brain if disk write fails
     let path = jailbreak_prompt_path();
@@ -344,6 +352,7 @@ pub async fn set_jailbreak_prompt(
 #[tauri::command]
 #[specta::specta]
 pub async fn get_jailbreak_prompt(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "load jailbreak prompt")?;
     let _activation = state.acquire_activation_lock().await;
     if let Some(memory_prompt) = state.get_jailbreak_prompt().await {
         return Ok(memory_prompt);
@@ -364,6 +373,7 @@ pub async fn set_proactive_enabled(
     enabled: bool,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "set proactive behavior")?;
     state.set_proactive_enabled(enabled);
     tracing::info!(
         target: "ai",
@@ -392,6 +402,7 @@ pub async fn set_memory_enabled(
     enabled: bool,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "set memory enabled")?;
     state.set_memory_enabled(enabled).await;
     crate::config::save_json_config(
         &memory_config_path(),
@@ -409,6 +420,7 @@ pub async fn get_memory_enabled(state: State<'_, AIOrchestrator>) -> Result<bool
 #[tauri::command]
 #[specta::specta]
 pub async fn clear_history(state: State<'_, AIOrchestrator>) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "clear history")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     state.clear_history().await;
     Ok(())
@@ -425,6 +437,7 @@ pub async fn delete_last_messages(
     expected_history: Option<HistoryDeletionTarget>,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_in(&state.lifecycle, "context", "delete last messages")?;
     state
         .delete_last_messages(
             count,
@@ -452,6 +465,10 @@ pub async fn end_session(
     request: EndSessionRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let tasks = state.chat_memory_work();
+    let _admission = tasks
+        .lease("end session")
+        .map_err(|error| KokoroError::Chat(error.to_string()))?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let _history_guard = state
         .try_acquire_chat_turn("history_mutation")
@@ -465,7 +482,7 @@ pub async fn end_session(
     let history = state.get_recent_history(20).await;
     let char_id = state.get_character_id().await;
     let memory_mgr = state.memory_manager.clone();
-    let memory_enabled = state.memory_enabled_flag();
+    let scope = state.role_memory_write_scope(&char_id, "end-session");
     let summary_language = state.response_language.lock().await.clone();
 
     // Clear history immediately so the user can start fresh
@@ -473,9 +490,13 @@ pub async fn end_session(
 
     // Generate session summary in the background
     if history.len() >= 2 {
-        tauri::async_runtime::spawn(async move {
-            let database_operation_guard =
-                crate::ai::context::acquire_database_operation_read_guard().await;
+        let _ = tasks.spawn_durable("session summary", async move {
+            let shutdown = &scope.shutdown;
+            let Some(database_operation_guard) = shutdown
+                .run_until_cancelled(crate::ai::context::acquire_database_operation_read_guard())
+                .await else {
+                    return;
+                };
             if !database_operation_guard.is_current() {
                 tracing::info!(
                     target: "context",
@@ -511,14 +532,18 @@ pub async fn end_session(
             let client = build_openai_client(request.api_key, request.endpoint);
             let model = request.model.unwrap_or_else(|| "gpt-4".to_string());
 
-            match create_chat(&client, &model, messages, None).await {
+            let Some(result) = shutdown.run_until_cancelled(
+                create_chat(&client, &model, messages, None),
+            ).await else {
+                return;
+            };
+            match result {
                 Ok(summary) => {
                     let summary = summary.trim().to_string();
                     if !summary.is_empty() {
-                        if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                            tracing::info!(target: "ai", "Skip saving summary because memory is disabled");
+                        let Some(_commit) = scope.admit().await else {
                             return;
-                        }
+                        };
                         if let Err(e) = memory_mgr
                             .save_session_summary_unlocked(&char_id, &summary)
                             .await
@@ -529,7 +554,7 @@ pub async fn end_session(
                                 target: "ai",
                                 "Saved summary for '{}': {}",
                                 char_id,
-                                &summary[..summary.len().min(80)]
+                                summary.chars().take(80).collect::<String>()
                             );
                         }
                     }

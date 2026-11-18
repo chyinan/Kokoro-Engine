@@ -608,8 +608,10 @@ pub async fn get_mod_layout(
 #[specta::specta]
 pub async fn install_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     file_path: String,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "install package")?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
@@ -634,10 +636,12 @@ pub async fn install_mod(
 #[specta::specta]
 pub async fn update_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     mod_id: String,
     file_path: String,
     permission_confirmed: bool,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "update package")?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
@@ -666,10 +670,12 @@ pub async fn update_mod(
 #[specta::specta]
 pub async fn install_mod_from_registry(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     entry: RegistryEntry,
     registry_url: Option<String>,
     permission_confirmed: bool,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "install registry package")?;
     if entry.content_type != "mod" {
         return Err(KokoroError::Validation(
             "registry entry is not a MOD package".to_string(),
@@ -720,8 +726,10 @@ pub async fn install_mod_from_registry(
 #[specta::specta]
 pub async fn remove_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     mod_id: String,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "remove package")?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
@@ -733,9 +741,11 @@ pub async fn remove_mod(
 #[specta::specta]
 pub async fn install_mod_from_url(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     url: String,
     confirm_untrusted_code: bool,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "install URL package")?;
     let parsed = reqwest::Url::parse(&url)
         .map_err(|error| KokoroError::Validation(format!("invalid MOD URL: {error}")))?;
     if parsed.scheme() != "https" || parsed.username() != "" || parsed.password().is_some() {
@@ -782,8 +792,10 @@ pub async fn unload_mod(
     app_handle: AppHandle,
 ) -> Result<(), KokoroError> {
     let mut manager = mod_manager.lock().await;
-    manager.unload_mod(&app_handle).await;
-    Ok(())
+    manager
+        .unload_mod(&app_handle)
+        .await
+        .map_err(KokoroError::Mod)
 }
 
 #[cfg(test)]

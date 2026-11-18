@@ -1,10 +1,11 @@
 //! Saved MCP configurations and the ownership of each named connection.
 
 use super::{
+    bridge::ConnectionWorker,
     client::{McpClient, McpConnectError, McpToolInfo},
     transport::{self, LegacySse, TransportMode},
 };
-use crate::error::KokoroError;
+use crate::{error::KokoroError, lifecycle::TaskScope};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -12,6 +13,7 @@ use std::{
     sync::{Arc, Weak},
     time::Duration,
 };
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 // ── Config Types ────────────────────────────────────────
@@ -64,7 +66,7 @@ pub struct McpServerStatus {
 pub(super) struct ConnectionAttempt {
     config: McpServerConfig,
     generation: u64,
-    lifetime: CancellationToken,
+    pub(super) lifetime: CancellationToken,
 }
 
 pub(super) struct CatalogSnapshot {
@@ -79,7 +81,7 @@ impl ConnectionAttempt {
         &self.config.name
     }
 
-    pub(super) async fn connect(&self) -> Result<McpClient, KokoroError> {
+    pub(super) async fn connect(&self) -> Result<McpClient, ConnectionError> {
         build_connected_client(&self.config, self.lifetime.clone()).await
     }
 }
@@ -93,10 +95,22 @@ pub struct McpManager {
     next_generation: u64,
     connection_errors: HashMap<String, String>,
     closed: bool,
+    pub(super) scope: TaskScope,
+    pub(super) control: Arc<Mutex<()>>,
+    pub(super) workers: HashMap<String, ConnectionWorker>,
 }
 
 impl McpManager {
+    #[cfg(test)]
     pub fn new(config_path: &str) -> Self {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+        Self::new_with_scope(
+            config_path,
+            AppLifecycle::new().scope(TaskStage::Service, "mcp"),
+        )
+    }
+
+    pub(crate) fn new_with_scope(config_path: &str, scope: TaskScope) -> Self {
         Self {
             configs: Vec::new(),
             clients: HashMap::new(),
@@ -106,6 +120,9 @@ impl McpManager {
             next_generation: 0,
             connection_errors: HashMap::new(),
             closed: false,
+            scope,
+            control: Arc::new(Mutex::new(())),
+            workers: HashMap::new(),
         }
     }
 
@@ -173,6 +190,11 @@ impl McpManager {
         &mut self,
         name: &str,
     ) -> Result<ConnectionAttempt, KokoroError> {
+        let config = self.ensure_enabled(name)?;
+        Ok(self.mark_connecting(config.clone()))
+    }
+
+    pub(super) fn ensure_enabled(&self, name: &str) -> Result<&McpServerConfig, KokoroError> {
         let config = self
             .configs
             .iter()
@@ -181,7 +203,7 @@ impl McpManager {
         if !config.enabled || self.closed {
             return Err(KokoroError::Config(format!("Server '{name}' is disabled")));
         }
-        Ok(self.mark_connecting(config.clone()))
+        Ok(config)
     }
 
     pub(super) fn attempt_is_current(&self, attempt: &ConnectionAttempt) -> bool {
@@ -205,6 +227,7 @@ impl McpManager {
         if !self.attempt_is_current(attempt) || !client.is_connected() {
             return false;
         }
+        client.commit();
         self.pending.remove(attempt.name());
         if let Some(previous) = self.clients.insert(attempt.name().to_string(), client) {
             previous.cancel();
@@ -235,7 +258,7 @@ impl McpManager {
 
     pub(super) fn detach_live_client(&mut self, name: &str) -> Option<Arc<McpClient>> {
         let client = self.clients.remove(name)?;
-        client.cancel();
+        client.stop_accepting();
         Some(client)
     }
 
@@ -349,16 +372,27 @@ impl McpManager {
         Some(snapshots)
     }
 
-    pub(super) fn mark_disconnected(&mut self, name: &str, client: &Arc<McpClient>) {
+    pub(super) fn mark_disconnected(
+        &mut self,
+        name: &str,
+        client: &Arc<McpClient>,
+        error: Option<&str>,
+    ) {
         if self
             .clients
             .get(name)
             .is_some_and(|current| Arc::ptr_eq(client, current))
         {
             self.clients.remove(name);
-            self.connection_errors
-                .insert(name.to_string(), "MCP transport disconnected".into());
+            self.connection_errors.insert(
+                name.to_string(),
+                error.unwrap_or("MCP transport disconnected").into(),
+            );
         }
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed
     }
 
     pub(super) fn begin_shutdown(&mut self) -> Vec<Arc<McpClient>> {
@@ -369,7 +403,7 @@ impl McpManager {
         self.clients
             .drain()
             .map(|(_, client)| {
-                client.cancel();
+                client.stop_accepting();
                 client
             })
             .collect()
@@ -378,39 +412,50 @@ impl McpManager {
 
 impl Drop for McpManager {
     fn drop(&mut self) {
-        self.begin_shutdown();
+        for client in self.begin_shutdown() {
+            client.cancel();
+        }
+        for worker in self.workers.values() {
+            worker.stop();
+        }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ConnectionError {
+    #[error(transparent)]
+    Config(#[from] KokoroError),
+    #[error(transparent)]
+    Session(#[from] McpConnectError),
 }
 
 /// Connection and initial tool discovery happen without holding any manager lock.
 pub(super) async fn build_connected_client(
     config: &McpServerConfig,
     lifetime: CancellationToken,
-) -> Result<McpClient, KokoroError> {
-    let mode = transport::transport_mode(config)?;
-    let connect = async {
-        let result = match mode {
-            TransportMode::Stdio => {
-                McpClient::start(transport::stdio(config)?, false, lifetime.clone()).await
-            }
-            TransportMode::StreamableHttp => {
-                let transport = transport::streamable_http(transport::server_url(config)?)?;
-                McpClient::start(transport, false, lifetime.clone()).await
-            }
-            TransportMode::LegacySse => {
-                let transport = LegacySse::connect(transport::server_url(config)?)
-                    .await
-                    .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
-                McpClient::start(transport, true, lifetime.clone()).await
-            }
-        };
-        result.map_err(|error| KokoroError::ExternalService(error.to_string()))
-    };
-    tokio::select! {
-        biased;
-        _ = lifetime.cancelled() => Err(KokoroError::ExternalService(McpConnectError::Cancelled.to_string())),
-        result = tokio::time::timeout(Duration::from_secs(45), connect) => {
-            result.unwrap_or_else(|_| Err(KokoroError::ExternalService("MCP connection timed out".into())))
-        }
+) -> Result<McpClient, ConnectionError> {
+    if lifetime.is_cancelled() {
+        return Err(McpConnectError::Cancelled.into());
     }
+    let mode = transport::transport_mode(config)?;
+    let result = match mode {
+        TransportMode::Stdio => McpClient::start(transport::stdio(config)?, false, lifetime).await,
+        TransportMode::StreamableHttp => {
+            let transport = transport::streamable_http(transport::server_url(config)?)?;
+            McpClient::start(transport, false, lifetime).await
+        }
+        TransportMode::LegacySse => {
+            let url = transport::server_url(config)?;
+            let transport = tokio::select! {
+                biased;
+                _ = lifetime.cancelled() => return Err(McpConnectError::Cancelled.into()),
+                result = tokio::time::timeout(Duration::from_secs(45), LegacySse::connect(url)) => {
+                    result.map_err(|_| McpConnectError::Timeout)?
+                        .map_err(|error| KokoroError::ExternalService(error.to_string()))?
+                }
+            };
+            McpClient::start(transport, true, lifetime).await
+        }
+    };
+    Ok(result?)
 }

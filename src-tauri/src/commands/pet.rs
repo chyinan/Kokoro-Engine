@@ -1,5 +1,6 @@
 use crate::error::KokoroError;
 use crate::ipc::{events::{BubbleTextUpdate, PetWindowClosed}, wire::emit};
+use crate::lifecycle::{AppLifecycle, TaskScope, TaskStage};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -11,6 +12,22 @@ const BUBBLE_GAP: i32 = 8;
 #[derive(Default)]
 pub struct PetShortcutState {
     registered_shortcut: std::sync::Mutex<Option<String>>,
+}
+
+fn pet_scope(app: &tauri::AppHandle) -> TaskScope {
+    app.state::<AppLifecycle>().scope(TaskStage::Work, "pet")
+}
+
+pub(crate) fn release_pet_shortcut(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<PetShortcutState>();
+    let previous = state.registered_shortcut.lock().unwrap().take();
+    if let Some(shortcut) = previous {
+        let shortcut = parse_pet_shortcut(&shortcut).map_err(|error| error.to_string())?;
+        app.global_shortcut()
+            .unregister(shortcut)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, specta::Type)]
@@ -110,6 +127,10 @@ pub fn register_pet_shortcut(
     app: &tauri::AppHandle,
     shortcut_str: &str,
 ) -> Result<(), KokoroError> {
+    let scope = pet_scope(app);
+    let _register = scope
+        .lease("register-shortcut")
+        .map_err(|error| KokoroError::Internal(error.to_string()))?;
     let shortcut_str = shortcut_str.trim().to_string();
     let shortcut = parse_pet_shortcut(&shortcut_str)?;
     let state = app.try_state::<PetShortcutState>().ok_or_else(|| {
@@ -168,11 +189,13 @@ pub fn register_pet_shortcut(
             }
 
             let app = shortcut_app.clone();
-            tauri::async_runtime::spawn(async move {
+            if let Err(error) = scope.spawn_durable("shortcut-toggle", async move {
                 if let Err(error) = toggle_pet_window(app).await {
                     tracing::error!(target: "pet", "global shortcut toggle failed: {}", error);
                 }
-            });
+            }) {
+                tracing::debug!(target: "pet", %error, "ignored shortcut during exit");
+            }
         })
         .map_err(|e| KokoroError::Internal(e.to_string()))?;
 
@@ -243,6 +266,9 @@ pub fn hide_bubble_window_if_open(app: &tauri::AppHandle) -> Result<(), KokoroEr
 #[tauri::command]
 #[specta::specta]
 pub async fn show_pet_window(app: tauri::AppHandle) -> Result<(), KokoroError> {
+    let _show = pet_scope(&app)
+        .lease("show-window")
+        .map_err(|error| KokoroError::Internal(error.to_string()))?;
     tracing::info!(target: "pet", "show_pet_window called");
     let windows: Vec<String> = app.webview_windows().keys().cloned().collect();
     tracing::info!(target: "pet", "available windows: {:?}", windows);
@@ -423,6 +449,10 @@ pub async fn resize_pet_window(
 #[tauri::command]
 #[specta::specta]
 pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(), KokoroError> {
+    let scope = pet_scope(&app);
+    let _show = scope
+        .lease("show-bubble")
+        .map_err(|error| KokoroError::Internal(error.to_string()))?;
     if app.get_webview_window("pet").is_none() {
         return Err(KokoroError::NotFound("Pet window not found".to_string()));
     }
@@ -470,10 +500,20 @@ pub async fn show_bubble_window(app: tauri::AppHandle, text: String) -> Result<(
 
         let win_clone = win.clone();
         let text_clone = text.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            let _ = emit(&win_clone, BubbleTextUpdate(text_clone));
-        });
+        let stop = scope.token();
+        if let Err(error) = scope.spawn("initial-bubble-text", async move {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => {},
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {
+                    if let Err(error) = emit(&win_clone, BubbleTextUpdate(text_clone)) {
+                        tracing::debug!(target: "pet", %error, "bubble closed before initial text");
+                    }
+                }
+            }
+        }) {
+            tracing::debug!(target: "pet", %error, "skipped initial bubble text during exit");
+        }
     }
 
     Ok(())

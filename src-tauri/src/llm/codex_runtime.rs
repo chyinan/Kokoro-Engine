@@ -6,6 +6,7 @@
 //! and the Codex backend protocol to the user's installed Codex runtime. Kokoro only owns
 //! the child process, JSONL RPC transport, a read-only ephemeral thread, and event mapping.
 
+use crate::lifecycle::{AppLifecycle, TaskScope, TaskStage};
 use crate::llm::codex_runtime_protocol::{
     build_initialize_params, build_rpc_notification, build_rpc_request,
     build_thread_inject_items_params, build_thread_start_params, build_turn_interrupt_params,
@@ -17,6 +18,7 @@ use crate::llm::provider::{
 };
 use async_trait::async_trait;
 use futures::{channel::mpsc, Stream, StreamExt};
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -31,14 +33,16 @@ use std::sync::Mutex as StdMutex;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::sync::{broadcast, oneshot, Mutex, OnceCell};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_CODEX_BINARY: &str = "codex";
 const CODEX_BINARY_ENV: &str = "KOKORO_CODEX_BINARY";
 const NOTIFICATION_BUFFER: usize = 256;
 const MAX_VERSION_OUTPUT_BYTES: usize = 256;
 const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const INTERRUPT_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const TURN_START_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 const FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_secs(300);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -59,17 +63,25 @@ pub struct CodexRuntimeInfo {
 pub struct CodexRuntimeProvider {
     provider_id: String,
     model_override: Option<String>,
-    binary: String,
+    binary: OnceCell<String>,
+    work: TaskScope,
+    service: TaskScope,
     server: Arc<Mutex<Option<Arc<CodexAppServer>>>>,
     drop_server: Arc<StdMutex<Option<Arc<CodexAppServer>>>>,
 }
 
 impl CodexRuntimeProvider {
-    pub fn new(id: String, model_override: Option<String>) -> Self {
+    pub(crate) fn new(
+        id: String,
+        model_override: Option<String>,
+        lifecycle: &AppLifecycle,
+    ) -> Self {
         Self {
             provider_id: id,
             model_override: model_override.and_then(non_empty_string),
-            binary: resolve_codex_binary(),
+            binary: OnceCell::new(),
+            work: lifecycle.scope(TaskStage::Work, "codex runtime"),
+            service: lifecycle.scope(TaskStage::Service, "codex runtime"),
             server: Arc::new(Mutex::new(None)),
             drop_server: Arc::new(StdMutex::new(None)),
         }
@@ -121,9 +133,20 @@ impl CodexRuntimeProvider {
             if !server.is_exited() {
                 return Ok(server.clone());
             }
+            server.shutdown().await;
         }
 
-        let server = CodexAppServer::start(&self.binary).await?;
+        let binary = self
+            .binary
+            .get_or_try_init(|| async {
+                let mut probe = self
+                    .work
+                    .spawn_blocking("binary discovery", resolve_codex_binary)
+                    .map_err(|error| error.to_string())?;
+                probe.join().await.map_err(|error| error.to_string())
+            })
+            .await?;
+        let server = CodexAppServer::start(binary.clone(), &self.service).await?;
         *guard = Some(server.clone());
         if let Ok(mut drop_guard) = self.drop_server.lock() {
             *drop_guard = Some(server.clone());
@@ -132,18 +155,18 @@ impl CodexRuntimeProvider {
     }
 
     async fn invalidate_server(&self, server: &Arc<CodexAppServer>) {
-        let should_remove = self
-            .server
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, server));
-        if should_remove {
-            *self.server.lock().await = None;
-            if let Ok(mut drop_guard) = self.drop_server.lock() {
-                *drop_guard = None;
+        server.shutdown().await;
+        {
+            let mut current = self.server.lock().await;
+            if current
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, server))
+            {
+                *current = None;
+                if let Ok(mut drop_guard) = self.drop_server.lock() {
+                    *drop_guard = None;
+                }
             }
-            server.shutdown().await;
         }
     }
 
@@ -252,36 +275,33 @@ impl CodexRuntimeProvider {
         messages: Vec<LlmChatMessage>,
         tools: Vec<LlmToolDefinition>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, String>> + Send>>, String> {
+        let admitted = self
+            .work
+            .lease("model turn")
+            .map_err(|error| error.to_string())?;
         let (server, mut notifications, thread_id, turn_id, turn_started_at) =
             self.start_turn(messages, tools.clone()).await?;
         let (mut tx, rx) = mpsc::unbounded::<Result<LlmStreamEvent, String>>();
-        let finished = Arc::new(AtomicBool::new(false));
-        let task_finished = finished.clone();
+        let cancel = CancellationToken::new();
+        let stream_dropped = cancel.clone();
         let event_thread_id = thread_id.clone();
         let event_turn_id = turn_id.clone();
-        let allowed_tools = tools;
         let interrupt_server = server.clone();
-        let interrupt_thread_id = thread_id.clone();
-        let interrupt_turn_id = turn_id.clone();
+        let shutdown = self.work.token();
 
-        tokio::spawn(async move {
+        if let Err(error) = admitted.spawn_finalizer("model turn events", async move {
+            let relay = async {
             let mut emitted_text = false;
             let mut received_first_output = false;
             let mut last_output_at = None;
             loop {
                 let elapsed = turn_started_at.elapsed();
                 if elapsed >= TOTAL_TURN_TIMEOUT {
-                    spawn_turn_interrupt(
-                        interrupt_server.clone(),
-                        &interrupt_thread_id,
-                        &interrupt_turn_id,
-                    );
                     let _ = tx.start_send(Err(format!(
                         "Codex turn exceeded the total timeout of {} seconds",
                         TOTAL_TURN_TIMEOUT.as_secs()
                     )));
-                    task_finished.store(true, Ordering::Release);
-                    return;
+                    return true;
                 }
                 let phase_timeout = if received_first_output {
                     STREAM_IDLE_TIMEOUT
@@ -304,8 +324,7 @@ impl CodexRuntimeProvider {
                                     "Codex app-server notification stream closed unexpectedly"
                                         .to_string(),
                                 ));
-                                task_finished.store(true, Ordering::Release);
-                                return;
+                                return false;
                             }
                         },
                         Err(_) => {
@@ -320,14 +339,8 @@ impl CodexRuntimeProvider {
                                     FIRST_OUTPUT_TIMEOUT.as_secs()
                                 )
                             };
-                            spawn_turn_interrupt(
-                                interrupt_server.clone(),
-                                &interrupt_thread_id,
-                                &interrupt_turn_id,
-                            );
                             let _ = tx.start_send(Err(message));
-                            task_finished.store(true, Ordering::Release);
-                            return;
+                            return true;
                         }
                     };
 
@@ -345,92 +358,76 @@ impl CodexRuntimeProvider {
                             emitted_text = true;
                         }
                         if let LlmStreamEvent::ToolCall(call) = &mut event {
-                            if let Err(error) = resolve_dynamic_tool_call_name(call, &allowed_tools)
-                                .and_then(|_| validate_tool_call(call, &allowed_tools))
+                            if let Err(error) = resolve_dynamic_tool_call_name(call, &tools)
+                                .and_then(|_| validate_tool_call(call, &tools))
                             {
-                                spawn_turn_interrupt(
-                                    interrupt_server.clone(),
-                                    &interrupt_thread_id,
-                                    &interrupt_turn_id,
-                                );
                                 let _ = tx.start_send(Err(error));
-                                task_finished.store(true, Ordering::Release);
-                                return;
+                                return true;
                             }
-                            task_finished.store(true, Ordering::Release);
-                            if tx.start_send(Ok(event)).is_err() {
-                                return;
-                            }
-                            return;
+                            let _ = tx.start_send(Ok(event));
+                            return true;
                         }
                         if tx.start_send(Ok(event)).is_err() {
-                            task_finished.store(true, Ordering::Release);
-                            return;
+                            return true;
                         }
                     }
                     RuntimeEvent::Completed { status, text } => {
                         if status == "completed" {
                             if !emitted_text {
                                 if let Some(text) = text.filter(|value| !value.is_empty()) {
-                                    if tx.start_send(Ok(LlmStreamEvent::Text(text))).is_err() {
-                                        task_finished.store(true, Ordering::Release);
-                                        return;
-                                    }
+                                    let _ = tx.start_send(Ok(LlmStreamEvent::Text(text)));
                                 }
                             }
-                            task_finished.store(true, Ordering::Release);
-                            return;
+                            return false;
                         }
                         let message = if status == "interrupted" {
                             "Codex turn was interrupted".to_string()
                         } else {
                             format!("Codex turn ended with status: {status}")
                         };
-                        spawn_turn_interrupt(
-                            interrupt_server.clone(),
-                            &interrupt_thread_id,
-                            &interrupt_turn_id,
-                        );
                         let _ = tx.start_send(Err(message));
-                        task_finished.store(true, Ordering::Release);
-                        return;
+                        return status != "interrupted";
                     }
                     RuntimeEvent::Status => {}
                     RuntimeEvent::Failed(error) => {
-                        spawn_turn_interrupt(
-                            interrupt_server.clone(),
-                            &interrupt_thread_id,
-                            &interrupt_turn_id,
-                        );
                         let _ = tx.start_send(Err(error));
-                        task_finished.store(true, Ordering::Release);
-                        return;
+                        return true;
                     }
                 }
             }
-        });
+            };
+            let needs_interrupt = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    let _ = tx.start_send(Err("Codex turn stopped with the application".to_string()));
+                    true
+                }
+                _ = stream_dropped.cancelled() => true,
+                result = relay => result,
+            };
+            drop(tx);
+            if needs_interrupt {
+                let result = tokio::time::timeout(
+                    INTERRUPT_RPC_TIMEOUT,
+                    interrupt_server.request(
+                        "turn/interrupt",
+                        build_turn_interrupt_params(&event_thread_id, &event_turn_id),
+                    ),
+                ).await;
+                if !matches!(result, Ok(Ok(_))) {
+                    interrupt_server.terminate();
+                }
+            }
+        }) {
+            server.terminate();
+            return Err(error.to_string());
+        }
 
         Ok(Box::pin(CodexEventStream {
             receiver: rx,
-            server,
-            thread_id,
-            turn_id,
-            finished,
+            cancel,
         }))
     }
-}
-
-fn spawn_turn_interrupt(server: Arc<CodexAppServer>, thread_id: &str, turn_id: &str) {
-    let thread_id = thread_id.to_string();
-    let turn_id = turn_id.to_string();
-    tokio::spawn(async move {
-        let _ = server
-            .request(
-                "turn/interrupt",
-                build_turn_interrupt_params(&thread_id, &turn_id),
-            )
-            .await;
-    });
 }
 
 impl Drop for CodexRuntimeProvider {
@@ -543,12 +540,12 @@ impl LlmProvider for CodexRuntimeProvider {
 
 struct CodexAppServer {
     stdin: Arc<Mutex<ChildStdin>>,
-    child: Arc<StdMutex<Child>>,
+    stop: CancellationToken,
+    closed: CancellationToken,
     next_request_id: AtomicU64,
     pending: PendingRequests,
     notifications: broadcast::Sender<Value>,
     exited: AtomicBool,
-    working_dir: RuntimePathBuf,
 }
 
 /// Synchronously terminates a server if a turn-start future is cancelled
@@ -579,10 +576,7 @@ impl Drop for TurnStartGuard {
 
 struct CodexEventStream {
     receiver: mpsc::UnboundedReceiver<Result<LlmStreamEvent, String>>,
-    server: Arc<CodexAppServer>,
-    thread_id: String,
-    turn_id: String,
-    finished: Arc<AtomicBool>,
+    cancel: CancellationToken,
 }
 
 impl Stream for CodexEventStream {
@@ -595,80 +589,34 @@ impl Stream for CodexEventStream {
 
 impl Drop for CodexEventStream {
     fn drop(&mut self) {
-        if self.finished.load(Ordering::Acquire) {
-            return;
-        }
-
-        let server = self.server.clone();
-        let thread_id = self.thread_id.clone();
-        let turn_id = self.turn_id.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = server
-                    .request(
-                        "turn/interrupt",
-                        build_turn_interrupt_params(&thread_id, &turn_id),
-                    )
-                    .await;
-            });
-        }
+        self.cancel.cancel();
     }
 }
 
 impl CodexAppServer {
-    async fn start(binary: &str) -> Result<Arc<Self>, String> {
-        let working_dir = create_runtime_working_dir()?;
-        let mut command = Command::new(binary);
-        command
-            .args(["app-server", "--listen", "stdio://"])
-            // Keep the runtime cwd outside the Kokoro checkout so its AGENTS.md and project
-            // instructions are not accidentally injected into Codex's model context.
-            .current_dir(&working_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+    async fn start(binary: String, service: &TaskScope) -> Result<Arc<Self>, String> {
+        let mut command = Command::new(&binary);
+        command.args(["app-server", "--listen", "stdio://"]);
+        Self::start_command(command, binary, service).await
+    }
 
-        let mut child = command.spawn().map_err(|error| {
-            let _ = std::fs::remove_dir(&working_dir);
-            format!(
-                "failed to start Codex app-server using '{}': {}",
-                binary, error
-            )
-        })?;
-        let stdin = match child.stdin.take() {
-            Some(stdin) => stdin,
-            None => {
-                let _ = child.start_kill();
-                let _ = std::fs::remove_dir(&working_dir);
-                return Err("Codex app-server did not expose stdin".to_string());
-            }
-        };
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                let _ = child.start_kill();
-                let _ = std::fs::remove_dir(&working_dir);
-                return Err("Codex app-server did not expose stdout".to_string());
-            }
-        };
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(read_stderr(stderr));
-        }
-
-        let (notifications, _) = broadcast::channel(NOTIFICATION_BUFFER);
-        let server = Arc::new(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
-            child: Arc::new(StdMutex::new(child)),
-            next_request_id: AtomicU64::new(1),
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            notifications,
-            exited: AtomicBool::new(false),
-            working_dir,
-        });
-
-        let reader_server = server.clone();
-        tokio::spawn(async move { reader_server.read_stdout(stdout).await });
+    async fn start_command(
+        command: Command,
+        binary: String,
+        service: &TaskScope,
+    ) -> Result<Arc<Self>, String> {
+        let (ready, started) = oneshot::channel();
+        let shutdown = service.token();
+        let owner = service.clone();
+        service
+            .spawn_durable("app-server process", async move {
+                Self::own_process(command, binary, shutdown, owner, ready).await;
+            })
+            .map_err(|error| error.to_string())?;
+        let mut startup = started
+            .await
+            .map_err(|_| "Codex app-server supervisor stopped")??;
+        let server = startup.server.clone();
 
         if let Err(error) = server
             .request(
@@ -687,8 +635,106 @@ impl CodexAppServer {
             server.shutdown().await;
             return Err(error);
         }
+        startup.disarm();
 
         Ok(server)
+    }
+
+    async fn own_process(
+        mut command: Command,
+        binary: String,
+        shutdown: CancellationToken,
+        owner: TaskScope,
+        ready: oneshot::Sender<Result<TurnStartGuard, String>>,
+    ) {
+        let working_dir = match create_runtime_working_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                let _ = ready.send(Err(error));
+                return;
+            }
+        };
+        // Keep the runtime cwd outside the Kokoro checkout.
+        command
+            .current_dir(&working_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut command = CommandWrap::from(command);
+        command.wrap(KillOnDrop);
+        #[cfg(windows)]
+        {
+            let mut flags = process_wrap::tokio::CreationFlags(Default::default());
+            flags.0 .0 = 0x08000000; // CREATE_NO_WINDOW
+            command.wrap(flags).wrap(process_wrap::tokio::JobObject);
+        }
+        #[cfg(unix)]
+        command.wrap(process_wrap::tokio::ProcessGroup::leader());
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_dir(&working_dir);
+                let _ = ready.send(Err(format!(
+                    "failed to start Codex app-server using '{binary}': {error}"
+                )));
+                return;
+            }
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin().take(), child.stdout().take()) else {
+            if let Err(kill) = Box::into_pin(child.kill()).await {
+                if let Err(wait) = child.wait().await {
+                    owner.report_failure(
+                        "app-server process",
+                        &format!("kill failed ({kill}); wait failed ({wait})"),
+                    );
+                }
+            }
+            let _ = std::fs::remove_dir(&working_dir);
+            let _ = ready.send(Err(
+                "Codex app-server did not expose stdin and stdout".to_string()
+            ));
+            return;
+        };
+        let stderr = child.stderr().take();
+        let (notifications, _) = broadcast::channel(NOTIFICATION_BUFFER);
+        let server = Arc::new(Self {
+            stdin: Arc::new(Mutex::new(stdin)),
+            stop: CancellationToken::new(),
+            closed: CancellationToken::new(),
+            next_request_id: AtomicU64::new(1),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            notifications,
+            exited: AtomicBool::new(false),
+        });
+        let _ = ready.send(Ok(TurnStartGuard::new(server.clone())));
+
+        let message = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => "Codex app-server stopped with the application",
+            _ = server.stop.cancelled() => "Codex app-server stopped",
+            message = server.clone().read_stdout(stdout) => message,
+            _ = child.wait() => "Codex app-server process exited",
+            _ = async {
+                if let Some(stderr) = stderr {
+                    read_stderr(stderr).await;
+                }
+                std::future::pending::<()>().await;
+            } => unreachable!("stderr drains until the process owner exits"),
+        };
+        server.fail_protocol(message).await;
+        if let Err(error) = Box::into_pin(child.kill()).await {
+            tracing::warn!(target: "llm.codex_runtime", "failed to terminate app-server: {error}");
+            if let Err(wait) = child.wait().await {
+                owner.report_failure(
+                    "app-server process",
+                    &format!("kill failed ({error}); wait failed ({wait})"),
+                );
+            }
+        }
+        drop(child);
+        let _ = std::fs::remove_dir(&working_dir);
+        server.closed.cancel();
     }
 
     fn subscribe(&self) -> broadcast::Receiver<Value> {
@@ -696,7 +742,7 @@ impl CodexAppServer {
     }
 
     fn is_exited(&self) -> bool {
-        self.exited.load(Ordering::Acquire)
+        self.stop.is_cancelled() || self.exited.load(Ordering::Acquire)
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -797,17 +843,14 @@ impl CodexAppServer {
             .map_err(|error| format!("failed to flush Codex app-server request: {error}"))
     }
 
-    async fn read_stdout(self: Arc<Self>, stdout: ChildStdout) {
+    async fn read_stdout(self: Arc<Self>, stdout: ChildStdout) -> &'static str {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                self.fail_protocol("Codex app-server emitted invalid JSON")
-                    .await;
-                self.terminate_and_cleanup().await;
-                return;
+                return "Codex app-server emitted invalid JSON";
             };
             record_protocol_notification(&value);
 
@@ -829,8 +872,7 @@ impl CodexAppServer {
             }
         }
 
-        self.fail_protocol("Codex app-server process exited").await;
-        self.terminate_and_cleanup().await;
+        "Codex app-server stdout closed"
     }
 
     async fn respond_to_server_request(self: &Arc<Self>, id: Value, request: Value) {
@@ -852,28 +894,6 @@ impl CodexAppServer {
             });
             let _ = self.write_value(&response).await;
 
-            if let (Some(thread_id), Some(turn_id)) = (
-                request
-                    .get("params")
-                    .and_then(|params| params.get("threadId"))
-                    .and_then(Value::as_str),
-                request
-                    .get("params")
-                    .and_then(|params| params.get("turnId"))
-                    .and_then(Value::as_str),
-            ) {
-                let server = self.clone();
-                let thread_id = thread_id.to_string();
-                let turn_id = turn_id.to_string();
-                tokio::spawn(async move {
-                    let _ = server
-                        .request(
-                            "turn/interrupt",
-                            build_turn_interrupt_params(&thread_id, &turn_id),
-                        )
-                        .await;
-                });
-            }
             return;
         }
 
@@ -910,12 +930,11 @@ impl CodexAppServer {
 
     async fn shutdown(&self) {
         self.terminate();
+        self.closed.cancelled().await;
     }
 
     fn terminate(&self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.start_kill();
-        }
+        self.stop.cancel();
     }
 
     async fn fail_protocol(&self, message: &str) {
@@ -930,24 +949,6 @@ impl CodexAppServer {
         for (_, sender) in pending.drain() {
             let _ = sender.send(Err(message.to_string()));
         }
-    }
-
-    async fn terminate_and_cleanup(&self) {
-        self.terminate();
-        for _ in 0..20 {
-            let exited = self
-                .child
-                .lock()
-                .ok()
-                .and_then(|mut child| child.try_wait().ok())
-                .flatten()
-                .is_some();
-            if exited {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        let _ = std::fs::remove_dir(&self.working_dir);
     }
 }
 
@@ -1160,6 +1161,91 @@ fn bounded_output(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(any(windows, unix))]
+    fn fixture_server(started: &std::path::Path, acknowledge: bool) -> Command {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command"]);
+            let mark = "[Console]::ReadLine() | Out-Null; [IO.File]::WriteAllText($env:KOKORO_TEST_CODEX_STARTED, 'started');";
+            let next = if acknowledge {
+                r#"[Console]::WriteLine('{"id":1,"result":{}}'); [Console]::ReadLine() | Out-Null; [Console]::ReadLine() | Out-Null;"#
+            } else {
+                "[Console]::ReadLine() | Out-Null;"
+            };
+            command.arg(format!("{mark} {next}"));
+            command
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("/bin/sh");
+            let mark = r#"read -r line; printf started > "$KOKORO_TEST_CODEX_STARTED";"#;
+            let next = if acknowledge {
+                r#"printf '%s\n' '{"id":1,"result":{}}'; read -r line; read -r line;"#
+            } else {
+                "read -r line;"
+            };
+            command.args(["-c", &format!("{mark} {next}")]);
+            command
+        };
+        command.env("KOKORO_TEST_CODEX_STARTED", started);
+        command
+    }
+
+    #[cfg(any(windows, unix))]
+    async fn wait_for_process_cleanup(lifecycle: &AppLifecycle) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !lifecycle.pending_labels().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("app-server supervisor must reap its process");
+    }
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn codex_app_server_reaps_child_after_stdout_closes() {
+        let lifecycle = AppLifecycle::new();
+        let service = lifecycle.scope(TaskStage::Service, "fixture app-server");
+        let fixture = tempfile::tempdir().unwrap();
+        let command = fixture_server(&fixture.path().join("started"), true);
+        let server = tokio::time::timeout(
+            Duration::from_secs(5),
+            CodexAppServer::start_command(command, "fixture".into(), &service),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.notify("test/close", Value::Null).await.unwrap();
+        wait_for_process_cleanup(&lifecycle).await;
+        assert!(server.is_exited());
+        assert!(server.closed.is_cancelled());
+    }
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn codex_app_server_reaps_child_when_initialization_waiter_drops() {
+        let lifecycle = AppLifecycle::new();
+        let service = lifecycle.scope(TaskStage::Service, "fixture app-server");
+        let fixture = tempfile::tempdir().unwrap();
+        let started = fixture.path().join("started");
+        let command = fixture_server(&started, false);
+        let startup = tokio::spawn(async move {
+            CodexAppServer::start_command(command, "fixture".into(), &service).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        startup.abort();
+        assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+        wait_for_process_cleanup(&lifecycle).await;
+    }
+
     #[test]
     fn detects_the_installed_codex_cli_without_reading_credentials() {
         let info = detect_codex_runtime();
@@ -1180,7 +1266,8 @@ mod tests {
 
     #[test]
     fn provider_exposes_native_tool_capability_for_kokoro_dynamic_tools() {
-        let provider = CodexRuntimeProvider::new("codex-runtime".to_string(), None);
+        let provider =
+            CodexRuntimeProvider::new("codex-runtime".to_string(), None, &AppLifecycle::new());
 
         assert_eq!(provider.id(), "codex-runtime");
         assert!(provider.supports_native_tools());

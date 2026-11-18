@@ -13,6 +13,7 @@ use crate::characters::instance_resource::{
 };
 use crate::characters::{validate_package_content, PackageContentEntry};
 use crate::error::KokoroError;
+use crate::lifecycle::WorkLease;
 use crate::ipc::wire::Response;
 use crate::registry::client::verify_registry_entry_archive;
 use crate::registry::manifest::{RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_URL};
@@ -3380,6 +3381,10 @@ fn prepare_backup_config_for_install(
 
 // ── Commands ─────────────────────────────────────────
 
+pub(super) fn admit_backup_operation(app: &AppHandle, name: &str) -> Result<WorkLease, KokoroError> {
+    crate::ipc::admit_operation(app, "backup", name)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn export_data(
@@ -3388,6 +3393,7 @@ pub async fn export_data(
     _characters_json: Option<String>,
     options: Option<ExportOptions>,
 ) -> Result<Response<ExportResult>, KokoroError> {
+    let _export = admit_backup_operation(&app, "manual-export")?;
     let _database_operation_guard = acquire_database_operation_read_guard().await;
     let app_data = app_data_dir(&app)?;
     ensure_non_redirected_parent_chain(&app_data, &app_data)?;
@@ -3554,7 +3560,11 @@ pub async fn export_data_to_path(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn preview_import(file_path: String) -> Result<Response<ImportPreview>, KokoroError> {
+pub async fn preview_import(
+    app: AppHandle,
+    file_path: String,
+) -> Result<Response<ImportPreview>, KokoroError> {
+    let _preview = admit_backup_operation(&app, "preview-import")?;
     let path = PathBuf::from(&file_path);
     let file = fs::File::open(&path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -3691,6 +3701,7 @@ pub async fn import_data(
     file_path: String,
     options: ImportOptions,
 ) -> Result<Response<ImportResult>, KokoroError> {
+    let _import = admit_backup_operation(&app, "import")?;
     let _database_operation_guard = acquire_database_operation_write_guard().await;
     let app_data = app_data_dir(&app)?;
     let staged_configs = if options.import_configs {

@@ -16,6 +16,7 @@ use super::openai_realtime::OpenAIRealtimeTtsProvider;
 use super::queue::TtsQueue;
 use super::router::TtsRouter;
 use super::voice_registry::VoiceRegistry;
+use crate::lifecycle::TaskScope;
 
 use crate::ai::context::AIOrchestrator;
 use crate::chat::runtime::ChatPlaybackScope;
@@ -118,6 +119,7 @@ pub struct TtsService {
     cache: Arc<RwLock<TtsCache>>,
     requests: Arc<Mutex<TtsRequests>>,
     _queue: Arc<TtsQueue>,
+    process_scope: Option<TaskScope>,
     cache_enabled: bool,
 }
 
@@ -282,12 +284,24 @@ impl TtsService {
             cache: Arc::new(RwLock::new(TtsCache::new(500, 3600))),
             requests: Arc::new(Mutex::new(TtsRequests::default())),
             _queue: Arc::new(TtsQueue::new(3)),
+            process_scope: None,
             cache_enabled: true,
         }
     }
 
     /// Initialize TtsService from a config, building and registering all providers.
     pub async fn init_from_config(config: &TtsSystemConfig) -> Self {
+        Self::initialize(config, None).await
+    }
+
+    pub(crate) async fn init_from_config_with_scope(
+        config: &TtsSystemConfig,
+        scope: TaskScope,
+    ) -> Self {
+        Self::initialize(config, Some(scope)).await
+    }
+
+    async fn initialize(config: &TtsSystemConfig, process_scope: Option<TaskScope>) -> Self {
         let service = Self {
             snapshot_gate: Arc::default(),
             committed_config: Arc::new(RwLock::new(config.clone())),
@@ -300,6 +314,7 @@ impl TtsService {
             ))),
             requests: Arc::new(Mutex::new(TtsRequests::default())),
             _queue: Arc::new(TtsQueue::new(config.queue.max_concurrent)),
+            process_scope,
             cache_enabled: config.cache.enabled,
         };
 
@@ -309,7 +324,7 @@ impl TtsService {
                 continue;
             }
 
-            match Self::build_provider(provider_config).await {
+            match service.build_provider(provider_config).await {
                 Some(provider) => {
                     tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
                     service.register_provider(provider).await;
@@ -328,7 +343,7 @@ impl TtsService {
     }
 
     /// Build a provider from config.
-    async fn build_provider(config: &ProviderConfig) -> Option<Arc<dyn TtsProvider>> {
+    async fn build_provider(&self, config: &ProviderConfig) -> Option<Arc<dyn TtsProvider>> {
         match config.provider_type.as_str() {
             "openai" => {
                 OpenAITtsProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
@@ -346,9 +361,9 @@ impl TtsService {
             }
             "gpt_sovits" => LocalGPTSoVITSProvider::from_config(config)
                 .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
-            "omnivoice" => {
-                OmniVoiceProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
-            }
+            "omnivoice" => OmniVoiceProvider::from_config(config).map(|provider| {
+                Arc::new(provider.with_scope(self.process_scope.clone())) as Arc<dyn TtsProvider>
+            }),
             "azure" => {
                 AzureTtsProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
@@ -894,7 +909,7 @@ impl TtsService {
                 continue;
             }
 
-            match Self::build_provider(provider_config).await {
+            match self.build_provider(provider_config).await {
                 Some(provider) => {
                     tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
                     let provider_id = provider.id();

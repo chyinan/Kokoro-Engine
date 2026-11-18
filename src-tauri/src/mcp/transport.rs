@@ -8,6 +8,7 @@ use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use reqwest_mcp::{header, redirect, Client, StatusCode, Url};
 use rmcp::{
     model::{ClientJsonRpcMessage, ServerJsonRpcMessage},
+    service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         common::client_side_sse::NeverRetry,
         streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
@@ -16,6 +17,7 @@ use rmcp::{
     RoleClient,
 };
 use std::{future::Future, io, process::Stdio, sync::Arc, time::Duration};
+use tokio::{sync::oneshot, task::JoinHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransportMode {
@@ -50,7 +52,7 @@ pub(super) fn server_url(config: &McpServerConfig) -> Result<Url, KokoroError> {
         .ok_or_else(|| KokoroError::Config("MCP server requires a valid HTTP or HTTPS URL".into()))
 }
 
-pub(super) fn stdio(config: &McpServerConfig) -> Result<TokioChildProcess, KokoroError> {
+pub(super) fn stdio(config: &McpServerConfig) -> Result<StdioTransport, KokoroError> {
     #[cfg(windows)]
     let mut command = {
         // Resolve .cmd/.bat shims using the server's PATH without changing
@@ -88,13 +90,121 @@ pub(super) fn stdio(config: &McpServerConfig) -> Result<TokioChildProcess, Kokor
         .map_err(|error| {
             KokoroError::ExternalService(format!("MCP process spawn failed: {error}"))
         })?;
-    if let Some(mut stderr) = stderr {
+    let stderr_drain = stderr.map(|mut stderr| {
         // Servers may write credentials to stderr. Drain it without logging it or retaining it.
         tokio::spawn(async move {
             let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-        });
+        })
+    });
+    Ok(StdioTransport {
+        child: Some(transport),
+        stderr_drain,
+    })
+}
+
+pub(super) struct StdioTransport {
+    child: Option<TokioChildProcess>,
+    stderr_drain: Option<JoinHandle<()>>,
+}
+
+impl Transport<RoleClient> for StdioTransport {
+    type Error = io::Error;
+
+    fn send(
+        &mut self,
+        message: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.child.as_mut().expect("open MCP child").send(message)
     }
-    Ok(transport)
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        self.child.as_mut()?.receive().await
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        let result = if let Some(mut child) = self.child.take() {
+            match child.graceful_shutdown().await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // A failed protocol close still owns the process. Reap it
+                    // here instead of relying on the SDK's asynchronous Drop.
+                    if let Some(mut process) = child.into_inner() {
+                        let reap = Box::into_pin(process.kill()).await;
+                        if reap.is_ok() {
+                            tracing::warn!(target: "mcp", %error, "MCP child was reaped after graceful shutdown failed");
+                        }
+                        reap
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        } else {
+            Ok(())
+        };
+        if let Some(drain) = self.stderr_drain.take() {
+            // The child's descendants can inherit stderr. Stop the drain
+            // after the process wrapper has completed shutdown.
+            drain.abort();
+            if let Err(error) = drain.await {
+                if !error.is_cancelled() {
+                    return Err(io::Error::other(error));
+                }
+            }
+        }
+        result
+    }
+}
+
+/// Return the resource to its owner even when the SDK drops its transport
+/// during negotiation. Only the owner reports success after the close joins.
+pub(super) struct RetainedTransport<T> {
+    transport: Option<T>,
+    returned: Option<oneshot::Sender<T>>,
+}
+
+impl<T> RetainedTransport<T> {
+    pub(super) fn new(transport: T) -> (Self, oneshot::Receiver<T>) {
+        let (returned, receiver) = oneshot::channel();
+        (
+            Self {
+                transport: Some(transport),
+                returned: Some(returned),
+            },
+            receiver,
+        )
+    }
+}
+
+impl<T: Transport<RoleClient>> Transport<RoleClient> for RetainedTransport<T> {
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        message: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.transport
+            .as_mut()
+            .expect("open MCP transport")
+            .send(message)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        self.transport.as_mut()?.receive().await
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        // The owner closes the returned transport after joining the SDK.
+        Ok(())
+    }
+}
+
+impl<T> Drop for RetainedTransport<T> {
+    fn drop(&mut self) {
+        if let (Some(returned), Some(transport)) = (self.returned.take(), self.transport.take()) {
+            let _ = returned.send(transport);
+        }
+    }
 }
 
 fn http_client(redirect: redirect::Policy) -> Result<Client, LegacySseError> {

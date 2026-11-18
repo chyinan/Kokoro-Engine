@@ -1,7 +1,8 @@
 use crate::chat::runtime::ChatRuntimeState;
 use crate::error::KokoroError;
-use crate::ipc::wire::Response;
 use crate::hooks::HookRuntime;
+use crate::ipc::wire::Response;
+use crate::lifecycle::{AppLifecycle, TaskStage};
 use crate::tts::config::{ProviderConfig, TtsSystemConfig};
 use crate::tts::desktop::TauriTtsPlayback;
 use crate::tts::local_gpt_sovits::GptSovitsModels;
@@ -46,20 +47,33 @@ pub async fn synthesize(
     let runtime = app.try_state::<Arc<ChatRuntimeState>>();
     let playback = TauriTtsPlayback::new(&app, runtime.as_deref().cloned());
     let hooks = app.try_state::<HookRuntime>();
-    state
-        .speak(
-            &playback,
-            hooks.as_deref(),
-            text,
-            config.provider_id,
-            Some(params),
-            config
-                .request_id
-                .filter(|request_id| !request_id.trim().is_empty())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        )
-        .await
-        .map_err(KokoroError::Tts)
+    let scope = app.state::<AppLifecycle>().scope(TaskStage::Work, "tts");
+    let _work = scope
+        .lease("desktop synthesis")
+        .map_err(|error| KokoroError::Tts(error.to_string()))?;
+    let stop = scope.token();
+    let request_id = config
+        .request_id
+        .filter(|request_id| !request_id.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let speak = state.speak(
+        &playback,
+        hooks.as_deref(),
+        text,
+        config.provider_id,
+        Some(params),
+        request_id.clone(),
+    );
+    tokio::pin!(speak);
+    let result = tokio::select! {
+        biased;
+        _ = stop.cancelled() => {
+            state.cancel_request(Some(&request_id)).await;
+            speak.await
+        }
+        result = &mut speak => result,
+    };
+    result.map_err(KokoroError::Tts)
 }
 
 #[command]

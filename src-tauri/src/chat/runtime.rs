@@ -937,7 +937,7 @@ impl ChatPlaybackScope {
 
 /// One execution owner schedules speech; restoring a view never synthesizes.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn speak_completed_turn(
+pub(crate) fn speak_completed_turn(
     state: Arc<crate::ai::context::AIOrchestrator>,
     events: ChatEvents,
     tts: Option<crate::tts::TtsService>,
@@ -970,32 +970,39 @@ pub(crate) async fn speak_completed_turn(
     else {
         return;
     };
-    let scope = {
-        let Ok(_activation) = state.enter_chat_turn() else {
+    let tasks = state
+        .lifecycle
+        .scope(crate::lifecycle::TaskStage::Work, "chat speech");
+    let shutdown = tasks.token();
+    let _ = tasks.spawn_durable("automatic playback", async move {
+        let Some(tts) = tts else {
             return;
         };
-        let _selection = state.selection.conversation_switch_lock.lock().await;
-        if state.get_character_id().await != character_id
-            || state
-                .selection
-                .current_conversation_id
-                .lock()
-                .await
-                .as_deref()
-                != Some(conversation_id.as_str())
-        {
-            return;
-        }
-        ChatPlaybackScope {
-            client_request_id: client_request_id.clone(),
-            turn_id: turn_id.clone(),
-            character_id,
-            conversation_id,
-            selection_generation: state.current_conversation_generation(),
-        }
-    };
-    tokio::spawn(async move {
-        let Some(tts) = tts else {
+        let Some(Some(scope)) = shutdown
+            .run_until_cancelled(async {
+                let _activation = state.enter_chat_turn().ok()?;
+                let _selection = state.selection.conversation_switch_lock.lock().await;
+                if state.get_character_id().await != character_id
+                    || state
+                        .selection
+                        .current_conversation_id
+                        .lock()
+                        .await
+                        .as_deref()
+                        != Some(conversation_id.as_str())
+                {
+                    return None;
+                }
+                Some(ChatPlaybackScope {
+                    client_request_id: client_request_id.clone(),
+                    turn_id: turn_id.clone(),
+                    character_id,
+                    conversation_id,
+                    selection_generation: state.current_conversation_generation(),
+                })
+            })
+            .await
+        else {
             return;
         };
         let Some(playback) = events
@@ -1005,17 +1012,25 @@ pub(crate) async fn speak_completed_turn(
         else {
             return;
         };
-        let result = tts
-            .speak_snapshot(
-                playback.as_ref(),
-                hooks.as_ref(),
-                text,
-                format!("chat_{turn_id}"),
-                snapshot,
-                &scope,
-                &state,
-            )
-            .await;
+        let request_id = format!("chat_{turn_id}");
+        let speech = tts.speak_snapshot(
+            playback.as_ref(),
+            hooks.as_ref(),
+            text,
+            request_id.clone(),
+            snapshot,
+            &scope,
+            &state,
+        );
+        tokio::pin!(speech);
+        let result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                tts.cancel_request(Some(&request_id)).await;
+                speech.await
+            }
+            result = &mut speech => result,
+        };
         if let Err(error) = result {
             tracing::warn!(target: "tts", "chat auto speech failed: {error}");
             if let Some(snapshot) = events

@@ -1,5 +1,9 @@
+import { writeFileSync } from "node:fs";
 import readline from "node:readline";
 
+if (process.env.KOKORO_MCP_TEST_PID_FILE) {
+  writeFileSync(process.env.KOKORO_MCP_TEST_PID_FILE, String(process.pid));
+}
 const secret = process.env.KOKORO_MCP_TEST_VALUE;
 process.stderr.write("x".repeat(256 * 1024));
 
@@ -11,6 +15,7 @@ for await (const line of lines) {
   const { method, id, params } = JSON.parse(line);
   switch (method) {
     case "server/discover":
+      if (process.env.KOKORO_MCP_TEST_HOLD_STARTUP) break;
       send({ id, error: { code: -32601, message: "legacy peer" } });
       break;
     case "initialize":

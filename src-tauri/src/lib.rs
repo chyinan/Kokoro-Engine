@@ -2,6 +2,7 @@
 // Reason: 应用入口文件需要同时声明模块、注册 Tauri 命令、初始化服务与恢复磁盘状态，天然属于编排层。
 pub mod actions;
 pub mod ai;
+mod app_shutdown;
 pub(crate) mod bot;
 pub mod characters;
 pub mod chat;
@@ -13,6 +14,7 @@ pub mod error;
 pub mod hooks;
 pub mod imagegen;
 pub mod ipc;
+mod lifecycle;
 pub mod live2d;
 pub mod llm;
 pub mod mcp;
@@ -25,11 +27,34 @@ pub mod tts;
 pub mod utils;
 pub mod vision;
 use crate::hooks::{AuditLogHookHandler, HookRuntime};
+use crate::lifecycle::{AppLifecycle, TaskScope, TaskStage};
 use crate::mods::ModManager;
 use crate::utils::logging::init_logging;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::Manager;
+
+fn spawn_startup<F>(
+    scope: &TaskScope,
+    name: &str,
+    delay: Duration,
+    start: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let cancel = scope.token();
+    if let Err(error) = scope.spawn_durable(name, async move {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        start.await;
+    }) {
+        tracing::debug!(target: "startup", task = name, %error, "skipped startup job");
+    }
+}
 
 async fn auto_start_pet_on_launch<F, Fut>(
     pet_enabled: bool,
@@ -43,7 +68,9 @@ async fn auto_start_pet_on_launch<F, Fut>(
         return;
     }
 
-    tokio::time::sleep(delay).await;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
 
     if let Err(e) = show_pet().await {
         tracing::error!(target: "pet", "auto-start failed: {}", e);
@@ -84,7 +111,11 @@ pub fn run() {
     let ipc = ipc::builder();
     let desktop_owner = Arc::new(std::sync::Mutex::new(None));
     let setup_desktop_owner = desktop_owner.clone();
-    tauri::Builder::default()
+    let lifecycle = AppLifecycle::with_runtime(tauri::async_runtime::handle().inner().clone());
+    let exit_completion = app_shutdown::ExitCompletion::default();
+    let application = tauri::Builder::default()
+        .manage(lifecycle)
+        .manage(exit_completion.clone())
         .manage(crate::characters::activation::ActivationCoordinator::default())
         .manage(Arc::new(crate::chat::runtime::ChatRuntimeState::default()))
         .plugin(tauri_plugin_dialog::init())
@@ -100,8 +131,9 @@ pub fn run() {
         )
         .invoke_handler(ipc::invoke_handler(&ipc))
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    api.prevent_close();
                     window.app_handle().exit(0);
                     return;
                 }
@@ -136,8 +168,11 @@ pub fn run() {
             let startup_begin = std::time::Instant::now();
             tracing::info!(target: "startup", "setup begin");
             app.manage(crate::commands::pet::PetShortcutState::default());
+            let app_lifecycle = app.state::<AppLifecycle>().inner().clone();
+            let startup_scope = app_lifecycle.scope(TaskStage::Work, "startup");
 
             let app_handle = app.handle();
+            let lifecycle_for_ai = app_lifecycle.clone();
             tauri::async_runtime::block_on(async move {
                 tracing::info!(
                     target: "startup",
@@ -150,7 +185,10 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(&app_data_dir);
                 let db_path = app_data_dir.join("kokoro.db");
                 let db_url = format!("sqlite:///{}", db_path.to_string_lossy().replace('\\', "/"));
-                match crate::ai::context::AIOrchestrator::new(&db_url).await {
+                match crate::ai::context::AIOrchestrator::new_with_lifecycle(
+                    &db_url,
+                    lifecycle_for_ai,
+                ).await {
                     Ok(orchestrator) => {
                         tracing::info!(
                             target: "startup",
@@ -362,7 +400,10 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let tts_service = tauri::async_runtime::block_on(async {
-                crate::tts::TtsService::init_from_config(&tts_config).await
+                crate::tts::TtsService::init_from_config_with_scope(
+                    &tts_config,
+                    app_lifecycle.scope(TaskStage::Service, "tts-process"),
+                ).await
             });
             app.manage(tts_service);
             tracing::info!(
@@ -401,8 +442,11 @@ pub fn run() {
                 "stage=llm.init.start elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-            let llm_service =
-                crate::llm::service::LlmService::from_config(llm_config, llm_config_path);
+            let llm_service = crate::llm::service::LlmService::from_config_with_lifecycle(
+                llm_config,
+                llm_config_path,
+                app_lifecycle.clone(),
+            );
             app.manage(llm_service);
             tracing::info!(
                 target: "startup",
@@ -419,7 +463,10 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let stt_service = tauri::async_runtime::block_on(async {
-                crate::stt::SttService::init_from_config(&stt_config).await
+                crate::stt::SttService::init_from_config_with_scope(
+                    &stt_config,
+                    app_lifecycle.scope(TaskStage::Work, "stt"),
+                ).await
             });
             app.manage(stt_service);
             tracing::info!(
@@ -458,8 +505,10 @@ pub fn run() {
                 "stage=mcp.init.start elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-            let mut mcp_manager =
-                crate::mcp::McpManager::new(mcp_config_path.to_str().unwrap_or("mcp_servers.json"));
+            let mut mcp_manager = crate::mcp::McpManager::new_with_scope(
+                mcp_config_path.to_str().unwrap_or("mcp_servers.json"),
+                app_lifecycle.scope(TaskStage::Service, "mcp"),
+            );
             mcp_manager.load_configs();
             let mcp_manager = Arc::new(tokio::sync::Mutex::new(mcp_manager));
             app.manage(mcp_manager.clone());
@@ -471,8 +520,7 @@ pub fn run() {
 
             // Each supported server connects independently outside application state locks.
             let mcp_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            spawn_startup(&startup_scope, "mcp-connect", Duration::from_secs(3), async move {
                 if let Some(registry) = mcp_app.try_state::<Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>() {
                     crate::mcp::bridge::start_enabled(&mcp_manager, registry.inner()).await;
                 }
@@ -485,8 +533,11 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let mut vision_server = crate::vision::server::VisionServer::new(&app_data);
+            let vision_http = app_lifecycle.scope(TaskStage::Service, "vision-http");
             tauri::async_runtime::block_on(async {
-                vision_server.start().await;
+                if let Err(error) = vision_server.start(&vision_http) {
+                    tracing::error!(target: "vision", %error, "vision file server did not start");
+                }
             });
             app.manage(Arc::new(tokio::sync::Mutex::new(vision_server)));
             tracing::info!(
@@ -546,7 +597,7 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let mut mod_manager = ModManager::new(mods_path);
-            app.manage(mod_manager.init(app.handle().clone()));
+            app.manage(mod_manager.init(app.handle().clone(), &app_lifecycle));
             app.manage(tokio::sync::Mutex::new(mod_manager));
             tracing::info!(
                 target: "startup",
@@ -563,8 +614,10 @@ pub fn run() {
                 "stage=vision.watcher.init.start elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-            let vision_watcher = crate::vision::watcher::VisionWatcher::new(vision_config.clone())
-                .with_llm_service(llm_svc_for_vision);
+            let vision_watcher = crate::vision::watcher::VisionWatcher::new_with_scope(
+                vision_config.clone(),
+                app_lifecycle.scope(TaskStage::Work, "vision"),
+            ).with_llm_service(llm_svc_for_vision);
             app.manage(vision_watcher.clone());
             tracing::info!(
                 target: "startup",
@@ -575,47 +628,63 @@ pub fn run() {
             // Auto-start vision watcher if previously enabled
             if vision_config.vlm_enabled && vision_config.auto_vision_enabled {
                 let watcher_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Small delay to let the app fully initialize
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    vision_watcher.start(watcher_handle);
+                spawn_startup(&startup_scope, "vision-watcher", Duration::from_secs(2), async move {
+                    if let Err(error) = vision_watcher.start(watcher_handle).await {
+                        tracing::warn!(target: "vision", %error, "vision watcher did not start");
+                    }
                 });
             }
 
             // Audio Buffer for Streaming STT
             app.manage(crate::stt::stream::AudioBuffer::new());
-            app.manage(crate::stt::NativeMicState::new());
-            app.manage(crate::stt::NativeWakeWordState::new());
+            app.manage(crate::stt::NativeMicState::new(
+                app_lifecycle.scope(TaskStage::Work, "native-mic-work"),
+                app_lifecycle.scope(TaskStage::Service, "native-mic"),
+            ));
+            app.manage(crate::stt::NativeWakeWordState::new(
+                app_lifecycle.scope(TaskStage::Work, "wake-word-work"),
+                app_lifecycle.scope(TaskStage::Service, "wake-word"),
+            ));
 
             let bot_services = desktop_chat::install_services(app.handle(), &app_data, desktop);
 
             if let Some(chat) = app.try_state::<crate::chat::application::ChatService>() {
                 let heartbeat_handle = app.handle().clone();
                 let chat = chat.inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    desktop_heartbeat::heartbeat_loop(heartbeat_handle, chat).await;
-                });
+                let heartbeat = app_lifecycle.scope(TaskStage::Work, "heartbeat");
+                if let Err(error) = heartbeat.spawn_durable(
+                    "loop",
+                    desktop_heartbeat::heartbeat_loop(heartbeat_handle, chat, heartbeat.clone()),
+                ) {
+                    tracing::warn!(target: "startup", %error, "heartbeat did not start");
+                }
             }
 
             let bot_config = crate::bot::load_bot_config();
             let telegram_config = bot_config.telegram.clone();
             let telegram_enabled = telegram_config.enabled;
-            let bot_runtime_service = crate::bot::BotRuntimeService::new(bot_config);
+            let bot_runtime_service = crate::bot::BotRuntimeService::new(
+                bot_config,
+                app_lifecycle.scope(TaskStage::Work, "bot-requests"),
+                app_lifecycle.scope(TaskStage::Service, "bot"),
+            );
             app.manage(bot_runtime_service.clone());
-            let telegram_service = crate::telegram::TelegramService::new(telegram_config);
+            let telegram_service = crate::telegram::TelegramService::new(
+                telegram_config,
+                app_lifecycle.scope(TaskStage::Work, "telegram-updates"),
+                app_lifecycle.scope(TaskStage::Service, "telegram"),
+            );
             app.manage(telegram_service.clone());
 
             if telegram_enabled {
                 let telegram_services = bot_services.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                spawn_startup(&startup_scope, "telegram", Duration::from_secs(3), async move {
                     if let Err(error) = telegram_service.start(telegram_services).await {
                         tracing::error!(target: "telegram", "[Telegram] Auto-start failed: {error}");
                     }
                 });
             }
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            spawn_startup(&startup_scope, "bot", Duration::from_secs(3), async move {
                 bot_runtime_service.start_enabled(bot_services).await;
             });
 
@@ -632,10 +701,10 @@ pub fn run() {
 
                 if pet_enabled {
                     let pet_app = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
+                    spawn_startup(&startup_scope, "pet", Duration::from_millis(500), async move {
                         auto_start_pet_on_launch(
                             true,
-                            std::time::Duration::from_millis(500),
+                            Duration::ZERO,
                             move || async move { crate::commands::pet::show_pet_window(pet_app).await },
                         )
                         .await;
@@ -652,17 +721,26 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(move |app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                if let Some(manager) =
-                    app.try_state::<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>()
-                {
-                    tauri::async_runtime::block_on(crate::mcp::bridge::shutdown(manager.inner()));
-                }
-                desktop_owner.lock().unwrap().take();
-            }
-        });
+        .expect("error while building tauri application");
+    let on_event = move |app: &tauri::AppHandle, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            app_shutdown::on_exit_requested(app, code, api);
+        }
+        tauri::RunEvent::Exit => {
+            desktop_owner.lock().unwrap().take();
+        }
+        _ => {}
+    };
+    #[cfg(mobile)]
+    application.run(on_event);
+    #[cfg(not(mobile))]
+    {
+        // Wry can finish its event loop with code zero even when a
+        // RequestExit carried a nonzero code. Retain the lifecycle's code
+        // independently of Tauri state until native cleanup returns.
+        let runtime_code = application.run_return(on_event);
+        std::process::exit(exit_completion.code().unwrap_or(runtime_code));
+    }
 }
 
 fn is_usable_dylib(path: &Path) -> bool {

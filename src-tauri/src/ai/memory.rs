@@ -2824,7 +2824,10 @@ impl MemoryManager {
         let metadata = infer_memory_metadata(content);
         let storage_probe = metadata.canonical_content.as_deref().unwrap_or(content);
         let hash = canonical_hash(storage_probe);
-        let embedding = self.embed(storage_probe).await?;
+        let embedding =
+            crate::chat::ownership::until_memory_shutdown(scope, self.embed(storage_probe))
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Chat memory task stopped during shutdown"))??;
         let embedding_bytes: Vec<u8> = bincode::serialize(&embedding)?;
         // Recheck after all external work. Deletion and memory revocation use
         // the matching write guard, so the following SQL mutations are atomic
@@ -3552,10 +3555,13 @@ impl MemoryManager {
         }
 
         let prompt = self.build_llm_discovery_prompt(entries, target_language);
-        let response = provider
-            .chat(vec![user_text_message(prompt)], None)
-            .await
-            .map_err(|error| anyhow::anyhow!("Dream discovery LLM scan failed: {}", error))?;
+        let response = crate::chat::ownership::until_memory_shutdown(
+            scope,
+            provider.chat(vec![user_text_message(prompt)], None),
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Chat memory task stopped during shutdown"))?
+        .map_err(|error| anyhow::anyhow!("Dream discovery LLM scan failed: {}", error))?;
         let json = strip_code_fences_for_memory_json(&response);
         let discovery: DreamDiscoveryResponse = serde_json::from_str(json)
             .map_err(|error| anyhow::anyhow!("Dream discovery JSON parse failed: {}", error))?;
@@ -3740,14 +3746,18 @@ impl MemoryManager {
         b: &DreamCandidateEntry,
         provider: &std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
         target_language: Option<&str>,
+        scope: Option<&crate::chat::ownership::MemoryWriteScope>,
     ) -> Result<DreamPairAssessment> {
         use crate::llm::messages::user_text_message;
 
         let prompt = self.build_dream_pair_prompt(a, b, target_language);
-        let response = provider
-            .chat(vec![user_text_message(prompt)], None)
-            .await
-            .map_err(|error| anyhow::anyhow!("Dream pair LLM assessment failed: {}", error))?;
+        let response = crate::chat::ownership::until_memory_shutdown(
+            scope,
+            provider.chat(vec![user_text_message(prompt)], None),
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Chat memory task stopped during shutdown"))?
+        .map_err(|error| anyhow::anyhow!("Dream pair LLM assessment failed: {}", error))?;
         let json = strip_code_fences_for_memory_json(&response);
         let assessment: DreamPairAssessment = serde_json::from_str(json).map_err(|error| {
             anyhow::anyhow!("Dream pair LLM assessment JSON parse failed: {}", error)
@@ -3835,6 +3845,9 @@ impl MemoryManager {
 
         let mut reviewed_pairs: HashSet<(i64, i64)> = HashSet::new();
         for (i, a) in entries.iter().enumerate() {
+            if scope.is_some_and(|scope| scope.shutdown.is_cancelled()) {
+                anyhow::bail!("Chat memory task stopped during shutdown");
+            }
             if processed.contains(&a.id) {
                 continue;
             }
@@ -3854,7 +3867,7 @@ impl MemoryManager {
                 if sim >= DREAM_SEMANTIC_AUTO_MERGE_THRESHOLD {
                     if let Some(provider) = provider {
                         match self
-                            .assess_dream_pair_via_llm(a, b, provider, target_language)
+                            .assess_dream_pair_via_llm(a, b, provider, target_language, scope)
                             .await
                         {
                             Ok(assessment) => {
@@ -4492,7 +4505,12 @@ impl MemoryManager {
         language: Option<String>,
         scope: &crate::chat::ownership::MemoryWriteScope,
     ) -> Result<usize> {
-        let guard = acquire_database_operation_read_guard().await;
+        let guard = crate::chat::ownership::until_memory_shutdown(
+            Some(scope),
+            acquire_database_operation_read_guard(),
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Chat memory task stopped during shutdown"))?;
         Self::ensure_database_operation_current(&guard)?;
         let result = self
             .run_dream_scoped(

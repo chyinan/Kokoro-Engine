@@ -61,6 +61,7 @@ pub async fn list_conversations(
     request: ListConversationsRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Vec<ConversationInfo>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "list_conversations")?;
     list_conversations_inner(request, &state.db).await
 }
 
@@ -218,6 +219,7 @@ pub async fn load_conversation(
     request: LoadConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<LoadedConversation>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "load_conversation")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let max_chars = *state.max_message_chars.lock().await;
     load_conversation_inner(
@@ -300,6 +302,7 @@ pub async fn delete_conversation(
     request: DeleteConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "delete_conversation")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let _memory_commit = state.owners.memory_commit.write().await;
     let deleted_id = request.id.clone();
@@ -324,6 +327,7 @@ pub async fn delete_conversation(
 pub async fn list_character_ids(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Vec<String>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "list_character_ids")?;
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT character_id FROM conversations
          UNION
@@ -340,6 +344,7 @@ pub async fn list_character_ids(
 #[tauri::command]
 #[specta::specta]
 pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "create_conversation")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     state.clear_history().await;
     Ok(String::new())
@@ -351,6 +356,7 @@ pub async fn rename_conversation(
     request: RenameConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "rename_conversation")?;
     sqlx::query("UPDATE conversations SET title = ? WHERE id = ?")
         .bind(&request.title)
         .bind(&request.id)
@@ -367,6 +373,7 @@ pub async fn update_conversation_state(
     request: UpdateConversationStateRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "update_conversation_state")?;
     let current = sqlx::query_as::<_, (String, String)>(
         "SELECT topic, pinned_state FROM conversations WHERE id = ?",
     )
@@ -577,6 +584,7 @@ pub async fn edit_conversation_message(
     request: EditConversationMessageRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Response<EditConversationMessageResponse>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "edit_conversation_message")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let _history_guard = state
         .try_acquire_chat_turn("history_mutation")

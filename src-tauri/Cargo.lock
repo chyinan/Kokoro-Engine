@@ -7497,6 +7497,7 @@ dependencies = [
  "hmac",
  "hound",
  "image 0.25.10",
+ "libc",
  "ndarray",
  "ort",
  "process-wrap",
@@ -7540,6 +7541,7 @@ dependencies = [
  "uuid",
  "warp",
  "which",
+ "windows-sys 0.61.2",
  "wiremock",
  "zip",
 ]
@@ -8281,6 +8283,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
