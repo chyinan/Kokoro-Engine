@@ -5684,6 +5684,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webhook_sqlite_replay_keeps_saved_reply_without_synthesizing_audio() {
+        use crate::bot::{handle_generic_webhook, BotChatServices, WebhookBotConfig};
+        use crate::tts::{
+            ProviderCapabilities, TtsError, TtsParams, TtsProvider, TtsService, VoiceProfile,
+        };
+        use base64::Engine as _;
+
+        const AUDIO: &[u8] = b"OggSfixture audio";
+        #[derive(Default)]
+        struct SpeechFixture(AtomicUsize);
+
+        #[async_trait::async_trait]
+        impl TtsProvider for SpeechFixture {
+            fn id(&self) -> String {
+                "browser".into()
+            }
+
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::default()
+            }
+
+            fn voices(&self) -> Vec<VoiceProfile> {
+                Vec::new()
+            }
+
+            async fn is_available(&self) -> bool {
+                true
+            }
+
+            async fn synthesize(&self, text: &str, _: TtsParams) -> Result<Vec<u8>, TtsError> {
+                assert_eq!(text, "Saved without a window.");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AUDIO.to_vec())
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let database = format!(
+            "sqlite:///{}",
+            root.path()
+                .join("webhook.sqlite")
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+        let state = Arc::new(AIOrchestrator::new(&database).await.unwrap());
+        state.set_memory_enabled(false).await;
+        sqlx::query("INSERT INTO characters(id, name) VALUES ('voice-fixture', 'Voice Fixture')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let provider = Arc::new(HeadlessProvider::default());
+        let speech = Arc::new(SpeechFixture::default());
+        let open_services = |state: Arc<AIOrchestrator>| {
+            let llm = LlmService::for_test(provider.clone());
+            let speech = speech.clone();
+            let app_data = root.path();
+            async move {
+                let mut chat = ChatService::for_test(state.clone(), llm, app_data).await;
+                let tts = TtsService::new();
+                // Replace browser delegation with offline synthesis in the captured provider slot.
+                tts.register_provider(speech).await;
+                Arc::get_mut(&mut chat.dependencies).unwrap().tts = Some(tts.clone());
+                BotChatServices::new(
+                    Some((chat, state)),
+                    None,
+                    Some(tts),
+                    None,
+                    Arc::new(|_: crate::bot::BotEvent| Ok(())),
+                )
+            }
+        };
+        let send = |services: BotChatServices| async move {
+            let response = handle_generic_webhook(
+                WebhookBotConfig {
+                    send_voice_reply: true,
+                    bearer_token: Some("fixture-token".into()),
+                    ..Default::default()
+                },
+                Some("Bearer fixture-token".into()),
+                bytes::Bytes::from_static(
+                    br#"{"character_id":"voice-fixture","conversation_id":"voice-peer","request_id":"voice-request","text":"Save and speak this reply"}"#,
+                ),
+                &services,
+            )
+            .await;
+            let status = response.status();
+            let body = warp::hyper::body::to_bytes(response.into_body())
+                .await
+                .unwrap();
+            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            assert_eq!(status.as_u16(), 200, "{body}");
+            body
+        };
+
+        let services = open_services(state.clone()).await;
+        let first = send(services.clone()).await;
+        assert_eq!(first["character_id"], "voice-fixture");
+        assert_eq!(first["reply"], "Saved without a window.");
+        assert_eq!(
+            first["audio"],
+            serde_json::json!({
+                "mime_type": "audio/ogg",
+                "file_name": "reply.ogg",
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(AUDIO),
+            }),
+        );
+        assert_eq!(send(services).await, first);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(speech.0.load(Ordering::SeqCst), 2);
+        let saved_id: i64 =
+            sqlx::query_scalar("SELECT id FROM conversation_messages WHERE role='assistant'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        state.db.close().await;
+        drop(state);
+
+        let cold_state = Arc::new(AIOrchestrator::new(&database).await.unwrap());
+        cold_state.set_memory_enabled(false).await;
+        let replay = send(open_services(cold_state.clone()).await).await;
+        let mut expected = first;
+        expected.as_object_mut().unwrap().remove("audio");
+        expected["output_warnings"] = serde_json::json!(["TTS returned no audio."]);
+        assert_eq!(replay, expected);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(speech.0.load(Ordering::SeqCst), 2);
+        let assistant_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM conversation_messages WHERE role='assistant'")
+                .fetch_all(&cold_state.db)
+                .await
+                .unwrap();
+        assert_eq!(assistant_ids, [saved_id]);
+    }
+
+    #[tokio::test]
     async fn only_the_selected_role_can_inherit_desktop_cues_and_explicit_empty_stays_empty() {
         use crate::characters::activation::{BackendRuntimeSnapshot, PackageAssetReference};
         let root = tempfile::tempdir().unwrap();

@@ -690,6 +690,9 @@ after correcting the service configuration.
 
 ```ts
 interface WebhookReply {
+  character_id: string;
+  conversation_id: string;
+  request_id: string;
   reply: string;
   translation?: string;
   output_warnings?: string[];       // optional image or voice output failures
@@ -712,6 +715,19 @@ output failures appear in `output_warnings`. A media-only reply may have an
 empty `reply` string and nonempty `images`.
 If tool calls finish without producing text or media, the saved reply contains
 a completion notice. Internal tool results are not copied into that notice.
+
+When a committed reply is loaded from SQLite again, including after a process
+restart, Kokoro returns the original `character_id`, `conversation_id`,
+`request_id`, and `reply` for the same scoped request. It also returns the
+`translation`, `images` entries, and chat-stage `output_warnings` when they
+were saved with the assistant message. Legacy stored image prompts can still
+produce additional images through the current image service.
+
+Voice synthesis runs after the chat reply is saved. Kokoro keeps the speech
+provider snapshot in memory and omits `audio` on SQLite-only replay. With
+voice replies enabled and nonempty reply text, that replay appends a
+`TTS returned no audio.` warning instead. Clients should treat `audio` and
+post-save warnings as optional delivery output.
 
 ### `TelegramStatus`
 
