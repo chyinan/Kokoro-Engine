@@ -217,11 +217,10 @@ export class ChatApplication {
     });
   }
   async edit(target: ChatMessageTarget, content: string) {
-    const text = content.trim();
-    if (!text || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
+    if (!content.trim() || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
     return this.mutate(() => bridge.editConversationMessage({
       conversation_id: target.conversationId, conversation_generation: target.generation,
-      message_id: target.messageId, new_content: text,
+      message_id: target.messageId, new_content: content,
     }));
   }
   async deleteConversation(id: string) {

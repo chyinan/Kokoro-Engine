@@ -661,8 +661,7 @@ pub fn run() {
             }
 
             let bot_config = crate::bot::load_bot_config();
-            let telegram_config = bot_config.telegram.clone();
-            let telegram_enabled = telegram_config.enabled;
+            let telegram_enabled = bot_config.telegram.enabled;
             let bot_runtime_service = crate::bot::BotRuntimeService::new(
                 bot_config,
                 app_lifecycle.scope(TaskStage::Work, "bot-requests"),
@@ -670,7 +669,7 @@ pub fn run() {
             );
             app.manage(bot_runtime_service.clone());
             let telegram_service = crate::telegram::TelegramService::new(
-                telegram_config,
+                &bot_runtime_service,
                 app_lifecycle.scope(TaskStage::Work, "telegram-updates"),
                 app_lifecycle.scope(TaskStage::Service, "telegram"),
             );

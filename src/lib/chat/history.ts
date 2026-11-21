@@ -5,6 +5,7 @@ export interface ChatHistoryMessage {
     id?: number;
     role: "user" | "kokoro" | "context";
     text: string;
+    editText?: string;
     images?: string[];
     translation?: string;
     tools?: ToolTraceItem[];
@@ -151,6 +152,7 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 id: m.id,
                 role: "kokoro",
                 text,
+                ...(text === m.content ? {} : { editText: m.content }),
                 translation,
                 turnId,
                 ...(meta?.streaming_draft === true ? { unfinished: true } : {}),

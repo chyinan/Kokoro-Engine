@@ -16,6 +16,8 @@ export interface ChatPanelMessage {
     id?: number;
     role: "user" | "kokoro" | "tool" | "context";
     text: string;
+    /** Raw saved body when the display text was cleaned for an assistant bubble. */
+    editText?: string;
     images?: string[];
     translation?: string;
     translationPending?: boolean;

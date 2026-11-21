@@ -11,6 +11,9 @@ pub enum KokoroError {
     #[error("配置错误: {0}")]
     Config(String),
 
+    #[error("{0}")]
+    BotConfigConflict(String),
+
     #[error("数据库错误: {0}")]
     Database(String),
 
@@ -156,6 +159,7 @@ impl From<KokoroError> for FailureEvent {
     fn from(error: KokoroError) -> Self {
         let (code, retryable) = match &error {
             KokoroError::Config(_) => ("CONFIG_ERROR", false),
+            KokoroError::BotConfigConflict(_) => ("BOT_CONFIG_CONFLICT", false),
             KokoroError::Database(_) => ("DATABASE_ERROR", true),
             KokoroError::Llm(_) => ("LLM_ERROR", true),
             KokoroError::Tts(_) => ("TTS_ERROR", true),

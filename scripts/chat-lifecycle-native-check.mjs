@@ -3,8 +3,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
+import { checkBotConfigTransactions } from "./chat-lifecycle-bot-config-check.mjs";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const output = path.resolve(process.argv[2] ?? "output/playwright/chat-lifecycle");
@@ -12,9 +14,33 @@ const browser = await chromium.connectOverCDP("http://127.0.0.1:19333");
 const context = browser.contexts()[0];
 let pet = await waitFor(() => context.pages().find(page => page.url().includes("pet.html")));
 const report = { startedAt: new Date().toISOString(), model: "controlled localhost SSE fixture", checks: [] };
+const editPasteOnly = process.argv.includes("--edit-paste-only");
 const save = () => fs.writeFileSync(path.join(output, "native-report.json"), JSON.stringify(report, null, 2));
-const databaseRows = (sql, ...params) => JSON.parse(execFileSync("python", ["-c", "import json,sqlite3,sys\nwith sqlite3.connect(sys.argv[1],timeout=10) as db:\n db.row_factory=sqlite3.Row\n print(json.dumps([dict(row) for row in db.execute(sys.argv[2],json.loads(sys.argv[3]))]))", path.join(process.env.KOKORO_TEST_DATA_ROOT, "com.chyin.kokoro", "kokoro.db"), sql, JSON.stringify(params)], {encoding:"utf8"}));
+const databasePath = path.join(process.env.KOKORO_TEST_DATA_ROOT, "com.chyin.kokoro", "kokoro.db");
+const databaseRows = (sql, ...params) => JSON.parse(execFileSync("python", ["-c", "import json,sqlite3,sys\nwith sqlite3.connect(sys.argv[1],timeout=10) as db:\n db.row_factory=sqlite3.Row\n print(json.dumps([dict(row) for row in db.execute(sys.argv[2],json.loads(sys.argv[3]))]))", databasePath, sql, JSON.stringify(params)], {encoding:"utf8"}));
+const seed = (sql, params) => execFileSync("python", ["-c", `
+import json, sqlite3, sys
+with sqlite3.connect(sys.argv[1], timeout=10) as db:
+    sql, params = json.load(sys.stdin.buffer)
+    db.execute(sql, params)
+`, databasePath], { input: JSON.stringify([sql, params]), encoding: "utf8" });
 const view = page => page.evaluate(() => window.__TAURI_INTERNALS__.invoke("get_chat_view"));
+const textareaText = text => text.replace(/\r\n?/g, "\n");
+const assistantPrefix = "长文原字-编辑回归专用前缀";
+const assistantTail = "编辑回归唯一尾段-Q38V";
+function longAssistantMessage() {
+  let line = 0;
+  return `  \n${assistantPrefix}\n${"这是一行超过模型预算的中文正文。\n".repeat(6000)}\n${assistantTail}\n  `
+    .replace(/\n/g, () => ["\r\n", "\n", "\r", "\n"][line++ % 4]);
+}
+async function selectConversationByTitle(page, id, title) {
+  await page.locator("[data-chat-history-toggle]").click();
+  await page.getByText(title, { exact: true }).click();
+  return waitFor(async () => {
+    const snapshot = await view(page);
+    return snapshot.conversation_id === id && snapshot;
+  });
+}
 const windows = page => page.evaluate(async () => (await (await import("/node_modules/@tauri-apps/api/webviewWindow.js")).getAllWebviewWindows()).map(window => window.label));
 const setPanelMounted = (page, mounted) => page.evaluate(async mounted => {
   const { registry } = await import("/src/ui/registry/ComponentRegistry.ts");
@@ -59,7 +85,199 @@ async function petSend(name) {
   await startPetChat(name);
   return waitFor(async () => { const state = await view(pet); return state.turns.find(turn => turn.message === `[case:${name}]` && ["completed", "cancelled", "error", "rejected"].includes(turn.status)); });
 }
-try {
+const selectTextareaRange = (editor, start, end = start) => editor.evaluate((textarea, [start, end]) => {
+  textarea.focus();
+  textarea.setSelectionRange(start, end);
+}, [start, end]);
+
+async function applyTextareaEdit(main, editor, fixture) {
+  const [start, end] = fixture.range ?? [0, fixture.original.length];
+  const draftStart = textareaText(fixture.original.slice(0, start)).length;
+  const draftEnd = textareaText(fixture.original.slice(0, end)).length;
+  await editor.evaluate(textarea => {
+    textarea.nativeEditEvents = [];
+    textarea.addEventListener("beforeinput", event => textarea.nativeEditEvents.push({
+      inputType: event.inputType, trusted: event.isTrusted, length: event.data?.length ?? null,
+      start: textarea.selectionStart, end: textarea.selectionEnd,
+    }));
+  });
+  let expected;
+  let expectedEvents;
+  if (fixture.remove) {
+    await selectTextareaRange(editor, draftStart, draftEnd);
+    await editor.press("Backspace");
+    expected = fixture.original.slice(0, start) + fixture.original.slice(end);
+    expectedEvents = [{ inputType: "deleteContentBackward", trusted: true, length: null, start: draftStart, end: draftEnd }];
+  } else {
+    const prefix = "x".repeat(fixture.length);
+    const suffix = "y".repeat(fixture.length);
+    await selectTextareaRange(editor, draftStart);
+    await main.keyboard.insertText(prefix);
+    const suffixCaret = draftEnd + prefix.length;
+    await selectTextareaRange(editor, suffixCaret);
+    await main.keyboard.insertText(suffix);
+    expected = fixture.original.slice(0, start) + prefix + fixture.original.slice(start, end) + suffix + fixture.original.slice(end);
+    expectedEvents = [
+      { inputType: "insertText", trusted: true, length: fixture.length, start: draftStart, end: draftStart },
+      { inputType: "insertText", trusted: true, length: fixture.length, start: suffixCaret, end: suffixCaret },
+    ];
+  }
+  const events = await editor.evaluate(textarea => textarea.nativeEditEvents);
+  assert.deepEqual(events, expectedEvents);
+  return { expected, events };
+}
+
+async function applyTextareaHistory(main, editor, fixture) {
+  const initial = textareaText(fixture.original);
+  const duplicate = initial.slice(0, initial.indexOf("\n") + 1);
+  const intermediate = initial + "X";
+  let length = initial.length;
+  const expectedEvents = [];
+  const editOffsets = [];
+  await editor.evaluate(textarea => {
+    textarea.nativeEditEvents = [];
+    let previous = textarea.value;
+    textarea.addEventListener("input", event => {
+      const value = textarea.value;
+      textarea.nativeEditEvents.push({ inputType: event.inputType, trusted: event.isTrusted,
+        valueLength: value.length, changed: value !== previous });
+      previous = value;
+    });
+  });
+  const insert = async (position, text) => {
+    await selectTextareaRange(editor, position);
+    await main.keyboard.insertText(text);
+    editOffsets.push(position);
+    length += text.length;
+    expectedEvents.push({ inputType: "insertText", trusted: true, valueLength: length });
+  };
+  const historyKey = async (key, inputType, sizeChange) => {
+    await editor.press(key);
+    length += sizeChange;
+    expectedEvents.push({ inputType, trusted: true, valueLength: length });
+    assert.equal(await editor.evaluate(textarea => textarea.value.length), length, `unexpected native ${key} group`);
+  };
+  const undo = removed => historyKey("Control+z", "historyUndo", -removed);
+  const redo = inserted => historyKey("Control+y", "historyRedo", inserted);
+
+  await insert(initial.length, "X");
+  assert(await editor.inputValue() === intermediate);
+  await insert(0, duplicate);
+  assert(await editor.inputValue() === duplicate + intermediate);
+  if (fixture.redoBranch) {
+    await undo(duplicate.length);
+    assert(await editor.inputValue() === intermediate);
+    await redo(duplicate.length);
+    assert(await editor.inputValue() === duplicate + intermediate);
+    await undo(duplicate.length);
+    await insert(length, "Y");
+    await editor.press("Control+y");
+  } else {
+    // Moving the caret between distant edits keeps them in separate WebView2 undo groups.
+    for (let i = 0; i < fixture.undos - 1; i++) {
+      await insert(i % 2 === 0 ? 9 : length - 3, String.fromCharCode(97 + i));
+    }
+    for (let i = 0; i < fixture.undos - 1; i++) await undo(1);
+    await undo(duplicate.length);
+    assert(await editor.inputValue() === intermediate, "native Undo must restore the noninitial draft with the trailing X");
+  }
+  const events = await editor.evaluate(textarea => textarea.nativeEditEvents);
+  assert(events.every(event => event.trusted));
+  // WebView2 may repeat its insertText notification for a multiline insertion.
+  const transitions = events.filter(event => event.changed || event.inputType !== "insertText")
+    .map(({ inputType, trusted, valueLength }) => ({ inputType, trusted, valueLength }));
+  assert.deepEqual(transitions, expectedEvents);
+  return { expected: fixture.original + (fixture.redoBranch ? "XY" : "X"), events, editOffsets };
+}
+
+async function checkTextareaEdits(main, characterId) {
+  const conversationId = "native-edit-two-pastes";
+  const title = "Native assistant two-sided paste edits";
+  const timestamp = "2000-01-01T00:00:00Z";
+  const short = "A\r\nB";
+  const long = longAssistantMessage();
+  assert.equal(Buffer.byteLength(long, "utf8"), 295575);
+  const separators = [...long.matchAll(/\r\n?|\n/g)];
+  const middleCrLf = separators.findIndex((separator, index) => index >= Math.floor(separators.length / 2) && separator[0] === "\r\n");
+  const before = separators[middleCrLf - 1];
+  const aroundCrLf = [before.index + before[0].length, separators[middleCrLf + 1].index];
+  const shortCrLf = short.indexOf("\r\n");
+  const duplicates = "头\n重复\r\n重复\n尾";
+  const firstDuplicate = duplicates.indexOf("重复");
+  const secondDuplicate = duplicates.lastIndexOf("重复");
+  const cases = [
+    { name: "short, 96 ASCII characters at each end", original: short, length: 96 },
+    { name: "short, 97 ASCII characters at each end", original: short, length: 97 },
+    { name: "short, 97 ASCII characters after A and after B", original: short, length: 97, range: [shortCrLf, short.length] },
+    { name: "short, 97 ASCII characters immediately on either side of CRLF", original: short, length: 97, range: [shortCrLf, shortCrLf + 2] },
+    { name: "295575-byte assistant, 97 ASCII characters at each end", original: long, length: 97 },
+    { name: "295575-byte assistant, 97 ASCII characters around an internal CRLF", original: long, length: 97, range: aroundCrLf },
+    { name: "short, 4096 ASCII characters at each end", original: short, length: 4096 },
+    { name: "first duplicate row", original: duplicates, remove: true, range: [firstDuplicate, secondDuplicate] },
+    { name: "second duplicate row", original: duplicates, remove: true, range: [secondDuplicate, duplicates.indexOf("尾")] },
+    { name: "3 native Undo steps", original: long, undos: 3 },
+    { name: "13 native Undo steps", original: long, undos: 13 },
+    { name: "native Undo, Redo, and new edit branch", original: "A\r\nA\nZ", redoBranch: true },
+  ];
+  seed("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    [conversationId, characterId, title, timestamp, timestamp]);
+  for (const fixture of cases) {
+    seed("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+      [conversationId, fixture.original, timestamp]);
+  }
+  const rows = databaseRows("SELECT id FROM conversation_messages WHERE conversation_id = ? ORDER BY id", conversationId);
+  const initial = await view(main);
+  const selected = await selectConversationByTitle(main, conversationId, title);
+  const failures = [];
+  try {
+    for (const [index, fixture] of cases.entries()) {
+      const { id } = rows[index];
+      try {
+        const history = fixture.undos || fixture.redoBranch;
+        const action = history ? "browser history changes" : fixture.remove ? "a selected row deletion" : "two text insertions";
+        await check(`assistant edit preserves separators after ${action} (${fixture.name})`, async () => {
+          const bubble = main.locator(`[data-chat-message-id="${id}"]`);
+          await bubble.getByRole("button", { name: /^(编辑|Edit)$/ }).click();
+          const editor = bubble.locator("textarea");
+          assert(await editor.inputValue() === textareaText(fixture.original));
+          const { expected, events, editOffsets } = await (history
+            ? applyTextareaHistory(main, editor, fixture) : applyTextareaEdit(main, editor, fixture));
+          const expectedBytes = Buffer.byteLength(expected, "utf8");
+          assert(await editor.inputValue() === textareaText(expected));
+          const pending = main.waitForResponse(response => response.url().endsWith("/edit_conversation_message") && response.request().method() === "POST");
+          await bubble.getByRole("button", { name: /^(保存|Save) \(Ctrl\+Enter\)$/ }).click();
+          const ipc = await pending;
+          assert.equal(ipc.headers()["tauri-response"], "ok");
+          const request = ipc.request().postDataJSON().request;
+          assert.equal(request.conversation_id, conversationId);
+          assert.equal(request.conversation_generation, selected.generation);
+          assert.equal(request.message_id, id);
+          const result = await ipc.json();
+          assert.equal(result.message_id, id);
+          await editor.waitFor({ state: "detached" });
+          const refreshed = await main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.refresh());
+          const stored = databaseRows("SELECT content, length(CAST(content AS BLOB)) AS bytes FROM conversation_messages WHERE id = ?", id)[0];
+          const refreshedText = refreshed.messages.find(message => message.id === id)?.content;
+          const counts = { request: Buffer.byteLength(request.new_content, "utf8"), response: Buffer.byteLength(result.updated_content, "utf8"),
+            sqlite: stored.bytes, refresh: typeof refreshedText === "string" ? Buffer.byteLength(refreshedText, "utf8") : null };
+          assert.equal(stored.bytes, expectedBytes, `save succeeded, but expected ${expectedBytes} bytes and measured ${JSON.stringify(counts)}`);
+          assert(stored.content === expected, "saved SQLite text must match every expected character");
+          assert(request.new_content === expected, "UI must submit the original separators to real edit IPC");
+          assert(result.updated_content === expected, "edit IPC must return the exact saved text");
+          assert(refreshedText === expected, "a fresh IPC history read must match SQLite");
+          return { messageId: id, originalBytes: Buffer.byteLength(fixture.original, "utf8"), storedBytes: stored.bytes,
+            sha256: createHash("sha256").update(stored.content).digest("hex"), counts, events, editOffsets };
+        });
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  } finally {
+    await main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), initial.conversation_id);
+  }
+  if (failures.length) throw new AggregateError(failures, "Native textarea edit assertions failed");
+}
+async function run() {
   await pet.waitForFunction(() => Boolean(window.__TAURI_INTERNALS__));
   // Model an already configured installation without ever creating the main
   // WebView. Serialized setup avoids first-run StrictMode template provisioning
@@ -75,14 +293,17 @@ try {
     localStorage.setItem("kokoro_active_character_id", id);
     return { characterId: id, templateIds: templates.map(template => template.id), committed };
   }); save();
-  await check("pet UI sends before any main WebView or ChatPanel has existed", async () => {
-    assert(!(await windows(pet)).includes("main"));
-    const turn = await petSend("pet-only"); assert.equal(turn.status, "completed", JSON.stringify(turn));
-    const state = await view(pet); assert(state.messages.some(message => message.role === "assistant" && message.content.includes("pet-only")));
-    assert(!(await windows(pet)).includes("main"));
-    await pet.screenshot({ path: path.join(output, "01-pet-only.png") });
-    return { windows: await windows(pet), turn, persistedMessageIds: state.messages.map(message => message.id) };
-  });
+  if (!editPasteOnly) {
+    await checkBotConfigTransactions({ page: pet, check });
+    await check("pet UI sends before any main WebView or ChatPanel has existed", async () => {
+      assert(!(await windows(pet)).includes("main"));
+      const turn = await petSend("pet-only"); assert.equal(turn.status, "completed", JSON.stringify(turn));
+      const state = await view(pet); assert(state.messages.some(message => message.role === "assistant" && message.content.includes("pet-only")));
+      assert(!(await windows(pet)).includes("main"));
+      await pet.screenshot({ path: path.join(output, "01-pet-only.png") });
+      return { windows: await windows(pet), turn, persistedMessageIds: state.messages.map(message => message.id) };
+    });
+  }
   await pet.evaluate(async () => {
     localStorage.setItem("kokoro_onboarding_status", "completed");
     const { WebviewWindow } = await import("/node_modules/@tauri-apps/api/webviewWindow.js");
@@ -90,6 +311,294 @@ try {
   });
   const main = await waitFor(() => context.pages().find(page => !page.url().includes("pet.html") && !page.url().includes("bubble.html") && page.url().includes("1420")));
   await main.locator("textarea[data-onboarding-id='chat-input']").waitFor({ state: "visible", timeout: 20000 });
+  await checkTextareaEdits(main, report.setup.characterId);
+  if (editPasteOnly) {
+    report.completedAt = new Date().toISOString(); save();
+    return;
+  }
+  await check("editing persisted long text keeps the full body and limits only the model copy", async () => {
+    const source = "native-edit-long-source";
+    const other = "native-edit-long-other";
+    const sourceTitle = "Native long edit source";
+    const otherTitle = "Native long edit control";
+    const original = longAssistantMessage();
+    const replacement = original.replace("原字", "改字");
+    const budget = 120;
+    const initial = await view(main);
+    const invoke = (command, params) => main.evaluate(({ command, params }) =>
+      window.__TAURI_INTERNALS__.invoke(command, params), { command, params });
+    const settings = await invoke("get_context_settings");
+    const timestamp = "2000-01-01T00:00:00Z";
+    for (const [id, title] of [[source, sourceTitle], [other, otherTitle]]) {
+      seed("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        [id, report.setup.characterId, title, timestamp, timestamp]);
+    }
+    for (const [id, role, content, metadata] of [
+      [source, "user", "Native edit seed prompt", null],
+      [source, "system", "Native edit hidden row", '{"type":"translation_instruction"}'],
+      [source, "assistant", original, null],
+      [other, "user", "Native edit control text", null],
+    ]) {
+      seed("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, role, content, metadata, timestamp]);
+    }
+    const messages = id => databaseRows("SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY id", id);
+    const conversation = id => databaseRows("SELECT * FROM conversations WHERE id = ?", id)[0];
+    const otherBefore = { rows: messages(other), conversation: conversation(other) };
+    const [prompt, hidden, target] = messages(source);
+    const bubble = main.locator(`[data-chat-message-id="${target.id}"]`);
+    const editor = bubble.locator("textarea");
+    const editButton = bubble.getByRole("button", { name: /^(编辑|Edit)$/ });
+    const edit = request => main.evaluate(async request => {
+      const { editConversationMessage } = await import("/src/lib/kokoro-bridge.ts");
+      try { return { result: await editConversationMessage(request) }; }
+      catch (error) { return { error: { code: error.code, message: error.message } }; }
+    }, request);
+    const assertStored = expected => {
+      assert.deepEqual(messages(source).slice(0, 3), [prompt, hidden, { ...target, content: expected }]);
+      assert.deepEqual({ rows: messages(other), conversation: conversation(other) }, otherBefore);
+    };
+    try {
+      assert(Buffer.byteLength(original, "utf8") > 256 * 1024);
+      await invoke("set_context_settings", { settings: { strategy: "window", max_message_chars: budget } });
+      const selected = await selectConversationByTitle(main, source, sourceTitle);
+      await editButton.click();
+      assert.equal(await editor.inputValue(), textareaText(original));
+      const changeAt = textareaText(original).indexOf("原字");
+      await editor.evaluate((textarea, start) => textarea.setSelectionRange(start, start + 1), changeAt);
+      await main.keyboard.insertText("改");
+      assert.equal(await editor.inputValue(), textareaText(replacement));
+      const response = main.waitForResponse(response => response.url().endsWith("/edit_conversation_message") && response.request().method() === "POST");
+      await bubble.getByRole("button", { name: /^(保存|Save) \(Ctrl\+Enter\)$/ }).click();
+      const ipc = await response;
+      assert.deepEqual(ipc.request().postDataJSON().request, {
+        conversation_id: source, conversation_generation: selected.generation, message_id: target.id, new_content: replacement,
+      });
+      assert.equal(ipc.headers()["tauri-response"], "ok");
+      assert.deepEqual(await ipc.json(), { message_id: target.id, updated_content: replacement });
+      assertStored(replacement);
+      assert.notEqual(conversation(source).updated_at, timestamp);
+      const updatedBubble = bubble.locator("div.whitespace-pre-wrap");
+      await waitFor(async () => (await updatedBubble.textContent())?.includes("长文改字"));
+      assert.equal(await updatedBubble.textContent(), replacement.trim());
+
+      const followUp = "[case:edit-long-history]";
+      const input = main.locator("textarea[data-onboarding-id='chat-input']");
+      await input.fill(followUp);
+      await input.press("Enter");
+      const turn = await waitFor(async () => (await view(main)).turns.find(turn => turn.message === followUp && turn.status === "completed"));
+      assert.equal(turn.conversation_id, source);
+      const calls = (await (await fetch("http://127.0.0.1:19334/counts")).json()).filter(call => call.name === "edit-long-history" && call.streaming);
+      assert.equal(calls.length, 1);
+      const modelCopy = calls[0].messages.find(message => message.role === "assistant" && message.content.includes("长文改字"));
+      assert.equal(modelCopy?.content, `${[...replacement].slice(0, budget).join("")}…[truncated]`);
+      assert(!JSON.stringify(calls[0].messages).includes(assistantTail));
+      assertStored(replacement);
+
+      await selectConversationByTitle(main, other, otherTitle);
+      const beforeStale = conversation(source);
+      const stale = await edit({ conversation_id: source, conversation_generation: selected.generation, message_id: target.id, new_content: "stale edit" });
+      assert.match(stale.error?.message, /Conversation changed before the message could be edited/);
+      assert.deepEqual(conversation(source), beforeStale);
+      assertStored(replacement);
+      assert.equal((await view(main)).conversation_id, other);
+
+      const reopened = await selectConversationByTitle(main, source, sourceTitle);
+      assert.notEqual(reopened.generation, selected.generation);
+      assert.equal(reopened.messages.find(message => message.id === target.id)?.content, replacement);
+      await editButton.click();
+      assert.equal(await editor.inputValue(), textareaText(replacement));
+      await editor.press("Control+End");
+      await main.screenshot({ path: path.join(output, "long-edit-reopened.png") });
+      const inserted = "首行新增🙂\n";
+      await editor.evaluate(textarea => textarea.setSelectionRange(0, 0));
+      await main.keyboard.insertText(inserted);
+      const tailOffset = inserted.length + textareaText(replacement).indexOf("Q38V") + 3;
+      await editor.evaluate((textarea, start) => textarea.setSelectionRange(start, start + 1), tailOffset);
+      await main.keyboard.insertText("W");
+      const multilineEdit = inserted + replacement.replace("Q38V", "Q38W");
+      assert.equal(await editor.inputValue(), textareaText(multilineEdit));
+      const pendingMultiline = main.waitForResponse(response => response.url().endsWith("/edit_conversation_message") && response.request().method() === "POST");
+      await bubble.getByRole("button", { name: /^(保存|Save) \(Ctrl\+Enter\)$/ }).click();
+      const multilineIpc = await pendingMultiline;
+      assert.equal(multilineIpc.headers()["tauri-response"], "ok");
+      assert(multilineIpc.request().postDataJSON().request.new_content === multilineEdit);
+      assert((await multilineIpc.json()).updated_content === multilineEdit);
+      await editor.waitFor({ state: "detached" });
+      assertStored(multilineEdit);
+      const indexRequest = { conversation_id: source, conversation_generation: reopened.generation, visible_index: 1 };
+      const byIndex = multilineEdit.replace("尾段", "尾页");
+      assert.deepEqual((await edit({ ...indexRequest, new_content: byIndex })).result, { message_id: target.id, updated_content: byIndex });
+      assertStored(byIndex);
+
+      const beforeFailure = conversation(source);
+      const blank = await edit({ ...indexRequest, new_content: " \n\t　" });
+      assert.equal(blank.error?.code, "Validation");
+      seed(`CREATE TRIGGER reject_native_edit_timestamp BEFORE UPDATE OF updated_at ON conversations
+        WHEN OLD.id = 'native-edit-long-source' BEGIN SELECT RAISE(ABORT, 'native edit timestamp failure'); END`, []);
+      let failedSave;
+      try { failedSave = await edit({ ...indexRequest, new_content: "must roll back" }); }
+      finally { seed("DROP TRIGGER reject_native_edit_timestamp", []); }
+      assert.equal(failedSave.error?.code, "Database");
+      assert.match(failedSave.error.message, /native edit timestamp failure/);
+      assert.deepEqual(conversation(source), beforeFailure);
+      assertStored(byIndex);
+      return { source, other, messageId: target.id, bytes: Buffer.byteLength(replacement, "utf8"),
+        updatedContentSha256: createHash("sha256").update(replacement).digest("hex"),
+        multilineEditSha256: createHash("sha256").update(multilineEdit).digest("hex"),
+        initialGeneration: selected.generation, reopenedGeneration: reopened.generation,
+        visibleIndex: indexRequest.visible_index, modelCall: calls[0].index, budget, modelCopy, stale, blank, failedSave };
+    } finally {
+      await invoke("set_context_settings", { settings });
+      await main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), initial.conversation_id);
+    }
+  });
+  await check("user edits enforce the UTF-8 boundary and replay from saved history", async () => {
+    const limit = 262144;
+    const budget = 120;
+    const exactCase = "edit-utf8-limit";
+    const legacyCase = "edit-shortened-legacy";
+    const exact = longPrompt(exactCase, limit);
+    const oversized = `${exact}x`;
+    const legacy = longPrompt(legacyCase, limit + 1);
+    const shortened = `[case:${legacyCase}] 缩短后可重放🙂`;
+    assert.equal(Buffer.byteLength(exact), limit);
+    assert.equal(Buffer.byteLength(oversized), limit + 1);
+    assert.equal(Buffer.byteLength(legacy), limit + 1);
+
+    function longPrompt(name, bytes) {
+      const prefix = `[case:${name}]\n`;
+      const suffix = "\n唯一尾段🙂 ";
+      const line = "中文🙂".repeat(20) + "\n";
+      const remaining = bytes - Buffer.byteLength(prefix + suffix);
+      const lineBytes = Buffer.byteLength(line);
+      return prefix + line.repeat(Math.floor(remaining / lineBytes)) + "a".repeat(remaining % lineBytes) + suffix;
+    }
+
+    const cases = [
+      { id: "native-edit-user-limit", title: "Native UTF-8 input boundary", content: "Original boundary prompt" },
+      { id: "native-edit-user-legacy", title: "Native oversized historical user", content: legacy },
+    ];
+    if (process.argv.includes("--edit-restart")) {
+      cases.push({ id: "native-edit-user-restart", title: "Native oversized user across restart", content: legacy });
+    }
+    const rows = id => databaseRows("SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY id", id);
+    const conversation = id => databaseRows("SELECT * FROM conversations WHERE id = ?", id)[0];
+    const timestamp = "2000-01-01T00:00:00Z";
+    for (const fixture of cases) {
+      seed("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        [fixture.id, report.setup.characterId, fixture.title, timestamp, timestamp]);
+      for (const [role, content] of [["user", fixture.content], ["assistant", "Original fixture answer"]]) {
+        seed("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+          [fixture.id, role, content, timestamp]);
+      }
+      [fixture.user, fixture.answer] = rows(fixture.id);
+    }
+
+    const [boundary, archived, restart] = cases;
+    const bubble = row => main.locator(`[data-chat-message-id="${row.id}"]`);
+    const beginEdit = async row => {
+      const message = bubble(row);
+      await message.getByRole("button", { name: /^(编辑|Edit)$/ }).click();
+      return message.locator("textarea");
+    };
+    const watchIpc = command => main.waitForResponse(response => response.url().endsWith(`/${command}`) && response.request().method() === "POST");
+    const saveEdit = async (fixture, generation, text) => {
+      const pending = watchIpc("edit_conversation_message");
+      await bubble(fixture.user).getByRole("button", { name: /^(保存|Save) \(Ctrl\+Enter\)$/ }).click();
+      const ipc = await pending;
+      const request = ipc.request().postDataJSON().request;
+      assert.equal(request.conversation_id, fixture.id);
+      assert.equal(request.conversation_generation, generation);
+      assert.equal(request.message_id, fixture.user.id);
+      assert(request.new_content === text, "edit IPC must contain the complete draft");
+      return ipc;
+    };
+    const refresh = () => main.evaluate(async () => (await import("/src/lib/chat/application.ts")).chatApplication.refresh());
+    const invoke = (command, params) => main.evaluate(({ command, params }) =>
+      window.__TAURI_INTERNALS__.invoke(command, params), { command, params });
+    const previousSelection = (await view(main)).conversation_id;
+    const settings = await invoke("get_context_settings");
+    const replay = async (fixture, name, text) => {
+      const snapshot = await refresh();
+      assert(snapshot.messages.find(message => message.id === fixture.user.id)?.content === text);
+      const pending = watchIpc("stream_chat");
+      await bubble(fixture.answer).getByRole("button", { name: /^(重新生成|Regenerate)$/ }).click();
+      const ipc = await pending;
+      assert.equal(ipc.headers()["tauri-response"], "ok");
+      const request = ipc.request().postDataJSON().request;
+      assert(request.message === text, "regeneration IPC must replay the exact saved text");
+      assert.equal(request.regenerate_reply.assistant_message_id, fixture.answer.id);
+      const result = await ipc.json();
+      assert.equal(result.status, "completed");
+      assert.equal(result.conversation_id, fixture.id);
+      assert.equal(result.user_message_id, fixture.user.id);
+      assert.notEqual(result.assistant_message_id, fixture.answer.id);
+      const reloaded = rows(fixture.id);
+      assert.equal(reloaded.length, 2);
+      assert(reloaded[0].content === text && reloaded[0].id === fixture.user.id);
+      assert.equal(reloaded[1].id, result.assistant_message_id);
+      await waitFor(async () => !(await view(main)).busy);
+      const calls = (await (await fetch("http://127.0.0.1:19334/counts")).json()).filter(call => call.name === name && call.streaming);
+      assert.equal(calls.length, 1);
+      const modelPrompt = calls[0].messages.findLast(message => message.role === "user")?.content;
+      const characters = [...text];
+      assert.equal(modelPrompt, characters.length > budget ? `${characters.slice(0, budget).join("")}…[truncated]` : text);
+      return { modelCall: calls[0].index, modelPrompt, userMessageId: result.user_message_id, assistantMessageId: result.assistant_message_id };
+    };
+
+    try {
+      await invoke("set_context_settings", { settings: { strategy: "window", max_message_chars: budget } });
+      const selected = await selectConversationByTitle(main, boundary.id, boundary.title);
+      const editor = await beginEdit(boundary.user);
+      await editor.fill(oversized);
+      const before = { conversation: conversation(boundary.id), rows: rows(boundary.id) };
+      const rejected = await saveEdit(boundary, selected.generation, oversized);
+      assert.equal(rejected.headers()["tauri-response"], "error");
+      const error = await rejected.json();
+      assert.deepEqual(error, { code: "Validation", message: "Chat input exceeds the 262144-byte limit" });
+      await main.getByRole("alert").filter({ hasText: error.message }).waitFor();
+      assert(await editor.inputValue() === oversized, "rejection must retain the complete draft");
+      assert.deepEqual({ conversation: conversation(boundary.id), rows: rows(boundary.id) }, before);
+
+      await editor.fill(exact);
+      const accepted = await saveEdit(boundary, selected.generation, exact);
+      assert.equal(accepted.headers()["tauri-response"], "ok");
+      const saved = await accepted.json();
+      assert(saved.updated_content === exact && saved.message_id === boundary.user.id);
+      await editor.waitFor({ state: "detached" });
+      assert(rows(boundary.id)[0].content === exact, "SQLite must retain all 262144 bytes");
+      const boundaryReplay = await replay(boundary, exactCase, exact);
+
+      await selectConversationByTitle(main, archived.id, archived.title);
+      const assertLegacyReadable = async () => {
+        assert(await bubble(archived.user).locator("div.whitespace-pre-wrap").textContent() === legacy);
+        const legacyEditor = await beginEdit(archived.user);
+        assert(await legacyEditor.inputValue() === legacy, "historical oversized text must open in full");
+        return legacyEditor;
+      };
+      await (await assertLegacyReadable()).press("Escape");
+      await selectConversationByTitle(main, boundary.id, boundary.title);
+      const reopened = await selectConversationByTitle(main, archived.id, archived.title);
+      assert(reopened.messages.find(message => message.id === archived.user.id)?.content === legacy);
+      const legacyEditor = await assertLegacyReadable();
+      await legacyEditor.fill(shortened);
+      const shortenedSave = await saveEdit(archived, reopened.generation, shortened);
+      assert.equal(shortenedSave.headers()["tauri-response"], "ok");
+      assert.deepEqual(await shortenedSave.json(), { message_id: archived.user.id, updated_content: shortened });
+      await legacyEditor.waitFor({ state: "detached" });
+      const legacyReplay = await replay(archived, legacyCase, shortened);
+
+      return { acceptedBytes: Buffer.byteLength(exact), acceptedSha256: createHash("sha256").update(exact).digest("hex"),
+        rejectedBytes: Buffer.byteLength(oversized), error, legacyBytes: Buffer.byteLength(legacy),
+        shortenedBytes: Buffer.byteLength(shortened), boundaryReplay, legacyReplay,
+        ...(restart && { restartFixture: { conversationId: restart.id, title: restart.title, userId: restart.user.id,
+          assistantId: restart.answer.id, bytes: Buffer.byteLength(legacy), sha256: createHash("sha256").update(legacy).digest("hex") } }) };
+    } finally {
+      await invoke("set_context_settings", { settings });
+      await main.evaluate(async id => (await import("/src/lib/chat/application.ts")).chatApplication.selectConversation(id), previousSelection);
+    }
+  });
   await check("reopening the pet restores the visible bubble for an active reply", async () => {
     const message = "[case:pet-restore]";
     const partial = `Controlled reply for ${message}`;
@@ -1124,4 +1633,5 @@ with tempfile.TemporaryDirectory() as folder:
     return { original, finishedBeforeImport, imported, revisionBefore: before.revision, revisionAfter: after.revision, projected };
   });
   report.completedAt = new Date().toISOString(); save();
-} finally { await browser.close(); }
+}
+try { await run(); } finally { await browser.close(); }

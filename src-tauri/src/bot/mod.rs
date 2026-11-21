@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use warp::{http::StatusCode, Filter, Reply};
 
@@ -236,6 +236,7 @@ impl Default for WebhookBotConfig {
 #[derive(Clone)]
 pub struct BotRuntimeService {
     config: Arc<RwLock<BotConfig>>,
+    config_path: Arc<Path>,
     qq_authorization_broker: crate::qqbot::QQAuthorizationBroker,
     qq: BotWorker,
     qq_connected: Arc<AtomicBool>,
@@ -243,10 +244,39 @@ pub struct BotRuntimeService {
     http: BotWorker,
 }
 
+pub(crate) struct PreparedBotConfigCommit {
+    current: OwnedRwLockWriteGuard<BotConfig>,
+    next: Option<BotConfig>,
+}
+
+impl PreparedBotConfigCommit {
+    pub(crate) fn next(&self) -> Option<&BotConfig> {
+        self.next.as_ref()
+    }
+
+    /// Publish only after the caller has committed the file replacement.
+    pub(crate) fn publish(mut self) -> BotConfig {
+        if let Some(next) = self.next {
+            *self.current = next;
+        }
+        self.current.clone()
+    }
+}
+
 impl BotRuntimeService {
     pub(crate) fn new(config: BotConfig, work: TaskScope, service: TaskScope) -> Self {
+        Self::with_config_path(config, work, service, bot_config_path())
+    }
+
+    pub(crate) fn with_config_path(
+        config: BotConfig,
+        work: TaskScope,
+        service: TaskScope,
+        config_path: PathBuf,
+    ) -> Self {
         Self {
-            config: Arc::new(RwLock::new(config)),
+            config: Arc::new(RwLock::new(normalize_bot_config_envs(config))),
+            config_path: config_path.into(),
             qq_authorization_broker: crate::qqbot::QQAuthorizationBroker::default(),
             qq: BotWorker::new("QQ bot", work.clone(), service.clone()),
             qq_connected: Arc::new(AtomicBool::new(false)),
@@ -276,15 +306,95 @@ impl BotRuntimeService {
         }
     }
 
-    pub async fn save_config(&self, mut config: BotConfig) -> Result<BotConfig, String> {
-        let mut current = self.config.write().await;
-        if config.revision != current.revision {
-            return Err("Bot configuration changed; reload settings before saving".to_string());
+    async fn prepare_config(
+        &self,
+        edit: impl FnOnce(&BotConfig) -> Result<Option<BotConfig>, KokoroError>,
+    ) -> Result<PreparedBotConfigCommit, KokoroError> {
+        let current = self.config.clone().write_owned().await;
+        let mut next = edit(&current)?;
+        if let Some(config) = next.as_mut() {
+            config.revision = current.revision.checked_add(1).ok_or_else(|| {
+                KokoroError::Config("Bot configuration revision is exhausted".to_string())
+            })?;
         }
-        config.revision = current.revision.saturating_add(1);
-        save_bot_config_file(&config).map_err(|error| error.to_string())?;
-        *current = config.clone();
-        Ok(config)
+        Ok(PreparedBotConfigCommit { current, next })
+    }
+
+    async fn commit_config(
+        &self,
+        edit: impl FnOnce(&BotConfig) -> Result<Option<BotConfig>, KokoroError>,
+    ) -> Result<BotConfig, KokoroError> {
+        let commit = self.prepare_config(edit).await?;
+        // Keep the write lock through atomic replacement and publication.
+        if let Some(next) = commit.next() {
+            save_bot_config_file_to_path(&self.config_path, next)?;
+        }
+        Ok(commit.publish())
+    }
+
+    pub(crate) async fn prepare_restored_config(
+        &self,
+        skip_existing: bool,
+        restore: impl FnOnce(&BotConfig) -> Result<Option<BotConfig>, KokoroError>,
+    ) -> Result<PreparedBotConfigCommit, KokoroError> {
+        self.prepare_config(|current| {
+            if skip_existing && self.config_path.exists() {
+                return Ok(None);
+            }
+            restore(current).map(|next| next.map(normalize_bot_config_envs))
+        })
+        .await
+    }
+
+    pub(crate) fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    async fn commit_config_at_revision(
+        &self,
+        expected_revision: u64,
+        edit: impl FnOnce(&BotConfig) -> BotConfig,
+    ) -> Result<BotConfig, KokoroError> {
+        self.commit_config(|current| {
+            if expected_revision != current.revision {
+                return Err(KokoroError::BotConfigConflict(
+                    "Bot configuration changed; reload settings before saving".to_string(),
+                ));
+            }
+            Ok(Some(edit(current)))
+        })
+        .await
+    }
+
+    pub async fn save_config(&self, config: BotConfig) -> Result<BotConfig, KokoroError> {
+        let _lease = self
+            .qq
+            .admit_control("save Bot configuration")
+            .map_err(KokoroError::ExternalService)?;
+        self.commit_config_at_revision(config.revision, |_| normalize_bot_config_envs(config))
+            .await
+    }
+
+    pub(crate) async fn current_telegram_config(&self) -> (u64, crate::telegram::TelegramConfig) {
+        let current = self.config.read().await;
+        (current.revision, current.telegram.clone())
+    }
+
+    pub(crate) async fn save_telegram_config(
+        &self,
+        expected_revision: u64,
+        config: crate::telegram::TelegramConfig,
+    ) -> Result<BotConfig, KokoroError> {
+        self.commit_config_at_revision(expected_revision, |current| {
+            let mut next = current.clone();
+            next.telegram = normalize_telegram_config_env(config);
+            next
+        })
+        .await
+    }
+
+    pub(crate) fn shared_config(&self) -> Arc<RwLock<BotConfig>> {
+        self.config.clone()
     }
 
     pub async fn current_config(&self) -> BotConfig {
@@ -297,12 +407,17 @@ impl BotRuntimeService {
         user_openid: &str,
         group_openid: Option<&str>,
         approved: bool,
-    ) -> Result<(u64, Option<String>, Option<String>), String> {
-        let _lease = self.qq.admit_control("QQ authorization decision")?;
+    ) -> Result<(u64, Option<String>, Option<String>), KokoroError> {
+        let _lease = self
+            .qq
+            .admit_control("QQ authorization decision")
+            .map_err(KokoroError::ExternalService)?;
         let request_id = request_id.trim();
         let user_openid = user_openid.trim();
         if request_id.is_empty() || request_id.len() > 256 {
-            return Err("invalid QQ authorization request ID".to_string());
+            return Err(KokoroError::ExternalService(
+                "invalid QQ authorization request ID".to_string(),
+            ));
         }
         if user_openid.is_empty()
             || user_openid.len() > 128
@@ -310,7 +425,9 @@ impl BotRuntimeService {
                 character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
             })
         {
-            return Err("invalid QQ user OpenID".to_string());
+            return Err(KokoroError::ExternalService(
+                "invalid QQ user OpenID".to_string(),
+            ));
         }
         let group_openid = group_openid
             .map(str::trim)
@@ -321,61 +438,57 @@ impl BotRuntimeService {
                     character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
                 })
         }) {
-            return Err("invalid QQ group OpenID".to_string());
+            return Err(KokoroError::ExternalService(
+                "invalid QQ group OpenID".to_string(),
+            ));
         }
 
         let decision_tx = self
             .qq_authorization_broker
             .take(request_id, user_openid, group_openid)
             .await
-            .ok_or_else(|| "QQ authorization request is no longer pending".to_string())?;
+            .ok_or_else(|| {
+                KokoroError::ExternalService("QQ authorization request is no longer pending".into())
+            })?;
 
         let mut approved_user_openid = None;
         let mut approved_group_openid = None;
         let revision = if approved {
-            let mut current = self.config.write().await;
-            let mut next = current.clone();
-            if let Some(group_openid) = group_openid {
-                approved_group_openid = Some(group_openid.to_string());
-                if !next
-                    .qq
-                    .allowed_group_openids
-                    .iter()
-                    .any(|allowed| allowed == group_openid)
-                {
-                    next.qq.allowed_group_openids.push(group_openid.to_string());
-                }
-                if !next.qq.allowed_user_openids.is_empty() {
-                    approved_user_openid = Some(user_openid.to_string());
-                    if !next
-                        .qq
-                        .allowed_user_openids
-                        .iter()
-                        .any(|allowed| allowed == user_openid)
-                    {
-                        next.qq.allowed_user_openids.push(user_openid.to_string());
+            let result = self
+                .commit_config(|current| {
+                    let mut next = current.clone();
+                    if let Some(group_openid) = group_openid {
+                        approved_group_openid = Some(group_openid.to_string());
+                        if !next
+                            .qq
+                            .allowed_group_openids
+                            .iter()
+                            .any(|allowed| allowed == group_openid)
+                        {
+                            next.qq.allowed_group_openids.push(group_openid.to_string());
+                        }
                     }
-                }
-            } else {
-                approved_user_openid = Some(user_openid.to_string());
-                if !next
-                    .qq
-                    .allowed_user_openids
-                    .iter()
-                    .any(|allowed| allowed == user_openid)
-                {
-                    next.qq.allowed_user_openids.push(user_openid.to_string());
-                }
-            }
-            if next != *current {
-                next.revision = current.revision.saturating_add(1);
-                if let Err(error) = save_bot_config_file(&next) {
+                    if group_openid.is_none() || !next.qq.allowed_user_openids.is_empty() {
+                        approved_user_openid = Some(user_openid.to_string());
+                        if !next
+                            .qq
+                            .allowed_user_openids
+                            .iter()
+                            .any(|allowed| allowed == user_openid)
+                        {
+                            next.qq.allowed_user_openids.push(user_openid.to_string());
+                        }
+                    }
+                    Ok((next != *current).then_some(next))
+                })
+                .await;
+            match result {
+                Ok(saved) => saved.revision,
+                Err(error) => {
                     let _ = decision_tx.send(false);
-                    return Err(error.to_string());
+                    return Err(error);
                 }
-                *current = next;
             }
-            current.revision
         } else {
             self.qq_authorization_broker
                 .mark_rejected(user_openid, group_openid)
@@ -559,7 +672,7 @@ fn load_legacy_telegram_config(
     }
 }
 
-fn telegram_config_has_user_values(config: &crate::telegram::TelegramConfig) -> bool {
+pub(crate) fn telegram_config_has_user_values(config: &crate::telegram::TelegramConfig) -> bool {
     config.enabled
         || config
             .bot_token
@@ -610,11 +723,11 @@ pub(crate) fn load_bot_config() -> BotConfig {
 }
 
 fn load_bot_config_from_paths(path: &Path, legacy_path: &Path) -> BotConfig {
-    let bot_file_exists = path.exists();
     let mut config: BotConfig = crate::config::load_json_config(path, "BOT");
     let mut migrated = false;
 
-    if !bot_file_exists || !telegram_config_has_user_values(&config.telegram) {
+    // A committed revision can intentionally clear every Telegram field, including after recovery.
+    if config.revision == 0 && !telegram_config_has_user_values(&config.telegram) {
         match load_legacy_telegram_config(legacy_path) {
             Ok(Some(legacy_telegram)) => {
                 config.telegram = legacy_telegram;
@@ -656,13 +769,8 @@ fn load_bot_config_from_paths(path: &Path, legacy_path: &Path) -> BotConfig {
     config
 }
 
-pub(crate) fn save_bot_config_file(config: &BotConfig) -> Result<(), KokoroError> {
-    save_bot_config_file_to_path(&bot_config_path(), config)
-}
-
 fn save_bot_config_file_to_path(path: &Path, config: &BotConfig) -> Result<(), KokoroError> {
-    let config = normalize_bot_config_envs(config.clone());
-    crate::config::save_json_config(path, &config, "BOT")
+    crate::config::save_json_config(path, config, "BOT")
 }
 
 fn has_secret(value: &Option<String>, env: &Option<String>) -> bool {
@@ -678,7 +786,7 @@ pub(crate) async fn get_bot_status(
     runtime: &BotRuntimeService,
 ) -> BotStatus {
     let config = runtime.current_config().await;
-    let telegram_config = state.get_config().await;
+    let telegram_config = &config.telegram;
     let qq_running = runtime.is_qq_started().await;
     let qq_connected = runtime.is_qq_connected().await;
     let discord_running = runtime.is_discord_running().await;
@@ -722,38 +830,6 @@ pub(crate) async fn get_bot_status(
             connected: http_running && config.webhook.enabled,
         },
     }
-}
-
-pub(crate) async fn save_bot_config(
-    state: &TelegramService,
-    runtime: &BotRuntimeService,
-    config: BotConfig,
-) -> Result<BotConfig, KokoroError> {
-    let _lease = runtime
-        .qq
-        .admit_control("save Bot configuration")
-        .map_err(KokoroError::ExternalService)?;
-    let saved = runtime
-        .save_config(normalize_bot_config_envs(config))
-        .await
-        .map_err(KokoroError::Config)?;
-    state.update_config(saved.telegram.clone()).await;
-    Ok(saved)
-}
-
-pub(crate) async fn save_telegram_config(
-    state: &TelegramService,
-    config: crate::telegram::TelegramConfig,
-) -> Result<(), KokoroError> {
-    let _lease = state
-        .admit_control("save Telegram configuration")
-        .map_err(KokoroError::ExternalService)?;
-    let config = normalize_telegram_config_env(config);
-    let mut bot_config = load_bot_config();
-    bot_config.telegram = config.clone();
-    save_bot_config_file(&bot_config)?;
-    state.update_config(config).await;
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -895,12 +971,9 @@ where
     Fut: std::future::Future<Output = Result<(String, Vec<String>), KokoroError>>,
 {
     persistence::validate_user_input(input_text)?;
-    let saved: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT m.content, m.metadata FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
-         WHERE c.character_id=? AND m.role='user'
-         AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?",
-    ).bind(&binding.character_id).bind(format!("{}:user", binding.request_id))
-        .fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+    let saved =
+        persistence::saved_external_input(&state.db, &binding.character_id, &binding.request_id)
+            .await?;
     if let Some((text, metadata)) = saved {
         let original_input = metadata
             .as_deref()
@@ -2911,7 +2984,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    assert_eq!(turn.previous_reply.unwrap().0, "reply");
+                    assert_eq!(turn.previous_reply.unwrap().text, "reply");
                 }
                 assert!(matches!(
                     prepare_bot_media_input(&state, &binding, "edited caption", || async {
@@ -3196,6 +3269,59 @@ mod tests {
     }
 
     #[test]
+    fn bot_telegram_committed_defaults_do_not_restore_legacy_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bot_config.json");
+        let legacy = temp.path().join("telegram_config.json");
+        let current = BotConfig {
+            revision: 1,
+            ..Default::default()
+        };
+        save_bot_config_file_to_path(&path, &current).unwrap();
+        std::fs::write(&legacy, r#"{"allowed_chat_ids":[123,-1001234567890]}"#).unwrap();
+
+        assert_eq!(
+            load_bot_config_from_paths(&path, &legacy),
+            normalize_bot_config_envs(current)
+        );
+        assert!(legacy.exists());
+    }
+
+    #[tokio::test]
+    async fn bot_telegram_recovered_revision_does_not_restore_legacy_grants() {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bot_config.json");
+        let backup = temp.path().join(".bot_config.json.backup");
+        let legacy = temp.path().join("telegram_config.json");
+        let mut expected = normalize_bot_config_envs(BotConfig {
+            revision: 5,
+            ..Default::default()
+        });
+        expected.qq.allowed_user_openids.push("approved-qq-user".into());
+        save_bot_config_file_to_path(&backup, &expected).unwrap();
+        std::fs::write(&legacy, r#"{"allowed_chat_ids":[123,-1001234567890]}"#).unwrap();
+        assert!(!path.exists());
+
+        let app = AppLifecycle::new();
+        let work = app.scope(TaskStage::Work, "bot");
+        let service = app.scope(TaskStage::Service, "bot");
+        let runtime = BotRuntimeService::with_config_path(
+            load_bot_config_from_paths(&path, &legacy),
+            work.clone(),
+            service.clone(),
+            path.clone(),
+        );
+        let telegram = TelegramService::new(&runtime, work, service);
+        let persisted: BotConfig = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted, expected);
+        assert_eq!(runtime.current_config().await, expected);
+        assert_eq!(telegram.get_config().await, expected.telegram);
+        assert!(legacy.exists());
+    }
+
+    #[test]
     fn bot_normalize_image_reference_accepts_urls_and_wraps_base64() {
         assert_eq!(
             normalize_image_reference("https://example.com/a.png", "image/png").as_deref(),
@@ -3404,3 +3530,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod config_transaction_tests;

@@ -1,33 +1,20 @@
-import { useState, memo } from "react";
+import { useState, useRef, useCallback, memo, type FormEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { AlertCircle, Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
+import type { ChatPanelMessage } from "../../lib/chat/turn-state";
+import { EditMessageDraft, type TextareaEdit } from "./chat/edit-message-draft";
 
 interface ChatMessageProps {
-    message: {
-        id?: number;
-        role: "user" | "kokoro" | "tool" | "context";
-        text: string;
-        images?: string[];
-        translation?: string;
-        translationPending?: boolean;
-        isError?: boolean;
-        announceError?: boolean;
-        unfinished?: boolean;
-        speechError?: string;
-        tools?: ToolTraceItem[];
-        capturedAt?: string;
-        source?: string;
-        turnId?: string;
-    };
+    message: ChatPanelMessage;
     index: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: () => void;
     editScope?: string;
-    onEdit?: (newText: string) => void;
+    onEdit?: (newText: string) => Promise<boolean>;
     onRegenerate?: () => void;
     onRetryPersistence?: () => Promise<void>;
     onContinueFrom?: () => void;
@@ -188,23 +175,72 @@ export const ChatMessage = memo(function ChatMessage({
     const { t } = useTranslation();
     const [editingScope, setEditingScope] = useState<string>();
     const [editingText, setEditingText] = useState("");
+    const [savingEdit, setSavingEdit] = useState(false);
+    const editDraft = useRef<EditMessageDraft | undefined>(undefined);
+    const beforeEdit = useRef<TextareaEdit | undefined>(undefined);
     const [toolsExpanded, setToolsExpanded] = useState(false);
     const [retryingSave, setRetryingSave] = useState(false);
     const isEditing = editScope !== undefined && editingScope === editScope;
     const announceError = msg.announceError ?? msg.isError;
 
-    const handleStartEdit = () => {
-        setEditingScope(editScope);
-        setEditingText(msg.text);
+    const attachEditor = useCallback((input: HTMLTextAreaElement | null) => {
+        if (!input) return;
+        const captureEdit = (event: InputEvent) => {
+            beforeEdit.current = {
+                value: input.value,
+                start: input.selectionStart,
+                end: input.selectionEnd,
+                inputType: event.inputType,
+            };
+        };
+        // Read the actual selection before the browser applies the edit.
+        input.addEventListener("beforeinput", captureEdit);
+        return () => {
+            input.removeEventListener("beforeinput", captureEdit);
+            beforeEdit.current = undefined;
+        };
+    }, []);
+
+    const handleEditorInput = ({ currentTarget: input, nativeEvent }: FormEvent<HTMLTextAreaElement>) => {
+        const event = nativeEvent as InputEvent;
+        const before = beforeEdit.current;
+        beforeEdit.current = undefined;
+        editDraft.current?.input({
+            value: input.value,
+            start: input.selectionStart,
+            end: input.selectionEnd,
+            inputType: event.inputType ?? "",
+            data: event.data,
+        }, before);
+        setEditingText(input.value);
     };
 
-    const handleSaveEdit = () => {
-        if (!isEditing || !editingText.trim()) return;
-        onEdit?.(editingText);
-        setEditingScope(undefined);
+    const handleStartEdit = () => {
+        setEditingScope(editScope);
+        const draft = new EditMessageDraft(msg.editText ?? msg.text);
+        editDraft.current = draft;
+        beforeEdit.current = undefined;
+        setEditingText(draft.value);
+    };
+
+    const handleSaveEdit = async () => {
+        const draft = editDraft.current;
+        if (!isEditing || savingEdit || !draft?.value.trim() || !onEdit) return;
+        setSavingEdit(true);
+        try {
+            if (await onEdit(draft.serialize()) && editDraft.current === draft) {
+                editDraft.current = undefined;
+                setEditingText("");
+                setEditingScope(scope => scope === editingScope ? undefined : scope);
+            }
+        } finally {
+            setSavingEdit(false);
+        }
     };
 
     const handleCancelEdit = () => {
+        if (savingEdit) return;
+        editDraft.current = undefined;
         setEditingScope(undefined);
         setEditingText("");
     };
@@ -295,14 +331,18 @@ export const ChatMessage = memo(function ChatMessage({
             {isEditing ? (
                 <div className="space-y-2">
                     <textarea
+                        ref={attachEditor}
                         value={editingText}
-                        onChange={(e) => setEditingText(e.target.value)}
+                        readOnly={savingEdit}
+                        onInput={handleEditorInput}
                         className="w-full bg-black/40 border border-[var(--color-border)] text-[var(--color-text-primary)] rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-accent)] resize-none"
                         rows={3}
                         autoFocus
                         onKeyDown={(e) => {
+                            if (e.nativeEvent.isComposing) return;
                             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                                handleSaveEdit();
+                                e.preventDefault();
+                                void handleSaveEdit();
                             } else if (e.key === "Escape") {
                                 handleCancelEdit();
                             }
@@ -311,6 +351,7 @@ export const ChatMessage = memo(function ChatMessage({
                     <div className="flex items-center gap-2">
                         <button
                             onClick={handleSaveEdit}
+                            disabled={savingEdit}
                             className="p-1.5 rounded-md bg-[var(--color-accent)]/20 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/30 transition-colors"
                             title={t("chat.actions.save")}
                         >
@@ -318,6 +359,7 @@ export const ChatMessage = memo(function ChatMessage({
                         </button>
                         <button
                             onClick={handleCancelEdit}
+                            disabled={savingEdit}
                             className="p-1.5 rounded-md bg-slate-800/50 text-slate-400 hover:text-slate-300 transition-colors"
                             title={t("chat.actions.cancel")}
                         >

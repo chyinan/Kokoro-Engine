@@ -2285,8 +2285,12 @@ async fn resolve_request_scope(
         conversation = state.selection.current_conversation_id.lock().await.clone();
     }
     if !policy.is_desktop() {
-        let saved: Option<String> = sqlx::query_scalar("SELECT m.conversation_id FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.character_id=? AND m.role='user' AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?")
-            .bind(&character).bind(format!("{}:user", request.client_request_id.as_deref().unwrap())).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        let saved = persistence::saved_external_conversation_id(
+            &state.db,
+            &character,
+            request.client_request_id.as_deref().unwrap(),
+        )
+        .await?;
         if saved.is_some() {
             conversation = saved;
         }
@@ -2376,8 +2380,26 @@ impl ChatService {
         llm: LlmService,
         app_data: &Path,
     ) -> Self {
+        Self::for_test_with_registry(
+            state,
+            llm,
+            app_data,
+            ActionRegistry::new(),
+            Arc::new(ChatRuntimeState::default()),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn for_test_with_registry(
+        state: Arc<AIOrchestrator>,
+        llm: LlmService,
+        app_data: &Path,
+        registry: ActionRegistry,
+        runtime: Arc<ChatRuntimeState>,
+    ) -> Self {
         let events = ChatEvents {
-            runtime: Arc::new(ChatRuntimeState::default()),
+            runtime,
             desktop: None,
             mods: None,
         };
@@ -2400,7 +2422,7 @@ impl ChatService {
                 state,
                 imagegen,
                 llm,
-                registry: Arc::new(RwLock::new(ActionRegistry::new())),
+                registry: Arc::new(RwLock::new(registry)),
                 tool_settings: Arc::new(RwLock::new(ToolSettings::default())),
                 approval: Arc::new(PendingToolApprovalState::new()),
                 cancellation: Arc::new(TurnCancellationState::new()),
@@ -2879,6 +2901,32 @@ async fn resolve_turn_cues(
     cues
 }
 
+fn emit_external_reply_finished(
+    chat: &ChatService,
+    policy: ChatPolicy,
+    client_request_id: &str,
+    turn_id: &str,
+    conversation_id: &str,
+    assistant_message_id: i64,
+) {
+    policy.emit(
+        chat,
+        ChatEvent::Finished(ChatTurnFinishEvent {
+            scope: ChatEventScope {
+                client_request_id: Some(Some(client_request_id.to_owned())),
+                conversation_id: Some(Some(conversation_id.to_owned())),
+                ..Default::default()
+            },
+            turn_id: Some(turn_id.to_owned()),
+            assistant_message_id: Some(Some(assistant_message_id)),
+            status: ChatFinishStatus::Completed,
+            text: None,
+            stage: None,
+            code: None,
+        }),
+    );
+}
+
 async fn execute_chat_with_pending(
     chat: &ChatService,
     request: ChatRequest,
@@ -3105,9 +3153,8 @@ async fn execute_chat_with_pending(
                 &request.previous_request_ids,
             )
             .await?;
-            let saved: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT m.content,m.metadata FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.character_id=? AND m.role='user' AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END=?"
-            ).bind(&char_id).bind(format!("{client_request_id}:user")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+            let saved =
+                persistence::saved_external_input(&state.db, &char_id, &client_request_id).await?;
             if request.require_saved_external_reply && saved.is_none() {
                 return Err(KokoroError::Chat(
                     "chat_request_conflict: the committed reply is no longer available".into(),
@@ -3778,9 +3825,9 @@ async fn execute_chat_with_pending(
         .map(|cues| Arc::new(cues.keys().cloned().collect::<HashSet<_>>()));
 
     if let Some(turn) = external_turn.as_ref() {
-        if let Some((text, translation)) = &turn.previous_reply {
-            let displayed_text = strip_leaked_tags(text);
-            if let Some(execution) = &turn.previous_execution {
+        if let Some(reply) = &turn.previous_reply {
+            let displayed_text = strip_leaked_tags(&reply.text);
+            if let Some(execution) = &reply.execution {
                 super::follow_up::schedule_external_memory_tasks(
                     policy.source(),
                     &request.message,
@@ -3789,7 +3836,7 @@ async fn execute_chat_with_pending(
                     state,
                     execution.memory_provider.clone(),
                     &execution.memory_language,
-                    turn.previous_memory_work,
+                    reply.commit.memory_work,
                     execution.memory_scope.clone(),
                 )
                 .await;
@@ -3798,26 +3845,34 @@ async fn execute_chat_with_pending(
                 scope: ChatEventScope::default(),
                 turn_id: assistant_turn_id.to_owned(),
                 text: displayed_text.to_owned(),
-                translation: translation.clone(),
+                translation: reply.translation.clone(),
                 translation_pending: None,
             }));
-            let assistant_message_id = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
-                .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+            if reply.newly_committed {
+                emit_external_reply_finished(
+                    chat,
+                    policy,
+                    &client_request_id,
+                    &assistant_turn_id,
+                    &turn.target.conversation_id,
+                    reply.commit.assistant_message_id,
+                );
+            }
             return Ok(StreamChatResponse {
-                speech_snapshot: turn
-                    .previous_execution
+                speech_snapshot: reply
+                    .execution
                     .as_ref()
                     .and_then(|execution| execution.speech.clone()),
                 text: displayed_text,
-                translation: translation.clone(),
+                translation: reply.translation.clone(),
                 conversation_id: turn.target.conversation_id.clone(),
                 user_message_id,
-                assistant_message_id,
+                assistant_message_id: Some(reply.commit.assistant_message_id),
                 client_request_id: Some(client_request_id),
                 status: Some("completed".into()),
-                output_warnings: turn.previous_reply_media.output_warnings.clone(),
-                external_media: turn.previous_reply_media.clone(),
-                newly_committed: turn.previous_reply_newly_committed,
+                output_warnings: reply.media.output_warnings.clone(),
+                external_media: reply.media.clone(),
+                newly_committed: reply.newly_committed,
                 ..Default::default()
             });
         }
@@ -4897,27 +4952,39 @@ async fn execute_chat_with_pending(
         pending_tool_messages.push(MessageWrite::new("assistant", &canonical_response, Some(metadata.to_string()))
             .with_save_id(format!("{client_request_id}:assistant")));
         ensure_turn_not_cancelled(cancel_state.as_ref(), &assistant_turn_id).await.map_err(KokoroError::Chat)?;
-        let work = turn.save_reply_batch(state, &canonical_response, final_translation.as_deref(), external_media.clone(), pending_tool_messages,
+        let commit = turn.save_reply_batch(
+            state,
+            &canonical_response,
+            final_translation.as_deref(),
+            external_media.clone(),
+            pending_tool_messages,
             Some(Arc::new(persistence::ExternalReplyExecution {
-                speech: speech_snapshot.clone(), memory_provider: system_provider.clone(), memory_language: memory_target_language.clone(), memory_scope: memory_scope.clone(),
-            }))).await?;
-        super::follow_up::schedule_external_memory_tasks(policy.source(), &request.message, &char_id, turn, state, system_provider.clone(), &memory_target_language, work, memory_scope.clone()).await;
-        let row = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id=? AND role='assistant' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?")
-            .bind(&turn.target.conversation_id).bind(format!("{client_request_id}:assistant")).fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
-        policy.emit(chat, ChatEvent::Finished(ChatTurnFinishEvent {
-            scope: ChatEventScope {
-                client_request_id: Some(Some(client_request_id.to_owned())),
-                conversation_id: Some(Some(turn.target.conversation_id.to_owned())),
-                ..Default::default()
-            },
-            turn_id: Some(assistant_turn_id.to_owned()),
-            assistant_message_id: Some(Some(row)),
-            status: ChatFinishStatus::Completed,
-            text: None,
-            stage: None,
-            code: None,
-        }));
-        return Ok(Some(row));
+                speech: speech_snapshot.clone(),
+                memory_provider: system_provider.clone(),
+                memory_language: memory_target_language.clone(),
+                memory_scope: memory_scope.clone(),
+            })),
+        ).await?;
+        super::follow_up::schedule_external_memory_tasks(
+            policy.source(),
+            &request.message,
+            &char_id,
+            turn,
+            state,
+            system_provider.clone(),
+            &memory_target_language,
+            commit.memory_work,
+            memory_scope.clone(),
+        ).await;
+        emit_external_reply_finished(
+            chat,
+            policy,
+            &client_request_id,
+            &assistant_turn_id,
+            &turn.target.conversation_id,
+            commit.assistant_message_id,
+        );
+        return Ok(Some(commit.assistant_message_id));
     }
 
     let upgrade_config = crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());

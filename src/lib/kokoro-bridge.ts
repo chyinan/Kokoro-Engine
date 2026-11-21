@@ -1214,7 +1214,7 @@ export async function getBotStatus(): Promise<BotStatus> {
 
 // ── Telegram Bot ──────────────────────────────────
 
-type WireTelegramConfig = Parameters<typeof commands.saveTelegramConfig>[0];
+type WireTelegramConfig = Parameters<typeof commands.saveTelegramConfig>[1];
 export type TelegramConfig = PresentFields<WireTelegramConfig, "enabled" | "allowed_chat_ids" | "send_voice_reply">;
 
 export type TelegramStatus = IpcResponse<"getTelegramStatus">;
@@ -1228,12 +1228,12 @@ export async function listCharacterIds(): Promise<string[]> {
     return withKokoroError(commands.listCharacterIds());
 }
 
-export async function getTelegramConfig(): Promise<TelegramConfig> {
+export async function getTelegramConfig(): Promise<IpcResponse<"getTelegramConfig">> {
     return withKokoroError(commands.getTelegramConfig());
 }
 
-export async function saveTelegramConfig(config: TelegramConfig): Promise<void> {
-    await withKokoroError(commands.saveTelegramConfig(config));
+export async function saveTelegramConfig(expectedRevision: number, config: TelegramConfig): Promise<BotConfig> {
+    return withKokoroError(commands.saveTelegramConfig(expectedRevision, config));
 }
 
 export async function startTelegramBot(): Promise<void> {

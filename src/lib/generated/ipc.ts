@@ -194,8 +194,8 @@ export const commands = {
 	startBotPlatform: (platform: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("start_bot_platform", { platform }, options),
 	stopBotPlatform: (platform: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("stop_bot_platform", { platform }, options),
 	getBotStatus: (options?: InvokeOptions) => __TAURI_INVOKE<BotStatus>("get_bot_status", undefined, options),
-	getTelegramConfig: (options?: InvokeOptions) => __TAURI_INVOKE<Response<TelegramConfig_Serialize>>("get_telegram_config", undefined, options),
-	saveTelegramConfig: (config: TelegramConfig_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<null>("save_telegram_config", { config }, options),
+	getTelegramConfig: (options?: InvokeOptions) => __TAURI_INVOKE<Response<TelegramConfigSnapshot_Serialize>>("get_telegram_config", undefined, options),
+	saveTelegramConfig: (expectedRevision: number, config: TelegramConfig_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<Response<BotConfig_Serialize>>("save_telegram_config", { expectedRevision, config }, options),
 	startTelegramBot: (options?: InvokeOptions) => __TAURI_INVOKE<null>("start_telegram_bot", undefined, options),
 	stopTelegramBot: (options?: InvokeOptions) => __TAURI_INVOKE<null>("stop_telegram_bot", undefined, options),
 	getTelegramStatus: (options?: InvokeOptions) => __TAURI_INVOKE<TelegramStatus>("get_telegram_status", undefined, options),
@@ -1713,7 +1713,7 @@ export type JsonValue_Deserialize = boolean | number | null | string | JsonValue
 export type JsonValue_Serialize = boolean | number | null | string | JsonValue_Serialize[] | { [key in string]: JsonValue_Serialize };
 
 /**  统一的 Kokoro 错误类型，支持结构化序列化 */
-export type KokoroError = { code: "Config"; message: string } | { code: "Database"; message: string } | { code: "Llm"; message: string } | { code: "Tts"; message: string } | { code: "Stt"; message: string } | { code: "Io"; message: string } | { code: "ExternalService"; message: string } | { code: "Mod"; message: string } | { code: "NotFound"; message: string } | { code: "Unauthorized"; message: string } | { code: "Internal"; message: string } | { code: "Chat"; message: string } | { code: "ChatPersistence"; message: string } | { code: "Validation"; message: string };
+export type KokoroError = { code: "Config"; message: string } | { code: "BotConfigConflict"; message: string } | { code: "Database"; message: string } | { code: "Llm"; message: string } | { code: "Tts"; message: string } | { code: "Stt"; message: string } | { code: "Io"; message: string } | { code: "ExternalService"; message: string } | { code: "Mod"; message: string } | { code: "NotFound"; message: string } | { code: "Unauthorized"; message: string } | { code: "Internal"; message: string } | { code: "Chat"; message: string } | { code: "ChatPersistence"; message: string } | { code: "Validation"; message: string };
 
 export type LegacyChatError = string | ChatErrorEvent;
 
@@ -3027,6 +3027,18 @@ export type TelegramChatSync_Serialize = {
 };
 
 export type TelegramConfig = TelegramConfig_Serialize | TelegramConfig_Deserialize;
+
+export type TelegramConfigSnapshot = TelegramConfigSnapshot_Serialize | TelegramConfigSnapshot_Deserialize;
+
+export type TelegramConfigSnapshot_Deserialize = {
+	revision: number,
+	config: TelegramConfig_Deserialize,
+};
+
+export type TelegramConfigSnapshot_Serialize = {
+	revision: number,
+	config: TelegramConfig_Serialize,
+};
 
 export type TelegramConfig_Deserialize = {
 	/**  Whether the Telegram bot is enabled (auto-start on app launch). */

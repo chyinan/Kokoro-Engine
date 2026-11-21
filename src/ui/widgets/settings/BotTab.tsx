@@ -24,7 +24,6 @@ import {
     getTelegramStatus,
     getBotStatus,
     listCharacters,
-    saveBotConfig,
     startBotPlatform,
     startTelegramBot,
     stopBotPlatform,
@@ -50,6 +49,7 @@ interface BotTabProps {
     initialStatus?: TelegramStatus | null;
     initialCharacters?: CharacterRecord[];
     onBotConfigChange: (config: BotConfig) => void;
+    onSaveBotConfig: () => Promise<void>;
 }
 
 export default function BotTab({
@@ -57,6 +57,7 @@ export default function BotTab({
     initialStatus,
     initialCharacters,
     onBotConfigChange,
+    onSaveBotConfig,
 }: BotTabProps) {
     const { t } = useTranslation();
     const hasInitialStatus = initialStatus !== undefined;
@@ -64,7 +65,6 @@ export default function BotTab({
     const [status, setStatus] = useState<TelegramStatus | null>(initialStatus ?? null);
     const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
     const [loading, setLoading] = useState(!(hasInitialStatus && hasInitialCharacters));
-    const [dirty, setDirty] = useState(false);
     const [listInput, setListInput] = useState("");
     const [characters, setCharacters] = useState<CharacterRecord[]>(initialCharacters ?? []);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -152,41 +152,33 @@ export default function BotTab({
     const selectedPlatform = botConfig.selected_platform;
     const isRunning = status?.running ?? false;
 
-    const updateBotConfig = (next: BotConfig) => {
-        onBotConfigChange(next);
-        setDirty(true);
-    };
-
     const updateSelectedPlatform = (platform: BotPlatformId) => {
-        updateBotConfig({ ...botConfig, selected_platform: platform });
+        onBotConfigChange({ ...botConfig, selected_platform: platform });
     };
 
     const updateTelegram = (patch: Partial<TelegramConfig>) => {
-        updateBotConfig({ ...botConfig, telegram: { ...botConfig.telegram, ...patch } });
+        onBotConfigChange({ ...botConfig, telegram: { ...botConfig.telegram, ...patch } });
     };
 
     const updateDiscord = (patch: Partial<DiscordBotConfig>) => {
-        updateBotConfig({ ...botConfig, discord: { ...botConfig.discord, ...patch } });
+        onBotConfigChange({ ...botConfig, discord: { ...botConfig.discord, ...patch } });
     };
 
     const updateQQ = (patch: Partial<QQBotConfig>) => {
-        updateBotConfig({ ...botConfig, qq: { ...botConfig.qq, ...patch } });
+        onBotConfigChange({ ...botConfig, qq: { ...botConfig.qq, ...patch } });
     };
 
     const updateLine = (patch: Partial<LineBotConfig>) => {
-        updateBotConfig({ ...botConfig, line: { ...botConfig.line, ...patch } });
+        onBotConfigChange({ ...botConfig, line: { ...botConfig.line, ...patch } });
     };
 
     const updateWebhook = (patch: Partial<WebhookBotConfig>) => {
-        updateBotConfig({ ...botConfig, webhook: { ...botConfig.webhook, ...patch } });
+        onBotConfigChange({ ...botConfig, webhook: { ...botConfig.webhook, ...patch } });
     };
 
     const handleStartTelegram = async () => {
         try {
-            if (dirty) {
-                onBotConfigChange(await saveBotConfig(botConfig));
-                setDirty(false);
-            }
+            await onSaveBotConfig();
             await startTelegramBot();
             const st = await getTelegramStatus();
             setStatus(st);
@@ -207,10 +199,7 @@ export default function BotTab({
 
     const handleStartRuntime = async (platform: Exclude<BotPlatformId, "telegram">) => {
         try {
-            if (dirty) {
-                onBotConfigChange(await saveBotConfig(botConfig));
-                setDirty(false);
-            }
+            await onSaveBotConfig();
             await startBotPlatform(platform);
             setBotStatus(await getBotStatus());
         } catch (e) {

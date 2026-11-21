@@ -1304,6 +1304,12 @@
     },
     "bot": {
         "title": "Bot 接入",
+        "config_conflict": {
+            "stale": "编辑期间 Bot 设置发生了变化。请刷新并检查你的修改，再重新保存。",
+            "overlap": "草稿与已保存的设置修改了部分相同字段。你可以保留这些字段的已保存值，再检查其余修改。",
+            "refresh": "刷新 Bot 设置",
+            "keep_saved": "对重叠修改保留已保存值"
+        },
         "status": {
             "enabled": "已启用",
             "disabled": "未启用",

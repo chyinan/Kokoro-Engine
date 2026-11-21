@@ -128,7 +128,7 @@ interface MemoizedChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: (index: number) => void;
-    onEdit: (target: ChatMessageTarget, newText: string) => void;
+    onEdit: (target: ChatMessageTarget, newText: string) => Promise<boolean>;
     onRegenerate: (target: ChatMessageTarget) => Promise<void>;
     onRetryPersistence: (requestId: string) => Promise<void>;
     onContinueFrom: (target: ChatMessageTarget) => Promise<void>;
@@ -919,7 +919,12 @@ export default function ChatPanel({
         setExpandedTranslations(previous => { const next = new Set(previous); if (next.has(index)) next.delete(index); else next.add(index); return next; });
     }, []);
     const onEdit = useCallback(async (target: ChatMessageTarget, text: string) => {
-        try { await chatApplication.edit(target, text); } catch (error) { reportError(error); }
+        try {
+            return Boolean(await chatApplication.edit(target, text));
+        } catch (error) {
+            reportError(error);
+            return false;
+        }
     }, [reportError]);
     const onRegenerate = useCallback(async (target: ChatMessageTarget) => {
         const requestId = `req_${crypto.randomUUID()}`;
