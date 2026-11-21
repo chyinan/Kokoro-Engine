@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,20 +8,24 @@ import { pathToFileURL } from "node:url";
 /** Recover an installed Cargo when a terminal inherited an outdated PATH. */
 export function getTauriEnvironment(environment = process.env, userHome = homedir()) {
   const env = { ...environment };
+  const isWindows = process.platform === "win32";
   // Windows treats environment names as case-insensitive. Match Node's choice
   // and avoid passing conflicting PATH/Path entries to native child processes.
-  const pathKeys = process.platform === "win32"
+  const pathKeys = isWindows
     ? Object.keys(env).filter((key) => key.toLowerCase() === "path").sort()
     : ["PATH"];
-  const pathKey = pathKeys[0] ?? (process.platform === "win32" ? "Path" : "PATH");
+  const pathKey = pathKeys[0] ?? (isWindows ? "Path" : "PATH");
   const currentPath = env[pathKey] ?? "";
   for (const duplicateKey of pathKeys.slice(1)) delete env[duplicateKey];
 
-  const cargoName = process.platform === "win32" ? "cargo.exe" : "cargo";
+  const cargoName = isWindows ? "cargo.exe" : "cargo";
   const hasCargo = (directory) => {
     if (!directory) return false;
+    const cargo = path.join(directory, cargoName);
     try {
-      return statSync(path.join(directory, cargoName)).isFile();
+      if (!statSync(cargo).isFile()) return false;
+      if (!isWindows) accessSync(cargo, constants.X_OK);
+      return true;
     } catch {
       return false;
     }
