@@ -636,6 +636,9 @@ messages in a listed group. It does not match sender IDs or usernames. Preserve
 the sign of group IDs. An empty or missing list authorizes no chats, even when
 the bot is running; there is no wildcard ID.
 
+If you used an empty list before upgrading, open **Settings → Bot → Telegram**,
+add each chat ID you want to authorize, and select **Save**.
+
 Text, commands (`/start`, `/new`, `/continue`, `/status`, and unknown commands),
 voice, and photos all pass the same whitelist check before session changes,
 media downloads, transcription, model/tool calls, or persistence. Saved config
@@ -831,6 +834,8 @@ interface ImportResult {
   ignored_characters?: number;
   /** Memories dropped by the skip strategy because they violate the local schema. */
   skipped_memories?: number;
+  /** Why Skip kept the existing local configuration instead of importing legacy Telegram settings. */
+  legacy_telegram_config_skip_reason?: "existing_bot_config" | "existing_telegram_config";
   characters_json?: string;
   debug_log?: string[];
 }

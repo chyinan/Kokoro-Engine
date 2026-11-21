@@ -1650,6 +1650,7 @@ export type ImportResult_Deserialize = {
 	 *  local constraint even though its id was free.
 	 */
 	skipped_memories: number,
+	legacy_telegram_config_skip_reason?: LegacyTelegramConfigSkipReason | null,
 	debug_log: string[],
 };
 
@@ -1668,6 +1669,7 @@ export type ImportResult_Serialize = {
 	 *  local constraint even though its id was free.
 	 */
 	skipped_memories: number,
+	legacy_telegram_config_skip_reason?: LegacyTelegramConfigSkipReason,
 	debug_log: string[],
 };
 
@@ -1716,6 +1718,8 @@ export type JsonValue_Serialize = boolean | number | null | string | JsonValue_S
 export type KokoroError = { code: "Config"; message: string } | { code: "BotConfigConflict"; message: string } | { code: "Database"; message: string } | { code: "Llm"; message: string } | { code: "Tts"; message: string } | { code: "Stt"; message: string } | { code: "Io"; message: string } | { code: "ExternalService"; message: string } | { code: "Mod"; message: string } | { code: "NotFound"; message: string } | { code: "Unauthorized"; message: string } | { code: "Internal"; message: string } | { code: "Chat"; message: string } | { code: "ChatPersistence"; message: string } | { code: "Validation"; message: string };
 
 export type LegacyChatError = string | ChatErrorEvent;
+
+export type LegacyTelegramConfigSkipReason = "existing_bot_config" | "existing_telegram_config";
 
 export type LineBotConfig = LineBotConfig_Serialize | LineBotConfig_Deserialize;
 

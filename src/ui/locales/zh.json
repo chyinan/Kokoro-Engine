@@ -1095,6 +1095,11 @@
             "provider_credentials_warning": "提供商凭据永远不会包含在备份中。在其他设备恢复后请重新配置。",
             "restored_characters": "已恢复 {{count}} 个角色实例。",
             "skipped_memories": "有 {{count}} 条记忆因不符合本地数据结构被跳过。",
+            "legacy_telegram_skipped": {
+                "existing_bot_config": "已跳过旧版 Telegram 设置。“跳过已有配置”会保留本机的统一 Bot 配置文件，即使其中只配置了其他平台。",
+                "existing_telegram_config": "已跳过旧版 Telegram 设置。“跳过已有配置”会保留本机的 Telegram 配置文件。"
+            },
+            "reload_now": "立即重新加载",
             "merged_characters": "已把 {{count}} 个角色合并到本地角色。",
             "character_mapping_label": "角色归属",
             "character_mapping_hint": "角色实例 ID 因设备而异。请为备份中的每个角色选择：它的记忆和对话要归到哪个本地角色。",
@@ -1401,7 +1406,7 @@
         },
         "whitelist": {
             "label": "允许的聊天 ID",
-            "desc": "仅允许列出的聊天 ID（不是发送者 ID）。群聊 ID 授权整个群聊。留空表示尚未授权任何聊天，即使机器人运行中也会拒绝所有消息和命令。",
+            "desc": "仅允许列出的聊天 ID（不是发送者 ID）。群聊 ID 授权整个群聊。留空表示尚未授权任何聊天，即使机器人运行中也会拒绝所有消息和命令。 如果升级前留空也能使用，请添加每个要继续授权的聊天 ID，然后点击“保存”。",
             "placeholder": "聊天 ID（数字）",
             "add": "添加"
         },

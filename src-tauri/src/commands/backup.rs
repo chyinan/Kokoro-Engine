@@ -404,6 +404,13 @@ impl ConflictStrategy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyTelegramConfigSkipReason {
+    ExistingBotConfig,
+    ExistingTelegramConfig,
+}
+
 #[derive(Debug, Serialize, specta::Type)]
 pub struct ImportResult {
     pub imported_memories: i64,
@@ -418,6 +425,8 @@ pub struct ImportResult {
     /// Memories the skip strategy dropped because the imported row violates a
     /// local constraint even though its id was free.
     pub skipped_memories: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_telegram_config_skip_reason: Option<LegacyTelegramConfigSkipReason>,
     pub debug_log: Vec<String>,
 }
 
@@ -3453,10 +3462,11 @@ async fn replace_import_configs(
     runtime: &BotRuntimeService,
     configs: Vec<(String, String)>,
     strategy: ConflictStrategy,
-) -> Result<ConfigReplacementGuard, KokoroError> {
+) -> Result<(ConfigReplacementGuard, Option<LegacyTelegramConfigSkipReason>), KokoroError> {
     let skip = strategy == ConflictStrategy::Skip;
     let mut bot_config = None;
     let mut legacy_telegram = None;
+    let mut legacy_telegram_config_skip_reason = None;
     let other_configs: Vec<_> = configs
         .into_iter()
         .filter_map(|(filename, content)| match filename.as_str() {
@@ -3465,7 +3475,10 @@ async fn replace_import_configs(
                 None
             }
             LEGACY_TELEGRAM_CONFIG_FILENAME => {
-                if !skip || !app_data.join(&filename).exists() {
+                if skip && app_data.join(&filename).exists() {
+                    legacy_telegram_config_skip_reason =
+                        Some(LegacyTelegramConfigSkipReason::ExistingTelegramConfig);
+                } else {
                     legacy_telegram = Some(content);
                 }
                 None
@@ -3486,12 +3499,17 @@ async fn replace_import_configs(
                     .map(Some)
             })
             .await?;
+        if legacy_telegram.is_some() && commit.next().is_none() {
+            legacy_telegram_config_skip_reason =
+                Some(LegacyTelegramConfigSkipReason::ExistingBotConfig);
+        }
         // A skipped configuration must not hold the lock across the database import.
         commit.next().is_some().then_some(commit)
     } else {
         None
     };
-    replace_configs_atomically(app_data, &other_configs, bot_commit)
+    let replacement = replace_configs_atomically(app_data, &other_configs, bot_commit)?;
+    Ok((replacement, legacy_telegram_config_skip_reason))
 }
 
 // ── Commands ─────────────────────────────────────────
@@ -3933,9 +3951,10 @@ async fn import_backup(
         // Kept only for wire compatibility with old frontends; SQLite is authoritative.
         characters_json: None,
         skipped_memories: 0,
+        legacy_telegram_config_skip_reason: None,
         debug_log: Vec::new(),
     };
-    let mut config_replacement = replace_import_configs(
+    let (mut config_replacement, legacy_telegram_config_skip_reason) = replace_import_configs(
         app_data,
         runtime,
         extracted_configs,
@@ -3943,6 +3962,7 @@ async fn import_backup(
     )
     .await?;
     result.imported_configs = config_replacement.imported_count();
+    result.legacy_telegram_config_skip_reason = legacy_telegram_config_skip_reason;
 
     if has_db {
         let import_pool = resolve_import_pool(app, app_data).await?;
@@ -6140,6 +6160,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(skipped.imported_configs, 0);
+        assert_eq!(
+            skipped.legacy_telegram_config_skip_reason,
+            Some(LegacyTelegramConfigSkipReason::ExistingBotConfig)
+        );
         assert_eq!(persisted_bot_config(&runtime), previous);
         assert_eq!(runtime.current_config().await, previous);
 
@@ -6153,6 +6177,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(overwritten.imported_configs, 1);
+        assert_eq!(overwritten.legacy_telegram_config_skip_reason, None);
         let mut expected = previous;
         expected.revision += 1;
         expected.telegram.allowed_chat_ids.clear();
@@ -6162,11 +6187,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_telegram_backup_skip_reports_local_config_and_imports_when_absent() {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+
+        for skip_reason in [
+            Some(LegacyTelegramConfigSkipReason::ExistingBotConfig),
+            Some(LegacyTelegramConfigSkipReason::ExistingTelegramConfig),
+            None,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let app_data = tmp.path().join("live");
+            fs::create_dir(&app_data).unwrap();
+            let lifecycle = AppLifecycle::new();
+            let mut config = BotConfig::default();
+            if skip_reason == Some(LegacyTelegramConfigSkipReason::ExistingBotConfig) {
+                config.qq.allowed_user_openids = vec!["local-qq-user".into()];
+            }
+            let runtime = BotRuntimeService::with_config_path(
+                config.clone(),
+                lifecycle.scope(TaskStage::Work, "backup test"),
+                lifecycle.scope(TaskStage::Service, "backup test"),
+                app_data.join(BOT_CONFIG_FILENAME),
+            );
+            let local_legacy_path = app_data.join(LEGACY_TELEGRAM_CONFIG_FILENAME);
+            let local_legacy = r#"{"allowed_chat_ids":[111]}"#;
+            match skip_reason {
+                Some(LegacyTelegramConfigSkipReason::ExistingBotConfig) => {
+                    runtime.save_config(config).await.unwrap();
+                }
+                Some(LegacyTelegramConfigSkipReason::ExistingTelegramConfig) => {
+                    fs::write(&local_legacy_path, local_legacy).unwrap();
+                }
+                None => {}
+            }
+            let before = runtime.current_config().await;
+            let archive = tmp.path().join("legacy.kokoro");
+            write_bot_backup(
+                &archive,
+                LEGACY_TELEGRAM_CONFIG_FILENAME,
+                r#"{"allowed_chat_ids":[222]}"#,
+                None,
+            );
+
+            let result = import_backup(
+                None,
+                &app_data,
+                &runtime,
+                &archive,
+                bot_import_options(false, ConflictStrategy::Skip),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.legacy_telegram_config_skip_reason, skip_reason);
+            let after = runtime.current_config().await;
+            match skip_reason {
+                Some(LegacyTelegramConfigSkipReason::ExistingBotConfig) => {
+                    assert_eq!(result.imported_configs, 0);
+                    assert_eq!(after, before);
+                    assert_eq!(persisted_bot_config(&runtime), before);
+                    assert!(after.telegram.allowed_chat_ids.is_empty());
+                }
+                Some(LegacyTelegramConfigSkipReason::ExistingTelegramConfig) => {
+                    assert_eq!(result.imported_configs, 0);
+                    assert_eq!(after, before);
+                    assert!(!runtime.config_path().exists());
+                    assert_eq!(fs::read_to_string(&local_legacy_path).unwrap(), local_legacy);
+                }
+                None => {
+                    assert_eq!(result.imported_configs, 1);
+                    assert_eq!(after.telegram.allowed_chat_ids, [222]);
+                    assert_eq!(persisted_bot_config(&runtime), after);
+                    assert!(!local_legacy_path.exists());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn rolling_back_bot_backup_releases_queued_writer_only_after_file_restoration() {
         let tmp = tempfile::tempdir().unwrap();
         let runtime = bot_import_fixture(tmp.path()).await;
         let previous = runtime.current_config().await;
-        let replacement = replace_import_configs(
+        let (replacement, _) = replace_import_configs(
             tmp.path(),
             &runtime,
             vec![(

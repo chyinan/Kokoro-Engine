@@ -191,3 +191,44 @@ describe("backup character mapping UI", () => {
     expect(options.ignored_characters).toEqual([]);
   });
 });
+
+
+describe("legacy Telegram settings result", () => {
+  it.each([
+    { reason: "existing_bot_config", importDatabase: false },
+    { reason: "existing_telegram_config", importDatabase: true },
+  ] as const)("explains $reason in the import outcome", async ({ reason, importDatabase }) => {
+    vi.mocked(previewImport).mockResolvedValueOnce({
+      ...previewWithCharacters,
+      has_database: importDatabase,
+      has_configs: true,
+      config_files: ["telegram_config.json"],
+      characters: [],
+    });
+    vi.mocked(importData).mockResolvedValueOnce({
+      imported_memories: 0,
+      imported_conversations: 0,
+      imported_configs: 0,
+      imported_characters: 0,
+      merged_characters: 0,
+      ignored_characters: 0,
+      skipped_memories: 0,
+      characters_json: null,
+      legacy_telegram_config_skip_reason: reason,
+      debug_log: [],
+    });
+
+    await renderBackupTab();
+    await act(async () => click(byText("button", "settings.backup.conflict_skip")[0]));
+    await act(async () => click(byText("button", "settings.backup.confirm_import")[0]));
+
+    expect(importData).toHaveBeenCalledExactlyOnceWith("/tmp/backup.kokoro", expect.objectContaining({
+      import_database: importDatabase,
+      import_configs: true,
+      conflict_strategy: "skip",
+    }));
+    expect(container.querySelector('[role="status"]')?.textContent)
+      .toContain("settings.backup.legacy_telegram_skipped." + reason);
+    expect(byText("button", "settings.backup.reload_now")).toHaveLength(importDatabase ? 1 : 0);
+  });
+});

@@ -87,6 +87,7 @@ describe("Telegram chat authorization settings", () => {
     expect(container.textContent).toContain("telegram.status.running");
     expect(container.textContent).toContain("尚未授权任何聊天");
     expect(container.textContent).toContain("群聊 ID 授权整个群聊");
+    expect(container.textContent).toContain("如果升级前留空也能使用，请添加每个要继续授权的聊天 ID");
     expect(changed).not.toHaveBeenCalled();
     expect(saveBotConfig).not.toHaveBeenCalled();
   });

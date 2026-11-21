@@ -1512,11 +1512,17 @@ function App() {
         ignored_characters: importDb ? options.ignored_characters ?? [] : [],
       });
 
+      const legacyTelegramSkip = result.legacy_telegram_config_skip_reason;
+      const summary = `导入完成 · 记忆 ${result.imported_memories} · 对话 ${result.imported_conversations} · 配置 ${result.imported_configs}`;
       setBackupStatus({
         phase: "imported",
-        message: `导入完成 · 记忆 ${result.imported_memories} · 对话 ${result.imported_conversations} · 配置 ${result.imported_configs}`,
+        message: legacyTelegramSkip
+          ? `${summary}\n${t('settings.backup.legacy_telegram_skipped.' + legacyTelegramSkip)}`
+          : summary,
       });
-      window.setTimeout(() => window.location.reload(), 1500);
+      if (!legacyTelegramSkip || importDb || result.imported_configs > 0) {
+        window.setTimeout(() => window.location.reload(), 1500);
+      }
     } catch (error) {
       setBackupStatus(prev => ({ ...prev, phase: "error", importFilePath: prev.importFilePath, preview: prev.preview, error: getKokoroErrorMessage(error) }));
     }

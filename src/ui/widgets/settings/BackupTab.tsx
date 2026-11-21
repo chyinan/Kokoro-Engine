@@ -50,7 +50,7 @@ export function BackupTab({
     // Import state
     const [preview, setPreview] = useState<ImportPreview | null>(null);
     const [importing, setImporting] = useState(false);
-    const [importDone, setImportDone] = useState<string | null>(null);
+    const [importDone, setImportDone] = useState<{ message: string; reloadRequired: boolean } | null>(null);
     const [importError, setImportError] = useState<string | null>(null);
     const [importFilePath, setImportFilePath] = useState<string | null>(null);
 
@@ -237,15 +237,23 @@ export function BackupTab({
                 notes.push(t('settings.backup.skipped_memories', { count: result.skipped_memories }));
             }
 
+            const legacyTelegramSkip = result.legacy_telegram_config_skip_reason;
+            if (legacyTelegramSkip) {
+                notes.push(t('settings.backup.legacy_telegram_skipped.' + legacyTelegramSkip));
+            }
+
             const summary = t('settings.backup.import_stats', {
                 memories: result.imported_memories,
                 conversations: result.imported_conversations,
                 configs: result.imported_configs,
             }) + `\n${t('settings.backup.restored_characters', { count: result.imported_characters })}`;
 
-            setImportDone(notes.length > 0 ? `${summary}\n\n${notes.join('\n')}` : summary);
+            setImportDone({
+                message: notes.length > 0 ? `${summary}\n\n${notes.join('\n')}` : summary,
+                reloadRequired: Boolean(legacyTelegramSkip && (importDb || result.imported_configs > 0)),
+            });
             setPreview(null);
-            setTimeout(() => window.location.reload(), 1500);
+            if (!legacyTelegramSkip) setTimeout(() => window.location.reload(), 1500);
         } catch (e: any) {
             const msg = typeof e === 'string' ? e : (e?.message ?? JSON.stringify(e));
             setImportError(msg);
@@ -451,6 +459,7 @@ export function BackupTab({
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                     onClick={handleSelectImport}
+                    disabled={importDone?.reloadRequired}
                     className={clsx(
                         "flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-heading font-semibold tracking-wider",
                         "border border-[var(--color-border)] text-[var(--color-text-secondary)]",
@@ -586,7 +595,18 @@ export function BackupTab({
                 {importDone && (
                     <div className="mt-3 flex items-start gap-2 text-xs text-[var(--color-accent)]">
                         <Check size={14} className="mt-0.5 shrink-0" />
-                        <span className="whitespace-pre-wrap">{importDone}</span>
+                        <div>
+                            <p role="status" className="whitespace-pre-wrap">{importDone.message}</p>
+                            {importDone.reloadRequired && (
+                                <button
+                                    type="button"
+                                    onClick={() => window.location.reload()}
+                                    className="mt-2 rounded-md border border-current px-2 py-1"
+                                >
+                                    {t('settings.backup.reload_now')}
+                                </button>
+                            )}
+                        </div>
                     </div>
                 )}
                 {importError && (
