@@ -162,6 +162,8 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
+    vi.mocked(invoke).mockReset();
+    vi.mocked(saveBotConfig).mockReset();
     vi.clearAllMocks();
   });
 
@@ -214,16 +216,82 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
     return input;
   }
 
-  function saveSettings() {
-    return act(async () => container.querySelector<HTMLButtonElement>('[data-onboarding-id="settings-save-button"]')!.click());
+  function saveButton() {
+    return container.querySelector<HTMLButtonElement>('[data-onboarding-id="settings-save-button"]')!;
   }
 
-  async function clickBotButton(label: string) {
+  function saveSettings() {
+    return act(async () => saveButton().click());
+  }
+
+  function botButton(label: string) {
     const button = Array.from(container.querySelectorAll("button"))
       .find(candidate => candidate.textContent?.trim() === label);
     expect(button).toBeDefined();
-    await act(async () => button!.click());
+    return button!;
   }
+
+  function clickBotButton(label: string) {
+    return act(async () => botButton(label).click());
+  }
+
+  it.each(["save", "start"])("shares the pending Bot config write when %s is pressed first", async first => {
+    await openBotSettings();
+    await editTelegramToken("new-token");
+    const bridge = await vi.importActual<typeof import("@/lib/kokoro-bridge")>("@/lib/kokoro-bridge");
+    vi.mocked(saveBotConfig).mockImplementation(bridge.saveBotConfig);
+    let finishSave!: () => void;
+    let committed = botSnapshot;
+    let startedWith: BotConfig | undefined;
+    const write = vi.fn((config: BotConfig) => new Promise<BotConfig>(resolve => {
+      finishSave = () => {
+        committed = { ...config, revision: config.revision + 1 };
+        resolve(committed);
+      };
+    }));
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "save_bot_config") {
+        const { config } = args as { config: BotConfig };
+        if (write.mock.calls.length > 0) {
+          throw { code: "BotConfigConflict", message: "Second write with a stale revision" };
+        }
+        return write(config);
+      }
+      if (command === "start_telegram_bot") startedWith = committed;
+      return {};
+    });
+
+    const save = saveButton();
+    const start = botButton("telegram.start");
+    await act(async () => {
+      const primary = first === "save" ? save : start;
+      const alternate = first === "save" ? start : save;
+      primary.click();
+      primary.click();
+      alternate.click();
+    });
+    expect(save.disabled).toBe(true);
+    expect(start.disabled).toBe(true);
+    expect(write).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      revision: botSnapshot.revision,
+      telegram: expect.objectContaining({ bot_token: "new-token" }),
+    }));
+    expect(startedWith).toBeUndefined();
+
+    await act(async () => finishSave());
+    expect(save.disabled).toBe(false);
+    expect(start.disabled).toBe(false);
+    expect(container.textContent).not.toContain("bot.config_conflict.stale");
+    expect(write).toHaveBeenCalledTimes(1);
+    if (first === "save") {
+      expect(startedWith).toBeUndefined();
+      await clickBotButton("telegram.start");
+    }
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_telegram_bot")).toHaveLength(1);
+    expect(startedWith?.revision).toBe(botSnapshot.revision + 1);
+    expect(startedWith?.telegram.bot_token).toBe("new-token");
+    expect(write).toHaveBeenCalledTimes(1);
+  });
 
   it("refreshes a clean bot draft from the full snapshot and ignores an older response", async () => {
     const { notify } = await openBotSettings();
@@ -325,6 +393,11 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
       ...botSnapshot,
       telegram: { ...botSnapshot.telegram, bot_token: "new-token" },
     });
+
+    await clickBotButton("telegram.start");
+    expect(saveBotConfig).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_telegram_bot")).toHaveLength(1);
+    expect(container.textContent).not.toContain("Cannot persist Bot settings");
   });
 
   it("does not forward character A runtime changes after switching to B while saving A", async () => {

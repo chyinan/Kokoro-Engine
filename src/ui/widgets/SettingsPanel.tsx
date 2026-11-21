@@ -265,6 +265,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     // Save error feedback
     const [saveError, setSaveError] = useState<string | null>(null);
+    const [settingsWritePending, setSettingsWritePending] = useState(false);
+    const settingsWritePendingRef = useRef(false);
 
     // Render FPS
     const [localRenderFps, setLocalRenderFps] = useState(renderFps);
@@ -687,7 +689,28 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         }, 2000);
     };
 
-    const handleSave = async () => {
+    const runSettingsWrite = async (write: () => Promise<void>) => {
+        if (settingsWritePendingRef.current) return;
+        settingsWritePendingRef.current = true;
+        setSettingsWritePending(true);
+        try {
+            await write();
+        } finally {
+            settingsWritePendingRef.current = false;
+            setSettingsWritePending(false);
+        }
+    };
+
+    const startBotWithSavedConfig = (start: () => Promise<void>) => runSettingsWrite(async () => {
+        const sessionRevision = openRevisionRef.current;
+        if (localBotConfig && isBotConfigDirty(botSettings.baseline, localBotConfig)) {
+            setSaveError(null);
+            await saveBotDraft(localBotConfig, sessionRevision);
+        }
+        if (openRevisionRef.current === sessionRevision) await start();
+    });
+
+    const saveSettings = async () => {
         setSaveError(null);
         setSaved(false);
         const saveErrors: string[] = [];
@@ -1291,12 +1314,8 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         botConfig={localBotConfig}
                                         initialStatus={initialTelegramStatus}
                                         initialCharacters={charactersProp}
-                                        onSaveBotConfig={async () => {
-                                            if (localBotConfig && isBotConfigDirty(botSettings.baseline, localBotConfig)) {
-                                                setSaveError(null);
-                                                await saveBotDraft(localBotConfig, openRevisionRef.current);
-                                            }
-                                        }}
+                                        startDisabled={settingsWritePending}
+                                        onStartWithBotConfig={startBotWithSavedConfig}
                                         onBotConfigChange={config => setBotSettings(current => {
                                             return current.draft?.revision === config.revision
                                                 ? { ...current, draft: config }
@@ -1395,12 +1414,13 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 <motion.button
                                     whileHover={{ scale: 1.05 }}
                                     whileTap={{ scale: 0.95 }}
-                                    onClick={handleSave}
+                                    onClick={() => void runSettingsWrite(saveSettings)}
+                                    disabled={settingsWritePending}
                                     data-onboarding-id="settings-save-button"
                                     className={clsx(
                                         "inline-flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-heading font-semibold tracking-wider uppercase",
                                         "bg-[var(--color-accent)] text-black",
-                                        "hover:bg-white transition-colors"
+                                        "enabled:hover:bg-white transition-colors disabled:opacity-50"
                                     )}
                                 >
                                     {saved ? <Check size={16} strokeWidth={2} className="shrink-0" /> : <Save size={16} strokeWidth={1.5} className="shrink-0" />}

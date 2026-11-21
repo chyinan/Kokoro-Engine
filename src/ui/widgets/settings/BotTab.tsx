@@ -49,7 +49,8 @@ interface BotTabProps {
     initialStatus?: TelegramStatus | null;
     initialCharacters?: CharacterRecord[];
     onBotConfigChange: (config: BotConfig) => void;
-    onSaveBotConfig: () => Promise<void>;
+    startDisabled: boolean;
+    onStartWithBotConfig: (start: () => Promise<void>) => Promise<void>;
 }
 
 export default function BotTab({
@@ -57,7 +58,8 @@ export default function BotTab({
     initialStatus,
     initialCharacters,
     onBotConfigChange,
-    onSaveBotConfig,
+    startDisabled,
+    onStartWithBotConfig,
 }: BotTabProps) {
     const { t } = useTranslation();
     const hasInitialStatus = initialStatus !== undefined;
@@ -178,10 +180,10 @@ export default function BotTab({
 
     const handleStartTelegram = async () => {
         try {
-            await onSaveBotConfig();
-            await startTelegramBot();
-            const st = await getTelegramStatus();
-            setStatus(st);
+            await onStartWithBotConfig(async () => {
+                await startTelegramBot();
+                setStatus(await getTelegramStatus());
+            });
         } catch (e) {
             console.error("[BotTab] Telegram start failed:", e);
         }
@@ -199,9 +201,10 @@ export default function BotTab({
 
     const handleStartRuntime = async (platform: Exclude<BotPlatformId, "telegram">) => {
         try {
-            await onSaveBotConfig();
-            await startBotPlatform(platform);
-            setBotStatus(await getBotStatus());
+            await onStartWithBotConfig(async () => {
+                await startBotPlatform(platform);
+                setBotStatus(await getBotStatus());
+            });
         } catch (e) {
             console.error(`[BotTab] ${platform} start failed:`, e);
         }
@@ -249,6 +252,7 @@ export default function BotTab({
                     isRunning={isRunning}
                     characterOptions={characterOptions}
                     onUpdate={updateTelegram}
+                    startDisabled={startDisabled}
                     onStart={handleStartTelegram}
                     onStop={handleStopTelegram}
                     onRefresh={loadStatus}
@@ -262,6 +266,7 @@ export default function BotTab({
                     connected={botStatus?.qq.connected ?? false}
                     characterOptions={characterOptions}
                     onUpdate={updateQQ}
+                    startDisabled={startDisabled}
                     onStart={() => handleStartRuntime("qq")}
                     onStop={() => handleStopRuntime("qq")}
                     onRefresh={loadStatus}
@@ -276,6 +281,7 @@ export default function BotTab({
                     setListInput={setListInput}
                     characterOptions={characterOptions}
                     onUpdate={updateDiscord}
+                    startDisabled={startDisabled}
                     onStart={() => handleStartRuntime("discord")}
                     onStop={() => handleStopRuntime("discord")}
                     onRefresh={loadStatus}
@@ -290,6 +296,7 @@ export default function BotTab({
                     setListInput={setListInput}
                     characterOptions={characterOptions}
                     onUpdate={updateLine}
+                    startDisabled={startDisabled}
                     onStart={() => handleStartRuntime("line")}
                     onStop={() => handleStopRuntime("line")}
                     onRefresh={loadStatus}
@@ -302,6 +309,7 @@ export default function BotTab({
                     running={botStatus?.webhook.running ?? false}
                     characterOptions={characterOptions}
                     onUpdate={updateWebhook}
+                    startDisabled={startDisabled}
                     onStart={() => handleStartRuntime("webhook")}
                     onStop={() => handleStopRuntime("webhook")}
                     onRefresh={loadStatus}
@@ -317,6 +325,7 @@ function PlatformHeader({
     enabled,
     running,
     connected = running,
+    startDisabled,
     onStart,
     onStop,
     onRefresh,
@@ -326,6 +335,7 @@ function PlatformHeader({
     enabled: boolean;
     running: boolean;
     connected?: boolean;
+    startDisabled: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -366,9 +376,10 @@ function PlatformHeader({
                     <motion.button
                         whileTap={{ scale: 0.95 }}
                         onClick={onStart}
+                        disabled={startDisabled}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-heading
                             bg-[var(--color-accent)]/20 text-[var(--color-accent)] border border-[var(--color-accent)]/30
-                            hover:bg-[var(--color-accent)]/30 transition-colors"
+                            enabled:hover:bg-[var(--color-accent)]/30 transition-colors disabled:opacity-50"
                     >
                         <Play size={12} /> {t("telegram.start")}
                     </motion.button>
@@ -580,6 +591,7 @@ function TelegramSettings({
     isRunning,
     characterOptions,
     onUpdate,
+    startDisabled,
     onStart,
     onStop,
     onRefresh,
@@ -588,6 +600,7 @@ function TelegramSettings({
     isRunning: boolean;
     characterOptions: Array<{ value: string; label: string }>;
     onUpdate: (patch: Partial<TelegramConfig>) => void;
+    startDisabled: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -625,9 +638,10 @@ function TelegramSettings({
                         <motion.button
                             whileTap={{ scale: 0.95 }}
                             onClick={onStart}
+                            disabled={startDisabled}
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-heading
                                 bg-[var(--color-accent)]/20 text-[var(--color-accent)] border border-[var(--color-accent)]/30
-                                hover:bg-[var(--color-accent)]/30 transition-colors"
+                                enabled:hover:bg-[var(--color-accent)]/30 transition-colors disabled:opacity-50"
                         >
                             <Play size={12} /> {t("telegram.start")}
                         </motion.button>
@@ -692,6 +706,7 @@ function QQSettings({
     connected,
     characterOptions,
     onUpdate,
+    startDisabled,
     onStart,
     onStop,
     onRefresh,
@@ -701,6 +716,7 @@ function QQSettings({
     connected: boolean;
     characterOptions: Array<{ value: string; label: string }>;
     onUpdate: (patch: Partial<QQBotConfig>) => void;
+    startDisabled: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -717,6 +733,7 @@ function QQSettings({
                 enabled={config.enabled}
                 running={running}
                 connected={connected}
+                startDisabled={startDisabled}
                 onStart={onStart}
                 onStop={onStop}
                 onRefresh={onRefresh}
@@ -793,6 +810,7 @@ function DiscordSettings({
     setListInput,
     characterOptions,
     onUpdate,
+    startDisabled,
     onStart,
     onStop,
     onRefresh,
@@ -803,6 +821,7 @@ function DiscordSettings({
     setListInput: (value: string) => void;
     characterOptions: Array<{ value: string; label: string }>;
     onUpdate: (patch: Partial<DiscordBotConfig>) => void;
+    startDisabled: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -815,6 +834,7 @@ function DiscordSettings({
                 title={t("bot.platform.discord")}
                 enabled={config.enabled}
                 running={running}
+                startDisabled={startDisabled}
                 onStart={onStart}
                 onStop={onStop}
                 onRefresh={onRefresh}
@@ -870,6 +890,7 @@ function LineSettings({
     setListInput,
     characterOptions,
     onUpdate,
+    startDisabled,
     onStart,
     onStop,
     onRefresh,
@@ -880,6 +901,7 @@ function LineSettings({
     setListInput: (value: string) => void;
     characterOptions: Array<{ value: string; label: string }>;
     onUpdate: (patch: Partial<LineBotConfig>) => void;
+    startDisabled: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -892,6 +914,7 @@ function LineSettings({
                 title={t("bot.platform.line")}
                 enabled={config.enabled}
                 running={running}
+                startDisabled={startDisabled}
                 onStart={onStart}
                 onStop={onStop}
                 onRefresh={onRefresh}
@@ -950,6 +973,7 @@ function WebhookSettings({
     running,
     characterOptions,
     onUpdate,
+    startDisabled,
     onStart,
     onStop,
     onRefresh,
@@ -958,6 +982,7 @@ function WebhookSettings({
     running: boolean;
     characterOptions: Array<{ value: string; label: string }>;
     onUpdate: (patch: Partial<WebhookBotConfig>) => void;
+    startDisabled: boolean;
     onStart: () => void;
     onStop: () => void;
     onRefresh: () => void;
@@ -970,6 +995,7 @@ function WebhookSettings({
                 title={t("bot.platform.webhook")}
                 enabled={config.enabled}
                 running={running}
+                startDisabled={startDisabled}
                 onStart={onStart}
                 onStop={onStop}
                 onRefresh={onRefresh}
