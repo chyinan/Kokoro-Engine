@@ -21,7 +21,7 @@ pub(super) async fn schedule_external_memory_tasks(
     scope: Arc<super::ownership::MemoryWriteScope>,
 ) {
     let tasks = orchestrator.chat_memory_work();
-    if tasks.token().is_cancelled() {
+    if !turn.target.require_character || tasks.token().is_cancelled() {
         return;
     }
     let Some(work) = memory_work.filter(|work| orchestrator.external_memory.is_current(*work))

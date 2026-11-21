@@ -1,6 +1,6 @@
 //! External platform configuration, lifecycle, and chat adapters.
 
-use crate::ai::context::AIOrchestrator;
+use crate::ai::context::{AIOrchestrator, DEFAULT_CHARACTER_ID};
 use crate::chat::application::{ChatAudioInput, ChatPolicy, ChatRequest, ChatService};
 #[cfg(test)]
 use crate::chat::persistence::ExternalTurn;
@@ -891,6 +891,7 @@ fn reply_text_with_translation(reply: &BotReply) -> String {
 /// guards until generation or replay has completed.
 struct BotRequestBinding {
     character_id: String,
+    allow_implicit_default: bool,
     conversation_id: String,
     request_id: String,
     previous_request_ids: Vec<String>,
@@ -907,14 +908,26 @@ impl BotRequestBinding {
         let _guard = state
             .enter_chat_turn()
             .map_err(|e| KokoroError::Chat(format!("Character activation is in progress: {e}")))?;
-        let character_id = match character_id.filter(|id| !id.trim().is_empty()) {
-            Some(id) => resolve_webhook_character_id(Some(id), None, None),
+        let explicit_character = character_id.map(str::trim).filter(|id| !id.is_empty());
+        let (character_id, allow_implicit_default) = match explicit_character {
+            Some(id) => (id.to_owned(), false),
             None => {
-                let id = state.get_character_id().await;
-                if id.is_empty() || id == "default" {
-                    AIOrchestrator::load_active_character_id().unwrap_or_else(|| "default".into())
+                let active = state.get_character_id().await;
+                if platform == "webhook" {
+                    let active = active.trim();
+                    if active.is_empty() || active == DEFAULT_CHARACTER_ID {
+                        (DEFAULT_CHARACTER_ID.into(), true)
+                    } else {
+                        (active.to_owned(), false)
+                    }
+                } else if active.is_empty() || active == DEFAULT_CHARACTER_ID {
+                    (
+                        AIOrchestrator::load_active_character_id()
+                            .unwrap_or_else(|| DEFAULT_CHARACTER_ID.into()),
+                        false,
+                    )
                 } else {
-                    id
+                    (active, false)
                 }
             }
         };
@@ -950,6 +963,7 @@ impl BotRequestBinding {
             request_id,
             previous_request_ids,
             character_id,
+            allow_implicit_default,
         })
     }
 }
@@ -1049,6 +1063,7 @@ async fn submit_bound_bot_reply(
             ChatRequest {
                 message: text.to_owned(),
                 character_id: Some(binding.character_id.clone()),
+                allow_implicit_webhook_default: binding.allow_implicit_default,
                 conversation_id: Some(binding.conversation_id.clone()),
                 client_request_id: Some(binding.request_id.clone()),
                 previous_request_ids: binding.previous_request_ids.clone(),
@@ -1637,26 +1652,6 @@ struct ParsedGenericWebhookPayload {
     conversation_key: Option<String>,
 }
 
-/// Resolve the character for one webhook request without allowing a blank
-/// override to shadow the configured or active character.
-fn resolve_webhook_character_id(
-    request_character_id: Option<&str>,
-    configured_character_id: Option<&str>,
-    active_character_id: Option<&str>,
-) -> String {
-    [
-        request_character_id,
-        configured_character_id,
-        active_character_id,
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .find(|value| !value.is_empty())
-    .unwrap_or("default")
-    .to_string()
-}
-
 /// Validate the optional bearer token at the HTTP boundary. The auth scheme
 /// is case-insensitive per RFC 7235, while the token itself remains exact.
 fn verify_webhook_bearer(
@@ -1879,16 +1874,13 @@ pub(crate) async fn handle_generic_webhook(
         Ok(value) => value,
         Err(error) => return bad_request(&error),
     };
-    let chat = match services.chat() {
-        Ok(chat) => chat,
-        Err(error) => return chat_unavailable(error),
-    };
-    let active_character_id = chat.orchestrator.get_character_id().await;
-    let character_id = resolve_webhook_character_id(
-        parsed.character_id.as_deref(),
-        config.character_id.as_deref(),
-        Some(&active_character_id),
-    );
+    if let Err(error) = services.chat() {
+        return chat_unavailable(error);
+    }
+    let character_id = parsed
+        .character_id
+        .as_deref()
+        .or(config.character_id.as_deref());
 
     match generate_bot_reply(
         services,
@@ -1903,7 +1895,7 @@ pub(crate) async fn handle_generic_webhook(
                     .unwrap_or_else(|| audio_format_from_mime_or_name(None, None)),
             }),
         },
-        Some(&character_id),
+        character_id,
         parsed.conversation_key.as_deref(),
         parsed.request_id.as_deref(),
     )
@@ -2788,6 +2780,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webhook_implicit_default_keeps_legacy_history_and_character_boundaries() {
+        use crate::llm::service::LlmService;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(AIOrchestrator::new("sqlite::memory:").await.unwrap());
+        let provider = Arc::new(HeadlessProvider::default());
+        let chat = ChatService::for_test(
+            state.clone(),
+            LlmService::for_test(provider.clone()),
+            temp.path(),
+        )
+        .await;
+        let services = BotChatServices::new(
+            Some((chat, state.clone())),
+            None,
+            None,
+            None,
+            Arc::new(|_: BotEvent| Ok(())),
+        );
+        let send = |configured: Option<&str>, payload: Value| {
+            let config = WebhookBotConfig {
+                bearer_token: Some("fixture-token".into()),
+                character_id: configured.map(str::to_owned),
+                ..Default::default()
+            };
+            let services = &services;
+            async move {
+                let response = handle_generic_webhook(
+                    config,
+                    Some("Bearer fixture-token".into()),
+                    payload.to_string().into(),
+                    services,
+                )
+                .await;
+                let status = response.status();
+                let body = warp::hyper::body::to_bytes(response.into_body())
+                    .await
+                    .unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            }
+        };
+        let legacy = json!({
+            "request_id": "legacy",
+            "conversation_id": "shared-peer",
+            "text": "Remember that I collect model trains.",
+        });
+        let first = send(None, legacy.clone()).await;
+        assert_eq!(first.0, StatusCode::OK, "{first:?}");
+        assert_eq!(first.1["character_id"], "default");
+        assert_eq!(first.1["reply"], "fixture reply");
+
+        let mut blank = legacy.clone();
+        blank["character_id"] = "  ".into();
+        state.set_character_id(" ".into()).await;
+        assert_eq!(send(Some(" "), blank.clone()).await, first);
+        blank["request_id"] = "legacy-followup".into();
+        blank["text"] = "Thanks".into();
+        let followup = send(Some(" "), blank).await;
+        assert_eq!(followup.0, StatusCode::OK, "{followup:?}");
+        assert_eq!(followup.1["conversation_id"], first.1["conversation_id"]);
+
+        let transcript: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT c.character_id, m.role, m.content FROM conversation_messages m
+             JOIN conversations c ON c.id=m.conversation_id WHERE c.id=? ORDER BY m.id",
+        )
+        .bind(first.1["conversation_id"].as_str().unwrap())
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            transcript
+                .iter()
+                .map(|(owner, role, text)| (owner.as_str(), role.as_str(), text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("default", "user", "Remember that I collect model trains."),
+                ("default", "assistant", "fixture reply"),
+                ("default", "user", "Thanks"),
+                ("default", "assistant", "fixture reply"),
+            ]
+        );
+        for table in crate::commands::characters::CHARACTER_OWNED_TABLES {
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE character_id='default'"
+            ))
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+
+        let missing = json!({
+            "request_id": "missing",
+            "conversation_id": "shared-peer",
+            "text": "This request must fail.",
+        });
+        for id in ["default", "unknown"] {
+            let mut explicit = missing.clone();
+            explicit["character_id"] = id.into();
+            explicit["allow_implicit_webhook_default"] = true.into();
+            assert_eq!(
+                send(None, explicit).await,
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":"Chat character no longer exists"})
+                )
+            );
+        }
+        assert_eq!(
+            send(Some("default"), missing.clone()).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        state.set_character_id("missing-active".into()).await;
+        assert_eq!(send(None, missing).await.0, StatusCode::BAD_REQUEST);
+        let character_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM characters")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(character_count, 0);
+        assert_eq!(provider.0.load(Ordering::SeqCst), 2);
+
+        sqlx::query(
+            "INSERT INTO characters(id,name) VALUES ('active','Active'), ('configured','Configured'),
+             ('requested','Requested'), ('default','Saved default')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        state.set_character_id("active".into()).await;
+        assert_eq!(send(None, legacy.clone()).await.0, StatusCode::CONFLICT);
+
+        let mut conversations = std::collections::HashSet::new();
+        for (input, configured, expected) in [
+            (None, None, "active"),
+            (None, Some("configured"), "configured"),
+            (Some(" requested "), Some("configured"), "requested"),
+            (Some("default"), Some("configured"), "default"),
+        ] {
+            let mut payload = legacy.clone();
+            payload["request_id"] = expected.into();
+            if let Some(id) = input {
+                payload["character_id"] = id.into();
+            }
+            let (status, reply) = send(configured, payload).await;
+            assert_eq!(status, StatusCode::OK, "{reply}");
+            assert_eq!(reply["character_id"], expected);
+            let conversation = reply["conversation_id"].as_str().unwrap().to_owned();
+            assert_eq!(
+                first.1["conversation_id"].as_str() == Some(conversation.as_str()),
+                expected == "default"
+            );
+            assert!(conversations.insert(conversation));
+        }
+        assert_eq!(provider.0.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
     async fn headless_webhook_and_telegram_share_persisted_turns() {
         use crate::chat::persistence::{ExternalReplyImage, ExternalReplyMedia};
         use crate::llm::service::LlmService;
@@ -3345,22 +3494,6 @@ mod tests {
         config.allowed_channel_ids = vec!["123".to_string()];
         assert!(discord_message_allowed_by_scope(&config, "123", false));
         assert!(!discord_message_allowed_by_scope(&config, "999", false));
-    }
-
-    #[test]
-    fn webhook_character_resolution_prefers_request_then_config_then_active() {
-        assert_eq!(
-            resolve_webhook_character_id(Some("request"), Some("configured"), Some("active")),
-            "request"
-        );
-        assert_eq!(
-            resolve_webhook_character_id(None, Some("configured"), Some("active")),
-            "configured"
-        );
-        assert_eq!(
-            resolve_webhook_character_id(None, None, Some("active")),
-            "active"
-        );
     }
 
     #[test]

@@ -1,4 +1,6 @@
-use super::{webhook_body_with_services, ControlledProvider, CountToolExecutions};
+use super::{
+    until_request_started, webhook_body_with_services, ControlledProvider, CountToolExecutions,
+};
 use crate::actions::ActionRegistry;
 use crate::ai::context::AIOrchestrator;
 use crate::bot::{BotChatServices, BotEvent};
@@ -19,8 +21,11 @@ use std::{
     time::Duration,
 };
 use teloxide::types::ChatId;
+use tokio::task::JoinHandle;
 
 const CHARACTER: &str = "external-reply-fixture";
+const CONVERSATION: &str = "sqlite-fixture";
+const BLOCKER_CONVERSATION: &str = "sqlite-fixture-blocker";
 const PROMPT: &str = "[external-commit-fixture] fixture input";
 const DISPLAYED: &str = "Reply from SQLite fixture\n\nSecond paragraph";
 const CANONICAL: &str = "**Reply from SQLite fixture**\n\n*Second paragraph*";
@@ -78,6 +83,27 @@ impl Fixture {
             services,
         }
     }
+
+    async fn start_blocking_webhook(
+        &self,
+        provider: &ControlledProvider,
+        request_id: &'static str,
+        conversation_id: &'static str,
+    ) -> JoinHandle<(u16, Value)> {
+        let services = self.services.clone();
+        let pending = tokio::spawn(async move {
+            webhook_body_with_services(
+                &services,
+                json!({
+                    "character_id": CHARACTER, "conversation_id": conversation_id,
+                    "request_id": request_id, "text": "[wait] blocking turn",
+                }),
+            )
+            .await
+        });
+        until_request_started(provider).await;
+        pending
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +125,7 @@ impl Channel {
                 let (status, body) = webhook_body_with_services(
                     &fixture.services,
                     json!({
-                        "character_id": CHARACTER, "conversation_id": "sqlite-fixture",
+                        "character_id": CHARACTER, "conversation_id": CONVERSATION,
                         "request_id": id.to_string(), "text": message,
                     }),
                 )
@@ -169,6 +195,13 @@ impl Submission {
             ),
         }
     }
+
+    fn assert_webhook_busy(&self) {
+        assert!(
+            matches!(self, Self::Webhook(503, body) if body["error"].is_string() && body.get("reply").is_none()),
+            "{self:?}"
+        );
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -234,6 +267,21 @@ fn model_and_tool_calls(provider: &ControlledProvider, tools: &AtomicUsize) -> (
     )
 }
 
+async fn finish_blocking_webhook(
+    provider: &ControlledProvider,
+    pending: JoinHandle<(u16, Value)>,
+) -> Value {
+    assert!(!pending.is_finished());
+    provider.finish_pending.notify_one();
+    let (status, body) = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["reply"], "Shared reply");
+    body
+}
+
 #[tokio::test]
 async fn both_adapters_return_the_committed_reply_after_duplicate_and_database_reopen() {
     let temp = tempfile::tempdir().unwrap();
@@ -254,11 +302,53 @@ async fn both_adapters_return_the_committed_reply_after_duplicate_and_database_r
         replies.push((channel, saved));
     }
 
+    let pending = fixture
+        .start_blocking_webhook(&provider, "before-reopen", BLOCKER_CONVERSATION)
+        .await;
+    let duplicate = Channel::Webhook.submit(&fixture, 1, PROMPT).await;
+    assert_eq!(
+        assert_committed(&fixture, &duplicate, false).await,
+        replies[0].1
+    );
+    assert_eq!(model_and_tool_calls(&provider, &tools), (5, 2));
+    finish_blocking_webhook(&provider, pending).await;
+
     fixture.state.db.close().await;
     assert!(fixture.state.db.is_closed());
     drop(fixture);
     let reopened = Fixture::open(temp.path(), provider.clone(), tools.clone(), false).await;
     assert!(reopened.journal.snapshots().is_empty());
+    let (conversation, revision): (String, i64) = sqlx::query_as(
+        "SELECT c.id, c.message_revision FROM conversations c
+         JOIN conversation_messages m ON m.conversation_id = c.id WHERE m.id = ?",
+    )
+    .bind(replies[0].1.id)
+    .fetch_one(&reopened.state.db)
+    .await
+    .unwrap();
+    let pending = reopened
+        .start_blocking_webhook(&provider, "after-reopen", CONVERSATION)
+        .await;
+    // This is the first delivery of the committed request in the new runtime.
+    Channel::Webhook
+        .submit(&reopened, 1, PROMPT)
+        .await
+        .assert_webhook_busy();
+    let conflicting = Channel::Webhook
+        .submit(&reopened, 1, "different input")
+        .await;
+    assert!(matches!(conflicting, Submission::Webhook(409, _)));
+    assert_eq!(model_and_tool_calls(&provider, &tools), (6, 2));
+    let blocking_reply = finish_blocking_webhook(&provider, pending).await;
+    assert_eq!(blocking_reply["conversation_id"], conversation);
+    let current_revision: i64 =
+        sqlx::query_scalar("SELECT message_revision FROM conversations WHERE id = ?")
+            .bind(&conversation)
+            .fetch_one(&reopened.state.db)
+            .await
+            .unwrap();
+    assert_eq!(current_revision, revision + 2);
+
     for (channel, saved) in replies {
         let replay = channel.submit(&reopened, 1, PROMPT).await;
         let committed = assert_committed(&reopened, &replay, false).await;
@@ -267,7 +357,7 @@ async fn both_adapters_return_the_committed_reply_after_duplicate_and_database_r
             (saved.request_id, saved.id, saved.metadata)
         );
     }
-    assert_eq!(model_and_tool_calls(&provider, &tools), (4, 2));
+    assert_eq!(model_and_tool_calls(&provider, &tools), (6, 2));
 }
 
 async fn assert_no_memory_rows(db: &SqlitePool) {
@@ -339,6 +429,24 @@ async fn both_adapters_recover_a_rolled_back_reply_without_rerunning_model_or_to
             .execute(db)
             .await
             .unwrap();
+        let expected_calls = if matches!(channel, Channel::Webhook) {
+            // A pending batch is revision-bound. Hold the shared execution
+            // guard without appending to the retry target's history.
+            let pending = fixture
+                .start_blocking_webhook(&provider, "before-recovery", BLOCKER_CONVERSATION)
+                .await;
+            let expected = (after_failure.0 + 1, after_failure.1);
+            channel
+                .submit(&fixture, 5, PROMPT)
+                .await
+                .assert_webhook_busy();
+            assert_eq!(roles().await.unwrap(), ["user"]);
+            assert_eq!(model_and_tool_calls(&provider, &tools), expected);
+            finish_blocking_webhook(&provider, pending).await;
+            expected
+        } else {
+            after_failure
+        };
         let recovered = channel.submit(&fixture, 5, PROMPT).await;
         let saved = assert_committed(&fixture, &recovered, true).await;
         assert_eq!(saved.request_id, turn.client_request_id);
@@ -358,7 +466,7 @@ async fn both_adapters_recover_a_rolled_back_reply_without_rerunning_model_or_to
 
         let replay = channel.submit(&fixture, 5, PROMPT).await;
         assert_eq!(assert_committed(&fixture, &replay, false).await, saved);
-        assert_eq!(model_and_tool_calls(&provider, &tools), after_failure);
+        assert_eq!(model_and_tool_calls(&provider, &tools), expected_calls);
         assert_eq!(provider.memory_prompts.lock().unwrap().len(), 1);
     }
 }

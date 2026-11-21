@@ -52,6 +52,11 @@ pub struct ChatTurnSnapshot {
 }
 
 type Outcome = Result<StreamChatResponse, KokoroError>;
+
+fn is_busy_rejection(outcome: &Outcome) -> bool {
+    matches!(outcome, Err(KokoroError::Chat(error)) if error.starts_with("chat_turn_busy"))
+}
+
 enum RetiredOutcome {
     Terminal(Box<Outcome>),
     /// Only the fingerprint survives eviction. The response and its media are
@@ -218,6 +223,15 @@ impl ChatRuntimeState {
             .as_deref()
             .ok_or("missing client_request_id")?;
         let fingerprint = request.fingerprint(policy)?;
+        // A webhook redelivery can hit the execution guard before this journal
+        // has loaded its original result from SQLite or the reply cache.
+        let retry_busy = matches!(
+            policy,
+            ChatPolicy::External {
+                source: "webhook",
+                ..
+            }
+        );
         let mut journal = self.0.lock().unwrap();
         if request.character_id.as_ref().is_some_and(|character| {
             journal
@@ -236,6 +250,7 @@ impl ChatRuntimeState {
                 );
             }
             match result {
+                RetiredOutcome::Terminal(result) if retry_busy && is_busy_rejection(result) => {}
                 RetiredOutcome::Terminal(result) => {
                     let (_, receiver) = watch::channel(Some(result.as_ref().clone()));
                     return Ok((false, receiver, false));
@@ -256,12 +271,13 @@ impl ChatRuntimeState {
                         || matches!(outcome, Err(KokoroError::ChatPersistence(_)))
                         || (outcome.is_err()
                             && entry.snapshot.user_message_id.is_none()
-                            && !entry
-                                .snapshot
-                                .error
-                                .as_deref()
-                                .unwrap_or_default()
-                                .contains("chat_turn_busy"))
+                            && (retry_busy
+                                || !entry
+                                    .snapshot
+                                    .error
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .contains("chat_turn_busy")))
                 });
             if !retryable {
                 return Ok((false, entry.outcome.subscribe(), replay_only));
@@ -290,16 +306,15 @@ impl ChatRuntimeState {
                         journal.retired.get(&id),
                         Some((_, RetiredOutcome::SavedExternalReply))
                     );
-                    let busy_rejection = matches!(&outcome, Err(KokoroError::Chat(error)) if error.starts_with("chat_turn_busy"));
                     if saved_external_reply
-                        || busy_rejection
+                        || is_busy_rejection(&outcome)
                         || entry.desktop
                         || outcome.is_ok()
                         || (entry.snapshot.user_message_id.is_some()
                             && !matches!(outcome, Err(KokoroError::ChatPersistence(_))))
                     {
-                        // A busy first attempt stays rejected. A busy reload
-                        // of an already committed reply must remain reloadable.
+                        // Keep the fingerprint of busy rejections across eviction.
+                        // A committed reply remains reloadable from SQLite.
                         let retired = if saved_external_reply
                             || (!entry.desktop
                                 && outcome
@@ -1120,11 +1135,14 @@ mod tests {
     }
 
     #[test]
-    fn external_save_and_preparation_failures_remain_recoverable_after_eviction() {
+    fn webhook_save_preparation_and_busy_failures_remain_retryable_after_eviction() {
         for (error, user_message_id) in [
             (KokoroError::ChatPersistence("fixture".into()), Some(7)),
             (KokoroError::Stt("unavailable".into()), None),
+            (KokoroError::Chat("chat_turn_busy: fixture".into()), None),
         ] {
+            let failure = Err(error);
+            let busy_rejection = is_busy_rejection(&failure);
             let runtime = ChatRuntimeState::default();
             let policy = ChatPolicy::External {
                 create_conversation: true,
@@ -1134,18 +1152,24 @@ mod tests {
             let original = request("recoverable");
             assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
             runtime.event("chat-turn-bound", &serde_json::json!({"client_request_id":"recoverable", "user_message_id":user_message_id}));
-            runtime.complete("recoverable", Err(error.clone()));
+            runtime.complete("recoverable", failure.clone());
             assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
             runtime.event("chat-turn-bound", &serde_json::json!({"client_request_id":"recoverable", "user_message_id":user_message_id}));
-            runtime.complete("recoverable", Err(error));
+            runtime.complete("recoverable", failure);
             for index in 0..256 {
                 let id = format!("other-{index}");
                 runtime.begin(&request(&id)).unwrap();
                 runtime.complete(&id, result(&id));
             }
-            assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
-            let mut changed = original;
+            let mut changed = original.clone();
             changed.message = "changed input".into();
+            if busy_rejection {
+                assert!(matches!(
+                    runtime.begin_with_policy(&changed, policy),
+                    Err(error) if error.starts_with("chat_request_conflict:")
+                ));
+            }
+            assert!(runtime.begin_with_policy(&original, policy).unwrap().0);
             assert!(runtime.begin_with_policy(&changed, policy).is_err());
         }
     }

@@ -42,6 +42,8 @@ impl TurnIdentity {
 /// service; a turn only retains its selected provider Arc.
 #[derive(Clone)]
 pub(crate) struct PromptSnapshot {
+    /// The implicit webhook default can carry history without owning memory.
+    pub skip_memory: bool,
     pub cue_map: Option<std::collections::HashMap<String, crate::live2d::Live2dCueBinding>>,
     pub system_prompt: String,
     pub character_name: String,

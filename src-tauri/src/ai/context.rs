@@ -5,6 +5,7 @@ pub(crate) mod history;
 use crate::ai::database_migrations;
 use crate::ai::memory::{MemoryManager, MemoryRetrievalMode, MemorySearchResult};
 use crate::ai::router::{ModelRouter, ModelType};
+use crate::characters::activation::BackendRuntimeSnapshot;
 use crate::chat::external_memory::ExternalMemory;
 use crate::chat::persistence::{
     self, ConversationTarget, ExternalReplies, MessageWrite, SavedMessage,
@@ -23,6 +24,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const CONVERSATION_SUMMARY_PROVIDER_TIMEOUT_SECS: u64 = 120;
+pub(crate) const DEFAULT_CHARACTER_ID: &str = "default";
+const DEFAULT_CHARACTER_NAME: &str = "Kokoro";
+const DEFAULT_USER_NAME: &str = "User";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 static DATABASE_OPERATION_GATE: OnceLock<Arc<RwLock<()>>> = OnceLock::new();
@@ -613,18 +618,18 @@ impl AIOrchestrator {
             db: pool,
             external_replies: Arc::new(ExternalReplies::default()),
             external_memory: Arc::new(ExternalMemory::default()),
-            system_prompt: Arc::new(Mutex::new("You are a helpful assistant.".to_string())),
+            system_prompt: Arc::new(Mutex::new(DEFAULT_SYSTEM_PROMPT.into())),
             max_history_tokens: 4000,
             memory_manager,
             router: Arc::new(ModelRouter::new()),
-            character_id: Arc::new(Mutex::new("default".to_string())),
+            character_id: Arc::new(Mutex::new(DEFAULT_CHARACTER_ID.into())),
             memory_event_cooldowns: Arc::new(Mutex::new(HashMap::new())),
             memory_enabled: Arc::new(AtomicBool::new(true)),
             response_language: Arc::new(Mutex::new(String::new())),
             user_language: Arc::new(Mutex::new(String::new())),
             jailbreak_prompt: Arc::new(Mutex::new(None)),
-            character_name: Arc::new(Mutex::new("Kokoro".to_string())),
-            user_name: Arc::new(Mutex::new("User".to_string())),
+            character_name: Arc::new(Mutex::new(DEFAULT_CHARACTER_NAME.into())),
+            user_name: Arc::new(Mutex::new(DEFAULT_USER_NAME.into())),
             proactive_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             context_strategy: Arc::new(Mutex::new("window".to_string())),
             max_message_chars: Arc::new(Mutex::new(2000)),
@@ -853,13 +858,24 @@ impl AIOrchestrator {
         self.prompt_snapshot_with_runtime(character, None, None).await
     }
 
+    pub(crate) fn implicit_default_runtime() -> BackendRuntimeSnapshot {
+        BackendRuntimeSnapshot {
+            character_id: DEFAULT_CHARACTER_ID.into(),
+            character_name: DEFAULT_CHARACTER_NAME.into(),
+            user_name: DEFAULT_USER_NAME.into(),
+            system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+            ..Default::default()
+        }
+    }
+
     pub(crate) async fn prompt_snapshot_with_runtime(
         &self,
         character: &str,
-        runtime: Option<&crate::characters::activation::BackendRuntimeSnapshot>,
+        runtime: Option<&BackendRuntimeSnapshot>,
         cue_map: Option<Live2dCueMap>,
     ) -> Result<crate::chat::ownership::PromptSnapshot> {
         let mut snapshot = crate::chat::ownership::PromptSnapshot {
+            skip_memory: false,
             cue_map,
             system_prompt: self.system_prompt.lock().await.clone(),
             character_name: self.character_name.lock().await.clone(),
@@ -1900,7 +1916,8 @@ impl AIOrchestrator {
         let cid = character_id;
         let resolved_conversation_id = target_conversation_id.map(str::to_owned);
         let mut warnings: Vec<String> = Vec::new();
-        let memories = if self.is_memory_enabled() {
+        let memory_enabled = self.is_memory_enabled() && !snapshot.skip_memory;
+        let memories = if memory_enabled {
             match self
                 .memory_manager
                 .search_memories_with_status(query, 5, cid)
@@ -1921,7 +1938,7 @@ impl AIOrchestrator {
         } else {
             None
         };
-        let conversation_summary = if self.is_memory_enabled() {
+        let conversation_summary = if memory_enabled {
             if let Some(ref conversation_id) = resolved_conversation_id {
                 self.memory_manager
                     .get_latest_conversation_summary(conversation_id)
@@ -2072,7 +2089,7 @@ impl AIOrchestrator {
                     summary_record.summary.trim()
                 ));
             }
-        } else if self.is_memory_enabled() {
+        } else if memory_enabled {
             if let Ok(summaries) = self.memory_manager.get_recent_summaries(cid, 2).await {
                 if !summaries.is_empty() {
                     let summary_block = summaries

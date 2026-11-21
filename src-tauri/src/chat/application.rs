@@ -1182,6 +1182,10 @@ pub struct ChatRequest {
     /// an old request whose persisted history was subsequently deleted.
     #[serde(skip)]
     pub(crate) require_saved_external_reply: bool,
+    /// Only the webhook adapter can opt into chat without a saved character.
+    #[serde(skip)]
+    #[specta(skip)]
+    pub(crate) allow_implicit_webhook_default: bool,
     /// One-shot vision context, excluded from the journal and history previews.
     #[serde(default)]
     pub camera_frame: Option<String>,
@@ -2275,7 +2279,10 @@ async fn resolve_request_scope(
             .bind(&character)
             .fetch_one(&state.db)
             .await?;
-    if !character_exists {
+    let allow_missing_character = request.allow_implicit_webhook_default
+        && policy.source() == "webhook"
+        && character == crate::ai::context::DEFAULT_CHARACTER_ID;
+    if !character_exists && !allow_missing_character {
         return Err(KokoroError::Validation(
             "Chat character no longer exists".into(),
         ));
@@ -2326,7 +2333,7 @@ async fn resolve_request_scope(
         ));
     }
     let target = ConversationTarget {
-        require_character: true,
+        require_character: character_exists,
         character_id: character.clone(),
         conversation_id: conversation.clone(),
         create,
@@ -2351,7 +2358,7 @@ async fn resolve_request_scope(
     // Grant absence only for the target just validated under this selection lock.
     Arc::get_mut(&mut memory_scope)
         .unwrap()
-        .allow_reserved_conversation = target.create;
+        .allow_reserved_conversation = target.create && target.require_character;
     request.memory_scope = Some(memory_scope);
     request.resolved_target = Some(target);
     Ok(())
@@ -3034,14 +3041,20 @@ async fn execute_chat_with_pending(
         // model, tool, media or memory I/O.
         let (prompt_snapshot, llm_snapshot, speech, speech_snapshot) = {
             let _activation = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-            let committed = dependencies
-                .activation
-                .get_committed(&state.db)
-                .await?
-                .filter(|committed| committed.runtime.character_id == char_id);
+            let committed = if target.require_character {
+                dependencies
+                    .activation
+                    .get_committed(&state.db)
+                    .await?
+                    .filter(|committed| committed.runtime.character_id == char_id)
+            } else {
+                None
+            };
             let uses_committed = committed.is_some();
             let (runtime, profile) = if let Some(committed) = committed {
                 (committed.runtime, None)
+            } else if !target.require_character {
+                (AIOrchestrator::implicit_default_runtime(), None)
             } else {
                 crate::characters::activation::read_execution_runtime(
                     &state.db,
@@ -3055,6 +3068,7 @@ async fn execute_chat_with_pending(
                 .prompt_snapshot_with_runtime(&char_id, Some(&runtime), cues)
                 .await
                 .map_err(|error| KokoroError::Chat(error.to_string()))?;
+            prompt.skip_memory = !target.require_character;
             prompt.vision_context_history_mode = vision_watcher
                 .config
                 .read()
@@ -3623,7 +3637,7 @@ async fn execute_chat_with_pending(
             let settings = tool_settings_state.read().await;
             let actions = registry
                 .list_actions_for_prompt_with_settings_and_availability(
-                    state.is_memory_enabled(),
+                    state.is_memory_enabled() && !prompt_snapshot.skip_memory,
                     vision_enabled,
                     &settings,
                 )
