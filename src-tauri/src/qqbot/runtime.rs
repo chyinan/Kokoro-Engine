@@ -128,6 +128,12 @@ pub struct QQAuthorizationBroker {
 }
 
 impl QQAuthorizationBroker {
+    #[cfg(test)]
+    pub(crate) async fn request_for_test(&self, message: &QQInboundMessage) -> bool {
+        self.request(&|_: BotEvent| Ok(()), message, &CancellationToken::new())
+            .await
+    }
+
     async fn request(
         &self,
         events: &dyn BotEvents,

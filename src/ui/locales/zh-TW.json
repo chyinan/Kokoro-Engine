@@ -1295,6 +1295,12 @@
     },
     "bot": {
         "title": "Bot 接入",
+        "config_conflict": {
+            "stale": "編輯期間 Bot 設定已變更。請重新整理並檢查你的修改，再重新儲存。",
+            "overlap": "草稿與已儲存的設定修改了部分相同欄位。你可以保留這些欄位的已儲存值，再檢查其餘修改。",
+            "refresh": "重新整理 Bot 設定",
+            "keep_saved": "在重疊欄位保留已儲存值"
+        },
         "status": {
             "enabled": "已啟用",
             "disabled": "未啟用",

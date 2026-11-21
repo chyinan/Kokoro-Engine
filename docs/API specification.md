@@ -1059,8 +1059,8 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 
 | Command | Bridge | Request | Response | Notes |
 |---|---|---|---|---|
-| `get_telegram_config` | `getTelegramConfig` | none | `TelegramConfig` | Returns Telegram config. |
-| `save_telegram_config` | `saveTelegramConfig` | `config: TelegramConfig` | `void` | Saves Telegram config. |
+| `get_telegram_config` | `getTelegramConfig` | none | `{ revision: number, config: TelegramConfig }` | Reads the Telegram settings and shared Bot configuration revision together. |
+| `save_telegram_config` | `saveTelegramConfig` | `expectedRevision: number, config: TelegramConfig` | `BotConfig` | Saves Telegram settings with the revision from the read. A stale revision returns `BotConfigConflict`. |
 | `start_telegram_bot` | `startTelegramBot` | none | `void` | Starts the bot. |
 | `stop_telegram_bot` | `stopTelegramBot` | none | `void` | Stops the bot. |
 | `get_telegram_status` | `getTelegramStatus` | none | `TelegramStatus` | Returns runtime bot status. |

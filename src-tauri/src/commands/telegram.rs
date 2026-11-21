@@ -1,9 +1,9 @@
 //! Telegram Bot IPC commands — frontend ↔ backend bridge.
 
-use crate::bot::{self, BotChatServices};
+use crate::bot::{BotChatServices, BotConfig, BotRuntimeService};
 use crate::error::KokoroError;
 use crate::ipc::wire::Response;
-use crate::telegram::TelegramService;
+use crate::telegram::{TelegramConfig, TelegramService};
 use serde::Serialize;
 use tauri::State;
 
@@ -14,21 +14,36 @@ pub struct TelegramStatus {
     pub has_token: bool,
 }
 
+#[derive(Serialize, specta::Type)]
+pub struct TelegramConfigSnapshot {
+    pub revision: u64,
+    pub config: TelegramConfig,
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_telegram_config(
-    state: State<'_, TelegramService>,
-) -> Result<Response<crate::telegram::TelegramConfig>, KokoroError> {
-    Ok(Response(state.get_config().await))
+    runtime: State<'_, BotRuntimeService>,
+) -> Result<Response<TelegramConfigSnapshot>, KokoroError> {
+    let (revision, config) = runtime.current_telegram_config().await;
+    Ok(Response(TelegramConfigSnapshot { revision, config }))
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn save_telegram_config(
     state: State<'_, TelegramService>,
-    config: crate::telegram::TelegramConfig,
-) -> Result<(), KokoroError> {
-    bot::save_telegram_config(&state, config).await
+    runtime: State<'_, BotRuntimeService>,
+    expected_revision: u64,
+    config: TelegramConfig,
+) -> Result<Response<BotConfig>, KokoroError> {
+    let _lease = state
+        .admit_control("save Telegram configuration")
+        .map_err(KokoroError::ExternalService)?;
+    runtime
+        .save_telegram_config(expected_revision, config)
+        .await
+        .map(Response)
 }
 
 #[tauri::command]

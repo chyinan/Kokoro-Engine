@@ -266,7 +266,6 @@ import {
   // Config Getters
   getLlmConfig,
   getImageGenConfig,
-  getTelegramConfig,
   getTelegramStatus,
   getBotConfig,
   getBotStatus,
@@ -347,7 +346,6 @@ import {
   type VoiceProfile,
   type GptSovitsModels,
   type MemoryRecord,
-  type TelegramConfig,
   type TelegramStatus,
   type BotConfig,
   type BotPlatformId,
@@ -362,6 +360,7 @@ import {
   type QQAuthorizationRequest,
   type CharacterActivationToken,
   getKokoroErrorMessage,
+  isKokoroErrorCode,
   onMemoryEmbeddingModelProgress,
 } from "./lib/kokoro-bridge";
 import type { ThemeConfig } from "./ui/layout/types";
@@ -495,9 +494,11 @@ function App() {
   const [sttConfig, setSttConfig] = useState<SttConfig | undefined>(undefined);
   const [visionConfig, setVisionConfig] = useState<VisionConfig | undefined>(undefined);
   const [imageGenConfig, setImageGenConfig] = useState<ImageGenSystemConfig | undefined>(undefined);
-  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | undefined>(undefined);
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | undefined>(undefined);
   const [botConfig, setBotConfig] = useState<BotConfig | undefined>(undefined);
+  const applyBotConfig = useCallback((config: BotConfig) => {
+    setBotConfig(current => current && current.revision > config.revision ? current : config);
+  }, []);
   const [botStatus, setBotStatus] = useState<BotStatus | undefined>(undefined);
   const [autoBackupConfig, setAutoBackupConfig] = useState<AutoBackupConfig | undefined>(undefined);
   const [backupStatus, setBackupStatus] = useState<{
@@ -1207,6 +1208,7 @@ function App() {
     setQQAuthorizationError(null);
     try {
       await respondQQAuthorization(currentQQAuthorization, approved);
+      if (approved) void getBotConfig().then(applyBotConfig).catch(console.error);
       setQQAuthorizationQueue(current => current.filter(
         request => request.request_id !== currentQQAuthorization.request_id,
       ));
@@ -1222,7 +1224,7 @@ function App() {
     } finally {
       setQQAuthorizationBusy(false);
     }
-  }, [currentQQAuthorization, qqAuthorizationBusy]);
+  }, [currentQQAuthorization, qqAuthorizationBusy, applyBotConfig]);
 
   // Listen for pet window requesting main window to show
   useEffect(() => {
@@ -1254,12 +1256,11 @@ function App() {
       listMcpServers(),
       listMods(),
       getProactiveEnabled(),
-      getTelegramConfig(),
       getTelegramStatus(),
       getBotConfig(),
       getBotStatus(),
       getAutoBackupConfig(),
-    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram, telegramStatus, botConfig, botStatus, autoBackup]) => {
+    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegramStatus, botConfig, botStatus, autoBackup]) => {
       setTtsConfig(tts);
       setLlmConfig(llm);
       const activeProvider = llm.providers.find((provider) => provider.id === llm.active_provider) ?? llm.providers[0];
@@ -1271,9 +1272,8 @@ function App() {
       setModList(mods);
       setProactiveEnabledState(proactive);
       writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, proactive);
-      setTelegramConfig(telegram);
       setTelegramStatus(telegramStatus);
-      setBotConfig(botConfig);
+      applyBotConfig(botConfig);
       setBotStatus(botStatus);
       setAutoBackupConfig(autoBackup);
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
@@ -1721,22 +1721,33 @@ function App() {
       saveVisionConfig(detail.data.config).catch(console.error);
     }
     if (detail.action === 'save_telegram_config' && detail.data?.config) {
-      setTelegramConfig(detail.data.config);
-      saveTelegramConfig(detail.data.config)
-        .then(() => getTelegramStatus())
-        .then(setTelegramStatus)
-        .catch(console.error);
+      const revision = detail.data.revision;
+      if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+        console.error("[App] Saving Telegram configuration requires the revision from the config read");
+        return;
+      }
+      void saveTelegramConfig(revision, detail.data.config).then(savedConfig => {
+        applyBotConfig(savedConfig);
+        void Promise.all([
+          getBotStatus().then(setBotStatus),
+          getTelegramStatus().then(setTelegramStatus),
+        ]).catch(error => console.error("[App] Telegram configuration saved, but refreshing Bot settings failed", error));
+      })
+        .catch(error => {
+          console.error("[App] Failed to save Telegram configuration", error);
+          if (isKokoroErrorCode(error, "BotConfigConflict")) {
+            window.alert(t("bot.config_conflict.stale"));
+          }
+        });
     }
     if (detail.action === 'save_bot_config' && detail.data?.config) {
-      setBotConfig(detail.data.config);
       saveBotConfig(detail.data.config)
         .then(savedConfig => {
-          setBotConfig(savedConfig);
-          return Promise.all([getBotStatus(), getTelegramConfig(), getTelegramStatus()]);
+          applyBotConfig(savedConfig);
+          return Promise.all([getBotStatus(), getTelegramStatus()]);
         })
-        .then(([status, telegram, telegramStatus]) => {
+        .then(([status, telegramStatus]) => {
           setBotStatus(status);
-          setTelegramConfig(telegram);
           setTelegramStatus(telegramStatus);
         })
         .catch(console.error);
@@ -1744,7 +1755,7 @@ function App() {
     if (detail.action === 'refresh_bot_status') {
       Promise.all([getBotConfig(), getBotStatus(), getTelegramStatus()])
         .then(([config, status, telegramStatus]) => {
-          setBotConfig(config);
+          applyBotConfig(config);
           setBotStatus(status);
           setTelegramStatus(telegramStatus);
         })
@@ -2378,7 +2389,7 @@ function App() {
         toggleMcpServer,
         refreshMcpServers: async () => setMcpServers(await listMcpServers()),
         enableBotPlatforms: async (platforms) => {
-          const current = botConfig ?? await getBotConfig();
+          const current = await getBotConfig();
           let next = current;
           for (const platform of platforms) {
             switch (platform) {
@@ -2390,7 +2401,7 @@ function App() {
             }
           }
           const saved = await saveBotConfig(next);
-          setBotConfig(saved);
+          applyBotConfig(saved);
         },
       },
     });
@@ -2525,7 +2536,7 @@ function App() {
             visionConfig={visionConfig}
             onVisionConfigChange={setVisionConfig}
             imageGenConfig={imageGenConfig}
-            telegramConfig={telegramConfig}
+            telegramConfig={botConfig?.telegram}
             botConfig={botConfig}
             botStatus={botStatus}
             autoBackupConfig={autoBackupConfig}

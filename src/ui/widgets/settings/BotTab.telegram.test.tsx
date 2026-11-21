@@ -51,6 +51,7 @@ async function renderBot() {
     return createElement(BotTab, {
       botConfig: config,
       onBotConfigChange: next => { changed(next); setConfig(next); },
+      onSaveBotConfig: async () => { await saveBotConfig(config); },
     });
   }
   container = document.createElement("div");

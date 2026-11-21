@@ -4,7 +4,7 @@
 
 use super::config::TelegramConfig;
 use crate::ai::context::AIOrchestrator;
-use crate::bot::{lifecycle::BotIngress, BotChatServices, BotChatUnavailable};
+use crate::bot::{lifecycle::BotIngress, BotChatServices, BotChatUnavailable, BotConfig};
 use crate::chat::application::{channel_id, ChatPolicy, ChatRequest, ChatService};
 use crate::chat::persistence::{self, ExternalTurn};
 use crate::error::KokoroError;
@@ -317,7 +317,7 @@ const MAX_MEDIA_BYTES: u32 = 20 * 1024 * 1024;
 /// Run the long-polling loop and let the SDK drain its message workers.
 pub(crate) async fn run_polling(
     token: String,
-    config: Arc<RwLock<TelegramConfig>>,
+    config: Arc<RwLock<BotConfig>>,
     services: BotChatServices,
     ingress: BotIngress,
 ) -> Result<(), String> {
@@ -369,7 +369,7 @@ pub(crate) async fn run_polling(
 async fn handle_message(
     bot: Bot,
     msg: Message,
-    config: Arc<RwLock<TelegramConfig>>,
+    config: Arc<RwLock<BotConfig>>,
     sessions: Sessions,
     services: BotChatServices,
     rate_limiter: RateLimiter,
@@ -472,7 +472,7 @@ impl MessageHandler for TelegramMessageHandler<'_> {
 async fn dispatch_message(
     bot: &Bot,
     msg: &Message,
-    config: &RwLock<TelegramConfig>,
+    config: &RwLock<BotConfig>,
     rate_limiter: &RateLimiter,
     handler: &impl MessageHandler,
 ) -> HandlerResult {
@@ -481,7 +481,7 @@ async fn dispatch_message(
     tracing::info!(target: "telegram", "[Telegram] Received message from chat_id={}", chat_id.0);
 
     // Snapshot config for this request
-    let config = config.read().await.clone();
+    let config = config.read().await.telegram.clone();
 
     // Access control: check whitelist
     if !config.allowed_chat_ids.contains(&chat_id.0) {
@@ -1198,7 +1198,7 @@ pub(crate) async fn verify_bound_session_submission(services: &BotChatServices) 
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     #[derive(Default)]
     struct EntryEffects {
         routes: Vec<&'static str>,
@@ -1367,6 +1367,39 @@ mod tests {
         (bot, server)
     }
 
+    pub(in crate::telegram) async fn assert_dispatched_text_chats(
+        config: &RwLock<crate::bot::BotConfig>,
+        chat_ids: &[i64],
+        expected: &[i64],
+    ) {
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, server) = local_bot().await;
+        let limiter = RateLimiter::default();
+        let mut dispatched = Vec::new();
+        for (index, chat_id) in chat_ids.iter().copied().enumerate() {
+            dispatch_message(
+                &bot,
+                &incoming_message(chat_id, index as i32 + 1, "local test prompt"),
+                config,
+                &limiter,
+                &handler,
+            )
+            .await
+            .unwrap();
+            if handler.effects.lock().unwrap().routes.len() > dispatched.len() {
+                dispatched.push(chat_id);
+            }
+        }
+        assert_eq!(dispatched, expected);
+        assert_eq!(handler.effects.lock().unwrap().model, expected.len());
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&handler.state.db)
+            .await
+            .unwrap();
+        assert_eq!(messages as usize, expected.len() * 2);
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn telegram_reports_chat_unavailable_only_to_authorized_chats() {
         use crate::bot::BotEvent;
@@ -1386,8 +1419,11 @@ mod tests {
             .expect(2)
             .mount(&telegram)
             .await;
-        let config = Arc::new(RwLock::new(TelegramConfig {
-            allowed_chat_ids: vec![123],
+        let config = Arc::new(RwLock::new(BotConfig {
+            telegram: TelegramConfig {
+                allowed_chat_ids: vec![123],
+                ..Default::default()
+            },
             ..Default::default()
         }));
         let services = BotChatServices::new(None, None, None, None, Arc::new(|_: BotEvent| Ok(())));
@@ -1431,8 +1467,11 @@ mod tests {
         let limiter = RateLimiter::default();
         // Empty, mismatched sender ID, and special values are never wildcards.
         for ids in [vec![], vec![42], vec![0, -1], vec![123]] {
-            let config = RwLock::new(TelegramConfig {
-                allowed_chat_ids: ids,
+            let config = RwLock::new(BotConfig {
+                telegram: TelegramConfig {
+                    allowed_chat_ids: ids,
+                    ..Default::default()
+                },
                 ..Default::default()
             });
             for chat in [456, -1001234567890] {
@@ -1478,8 +1517,11 @@ mod tests {
             let handler = RecordingMessageHandler::new().await;
             let (bot, telegram) = local_bot().await;
             let limiter = RateLimiter::default();
-            let config = RwLock::new(TelegramConfig {
-                allowed_chat_ids: vec![chat],
+            let config = RwLock::new(BotConfig {
+                telegram: TelegramConfig {
+                    allowed_chat_ids: vec![chat],
+                    ..Default::default()
+                },
                 ..Default::default()
             });
             // A sign change must not authorize a different chat.
@@ -1547,8 +1589,15 @@ mod tests {
         let (bot, telegram) = local_bot().await;
         let limiter = RateLimiter::default();
         let lifecycle = crate::lifecycle::AppLifecycle::new();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = crate::bot::BotRuntimeService::with_config_path(
+            BotConfig::default(),
+            lifecycle.scope(crate::lifecycle::TaskStage::Work, "bot"),
+            lifecycle.scope(crate::lifecycle::TaskStage::Service, "bot"),
+            temp.path().join("bot_config.json"),
+        );
         let service = crate::telegram::TelegramService::new(
-            TelegramConfig::default(),
+            &runtime,
             lifecycle.scope(crate::lifecycle::TaskStage::Work, "Telegram"),
             lifecycle.scope(crate::lifecycle::TaskStage::Service, "Telegram"),
         );
@@ -1560,12 +1609,12 @@ mod tests {
             (vec![], 123, 5, "/continue", 2),
             (vec![123], 123, 6, "/new", 3),
         ] {
-            service
-                .update_config(TelegramConfig {
-                    allowed_chat_ids: ids,
-                    ..Default::default()
-                })
-                .await;
+            let (revision, mut config) = runtime.current_telegram_config().await;
+            config.allowed_chat_ids = ids;
+            runtime
+                .save_telegram_config(revision, config)
+                .await
+                .unwrap();
             dispatch_message(
                 &bot,
                 &incoming_message(chat, id, input),
@@ -1604,7 +1653,10 @@ mod tests {
             if let Some(contents) = contents {
                 std::fs::write(&path, contents).unwrap();
             }
-            let config = RwLock::new(super::super::config::load_config(&path));
+            let config = RwLock::new(BotConfig {
+                telegram: super::super::config::load_config(&path),
+                ..Default::default()
+            });
             for input in ["hello", "/new", "voice", "photo"] {
                 dispatch_message(
                     &bot,
@@ -1750,11 +1802,11 @@ mod tests {
     ) -> Result<(), TelegramDeliveryError> {
         let turn = begin_telegram_turn(state, "default", 10, 1, input, false, sessions).await?;
         let (text, translation, newly_committed) =
-            if let Some((text, translation)) = &turn.previous_reply {
+            if let Some(reply) = &turn.previous_reply {
                 (
-                    text.clone(),
-                    translation.clone(),
-                    turn.previous_reply_newly_committed,
+                    reply.text.clone(),
+                    reply.translation.clone(),
+                    reply.newly_committed,
                 )
             } else {
                 generation_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2335,10 +2387,9 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(retry.target.conversation_id, first.target.conversation_id);
-            assert_eq!(
-                retry.previous_reply,
-                Some((raw_reply.into(), Some("translation".into())))
-            );
+            let reply = retry.previous_reply.unwrap();
+            assert_eq!(reply.text, raw_reply);
+            assert_eq!(reply.translation.as_deref(), Some("translation"));
         }
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id",

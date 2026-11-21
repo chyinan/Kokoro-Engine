@@ -1304,6 +1304,12 @@
     },
     "bot": {
         "title": "Bot Integrations",
+        "config_conflict": {
+            "stale": "Bot settings changed while you were editing. Refresh and review your edits before saving again.",
+            "overlap": "Some of the same fields changed in your draft and in the saved settings. You can keep the saved values for those fields and review the rest of your edits.",
+            "refresh": "Refresh Bot settings",
+            "keep_saved": "Keep saved values for overlapping edits"
+        },
         "status": {
             "enabled": "Enabled",
             "disabled": "Disabled",

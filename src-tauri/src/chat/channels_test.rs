@@ -32,6 +32,8 @@ use teloxide::types::ChatId;
 use tokio::sync::{Notify, RwLock};
 use warp::Filter;
 
+mod external_reply_commit;
+
 type FixtureStream<T> = Pin<Box<dyn Stream<Item = Result<T, String>> + Send>>;
 
 struct CountToolExecutions(Arc<AtomicUsize>, bool);
@@ -99,15 +101,26 @@ pub(super) struct ControlledProvider {
     pub(super) prompts: Mutex<Vec<Value>>,
     entered_pending: Notify,
     pub(super) finish_pending: Notify,
+    fail_memory: bool,
+    memory_prompts: Mutex<Vec<Value>>,
+    memory_started: Notify,
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for ControlledProvider {
     async fn chat(
         &self,
-        _: Vec<ChatCompletionRequestMessage>,
+        messages: Vec<ChatCompletionRequestMessage>,
         _: Option<LlmParams>,
     ) -> Result<String, String> {
+        if self.fail_memory {
+            let prompt = serde_json::to_value(messages).unwrap();
+            if prompt.to_string().contains("Conversation to analyze:") {
+                self.memory_prompts.lock().unwrap().push(prompt);
+                self.memory_started.notify_one();
+                return Err("fixture memory extraction unavailable".into());
+            }
+        }
         // Desktop fallback cue analysis has no target in this fixture.
         Ok("{\"cue\":null}".into())
     }
@@ -272,6 +285,7 @@ impl LlmProvider for ControlledProvider {
             "[native-tool-only]",
             "[formatted-replay]",
             "[memory-native]",
+            "[external-commit-fixture]",
         ]
         .iter()
         .any(|label| last_user.contains(label));
@@ -298,6 +312,10 @@ impl LlmProvider for ControlledProvider {
             } else if last_user.contains("[formatted-replay]") {
                 Ok(LlmStreamEvent::Text(
                     "**Review formatted answer**\n\n*Second paragraph*".into(),
+                ))
+            } else if last_user.contains("[external-commit-fixture]") {
+                Ok(LlmStreamEvent::Text(
+                    "**Reply from SQLite fixture**\n\n*Second paragraph* [TRANSLATE: 测试译文]".into(),
                 ))
             } else {
                 Ok(LlmStreamEvent::Text("fixture final response".into()))
@@ -328,6 +346,10 @@ async fn webhook(
 }
 
 async fn webhook_body(app: &tauri::AppHandle, body: Value) -> (u16, Value) {
+    webhook_body_with_services(app.state::<BotChatServices>().inner(), body).await
+}
+
+async fn webhook_body_with_services(services: &BotChatServices, body: Value) -> (u16, Value) {
     let config = WebhookBotConfig {
         bearer_token: Some("fixture-token".into()),
         ..Default::default()
@@ -336,7 +358,7 @@ async fn webhook_body(app: &tauri::AppHandle, body: Value) -> (u16, Value) {
         config,
         Some("Bearer fixture-token".into()),
         body.to_string().into(),
-        app.state::<BotChatServices>().inner(),
+        services,
     )
     .await;
     let status = response.status().as_u16();

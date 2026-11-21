@@ -3,6 +3,7 @@
 use crate::ai::context::{
     acquire_database_operation_read_guard, acquire_database_operation_write_guard, AIOrchestrator,
 };
+use crate::bot::{BotConfig, BotRuntimeService, PreparedBotConfigCommit};
 use crate::characters::activation::CommittedCharacterRuntime;
 use crate::characters::catalog::{
     validate_package_directory as validate_catalog_package_directory, CharacterCatalog,
@@ -39,6 +40,9 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 // pattern: Imperative Shell
 
+const BOT_CONFIG_FILENAME: &str = "bot_config.json";
+const LEGACY_TELEGRAM_CONFIG_FILENAME: &str = "telegram_config.json";
+
 /// All JSON config filenames we back up.
 const CONFIG_FILES: &[&str] = &[
     "llm_config.json",
@@ -47,8 +51,8 @@ const CONFIG_FILES: &[&str] = &[
     "vision_config.json",
     "imagegen_config.json",
     "mcp_servers.json",
-    "bot_config.json",
-    "telegram_config.json",
+    BOT_CONFIG_FILENAME,
+    LEGACY_TELEGRAM_CONFIG_FILENAME,
     "jailbreak_prompt.json",
     "proactive_enabled.json",
     "memory_system_config.json",
@@ -1124,13 +1128,29 @@ pub(crate) fn validate_backup_resource_totals(
 fn replace_configs_atomically(
     app_data: &Path,
     configs: &[(String, String)],
+    bot_commit: Option<PreparedBotConfigCommit>,
 ) -> Result<ConfigReplacementGuard, KokoroError> {
+    let bot_content = bot_commit
+        .as_ref()
+        .and_then(PreparedBotConfigCommit::next)
+        .map(serde_json::to_string_pretty)
+        .transpose()
+        .map_err(|error| KokoroError::Config(format!("Failed to serialize bot config: {error}")))?;
+    let mut plans = Vec::with_capacity(configs.len() + usize::from(bot_content.is_some()));
+    let configs = configs
+        .iter()
+        .map(|(filename, content)| (filename.as_str(), content.as_str()))
+        .chain(
+            bot_content
+                .as_deref()
+                .map(|content| (BOT_CONFIG_FILENAME, content)),
+        );
     ensure_non_redirected_parent_chain(app_data, app_data)?;
     create_non_redirected_directory_chain(app_data)?;
-    for (filename, _) in configs {
+    for (filename, _) in configs.clone() {
         let target = app_data.join(filename);
         if let Ok(metadata) = fs::symlink_metadata(&target) {
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            if is_filesystem_redirect(&metadata) || !metadata.is_file() {
                 return Err(KokoroError::Validation(format!(
                     "config target is not a regular non-symlink file: {filename}"
                 )));
@@ -1138,22 +1158,25 @@ fn replace_configs_atomically(
         }
     }
     let token = Uuid::new_v4();
-    let mut plans: Vec<(PathBuf, PathBuf, PathBuf, bool, bool)> = Vec::with_capacity(configs.len());
     for (filename, content) in configs {
         let target = app_data.join(filename);
         let temporary = app_data.join(format!(".{filename}.{token}.import"));
         let backup = app_data.join(format!(".{filename}.{token}.backup"));
-        let prepared_content = match prepare_backup_config_for_install(app_data, filename, content)
-        {
-            Ok(content) => content,
-            Err(error) => {
-                for (_, staged, _, _, _) in &plans {
-                    let _ = fs::remove_file(staged);
+        let prepared_content = if filename == BOT_CONFIG_FILENAME {
+            // The owner prepared this exact configuration while holding its write lock.
+            std::borrow::Cow::Borrowed(content)
+        } else {
+            match prepare_backup_config_for_install(app_data, filename, content) {
+                Ok(content) => std::borrow::Cow::Owned(content),
+                Err(error) => {
+                    for (_, staged, _, _, _) in &plans {
+                        let _ = fs::remove_file(staged);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
         };
-        if let Err(error) = fs::write(&temporary, prepared_content) {
+        if let Err(error) = fs::write(&temporary, prepared_content.as_bytes()) {
             for (_, staged, _, _, _) in &plans {
                 let _ = fs::remove_file(staged);
             }
@@ -1167,7 +1190,7 @@ fn replace_configs_atomically(
             ensure_non_redirected_parent_chain(app_data, app_data)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             if let Ok(metadata) = fs::symlink_metadata(&*target) {
-                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                if is_filesystem_redirect(&metadata) || !metadata.is_file() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("config target is not a regular file: {}", target.display()),
@@ -1201,12 +1224,14 @@ fn replace_configs_atomically(
     }
     Ok(ConfigReplacementGuard {
         plans,
+        bot_commit,
         is_armed: true,
     })
 }
 
 struct ConfigReplacementGuard {
     plans: Vec<(PathBuf, PathBuf, PathBuf, bool, bool)>,
+    bot_commit: Option<PreparedBotConfigCommit>,
     is_armed: bool,
 }
 
@@ -1225,6 +1250,9 @@ impl ConfigReplacementGuard {
             }
         }
         self.is_armed = false;
+        if let Some(commit) = self.bot_commit.take() {
+            commit.publish();
+        }
     }
 }
 
@@ -1233,6 +1261,7 @@ impl Drop for ConfigReplacementGuard {
         if !self.is_armed {
             return;
         }
+        // The bot commit still owns its write lock while these files are rolled back.
         for (target, temporary, backup, had_original, was_installed) in self.plans.iter().rev() {
             let _ = fs::remove_file(temporary);
             if *was_installed {
@@ -3071,8 +3100,11 @@ async fn open_import_pool_without_orchestrator(app_data: &Path) -> Result<Sqlite
     Ok(orchestrator.db)
 }
 
-async fn resolve_import_pool(app: &AppHandle, app_data: &Path) -> Result<SqlitePool, KokoroError> {
-    if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
+async fn resolve_import_pool(
+    app: Option<&AppHandle>,
+    app_data: &Path,
+) -> Result<SqlitePool, KokoroError> {
+    if let Some(orchestrator) = app.and_then(|app| app.try_state::<AIOrchestrator>()) {
         return Ok(orchestrator.db.clone());
     }
 
@@ -3377,6 +3409,89 @@ fn prepare_backup_config_for_install(
             "failed to serialize imported config {filename}: {error}"
         ))
     })
+}
+
+fn decode_backup_bot_config<T: serde::de::DeserializeOwned>(
+    filename: &str,
+    content: &str,
+) -> Result<T, KokoroError> {
+    let sanitized = sanitize_backup_config(content, filename)?;
+    serde_json::from_str(&sanitized).map_err(|error| {
+        KokoroError::Validation(format!("invalid backup configuration {filename}: {error}"))
+    })
+}
+
+fn restore_bot_config(
+    current: &BotConfig,
+    bot_config: Option<&str>,
+    legacy_telegram: Option<&str>,
+) -> Result<BotConfig, KokoroError> {
+    let mut restored: BotConfig = match bot_config {
+        Some(content) => decode_backup_bot_config(BOT_CONFIG_FILENAME, content)?,
+        None => current.clone(),
+    };
+    // Pre-revision archives could store Telegram settings in a separate file.
+    if let Some(content) = legacy_telegram.filter(|_| {
+        bot_config.is_none()
+            || (restored.revision == 0
+                && !crate::bot::telegram_config_has_user_values(&restored.telegram))
+    }) {
+        restored.telegram = decode_backup_bot_config(LEGACY_TELEGRAM_CONFIG_FILENAME, content)?;
+    }
+
+    // Re-encoding the typed configuration fills in sections omitted by older
+    // archives. Strip those sections' default credentials before restoring the
+    // corresponding secrets from the owner's current snapshot.
+    let mut restored = serde_json::to_value(restored)?;
+    sanitize_backup_json(&mut restored);
+    merge_local_backup_secrets(&mut restored, &serde_json::to_value(current)?);
+    Ok(serde_json::from_value(restored)?)
+}
+
+async fn replace_import_configs(
+    app_data: &Path,
+    runtime: &BotRuntimeService,
+    configs: Vec<(String, String)>,
+    strategy: ConflictStrategy,
+) -> Result<ConfigReplacementGuard, KokoroError> {
+    let skip = strategy == ConflictStrategy::Skip;
+    let mut bot_config = None;
+    let mut legacy_telegram = None;
+    let other_configs: Vec<_> = configs
+        .into_iter()
+        .filter_map(|(filename, content)| match filename.as_str() {
+            BOT_CONFIG_FILENAME => {
+                bot_config = Some(content);
+                None
+            }
+            LEGACY_TELEGRAM_CONFIG_FILENAME => {
+                if !skip || !app_data.join(&filename).exists() {
+                    legacy_telegram = Some(content);
+                }
+                None
+            }
+            _ if skip && app_data.join(&filename).exists() => None,
+            _ => Some((filename, content)),
+        })
+        .collect();
+    let bot_commit = if bot_config.is_some() || legacy_telegram.is_some() {
+        if runtime.config_path() != app_data.join(BOT_CONFIG_FILENAME) {
+            return Err(KokoroError::Config(
+                "Backup and bot runtime configuration paths differ".into(),
+            ));
+        }
+        let commit = runtime
+            .prepare_restored_config(skip, |current| {
+                restore_bot_config(current, bot_config.as_deref(), legacy_telegram.as_deref())
+                    .map(Some)
+            })
+            .await?;
+        // A skipped configuration must not hold the lock across the database import.
+        commit.next().is_some().then_some(commit)
+    } else {
+        None
+    };
+    replace_configs_atomically(app_data, &other_configs, bot_commit)
 }
 
 // ── Commands ─────────────────────────────────────────
@@ -3704,8 +3819,29 @@ pub async fn import_data(
     let _import = admit_backup_operation(&app, "import")?;
     let _database_operation_guard = acquire_database_operation_write_guard().await;
     let app_data = app_data_dir(&app)?;
+    let runtime = app.try_state::<BotRuntimeService>().ok_or_else(|| {
+        KokoroError::Internal("Bot runtime unavailable during backup import".into())
+    })?;
+    import_backup(
+        Some(&app),
+        &app_data,
+        &runtime,
+        Path::new(&file_path),
+        options,
+    )
+    .await
+    .map(Response)
+}
+
+async fn import_backup(
+    app: Option<&AppHandle>,
+    app_data: &Path,
+    runtime: &BotRuntimeService,
+    file_path: &Path,
+    options: ImportOptions,
+) -> Result<ImportResult, KokoroError> {
     let staged_configs = if options.import_configs {
-        stage_backup_configs(Path::new(&file_path))?
+        stage_backup_configs(file_path)?
     } else {
         Vec::new()
     };
@@ -3715,18 +3851,17 @@ pub async fn import_data(
     let tmp_dir = tmp_guard.path();
 
     // Validate every resource before touching live database rows or package paths.
-    let inspection = inspect_backup_archive(Path::new(&file_path))?;
+    let inspection = inspect_backup_archive(file_path)?;
     let resource_staging = tmp_dir.join("character-resources");
     let staged_resources = if should_stage_character_resources(&options, &inspection) {
-        stage_character_resources(Path::new(&file_path), &resource_staging)?
+        stage_character_resources(file_path, &resource_staging)?
     } else {
         StagedCharacterResources::default()
     };
     let mut has_db = false;
 
     {
-        let path = PathBuf::from(&file_path);
-        let file = fs::File::open(&path).map_err(KokoroError::from)?;
+        let file = fs::File::open(file_path).map_err(KokoroError::from)?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| KokoroError::Internal(format!("Invalid ZIP archive: {}", e)))?;
 
@@ -3745,9 +3880,6 @@ pub async fn import_data(
     let extracted_configs: Vec<(String, String)> = staged_configs
         .into_iter()
         .filter(|(filename, _)| should_import_config(filename, options.import_database, has_db))
-        .filter(|(filename, _)| {
-            options.conflict_strategy != ConflictStrategy::Skip || !app_data.join(filename).exists()
-        })
         .collect();
 
     let mut promoted_resources = if has_db
@@ -3803,11 +3935,17 @@ pub async fn import_data(
         skipped_memories: 0,
         debug_log: Vec::new(),
     };
-    let mut config_replacement = replace_configs_atomically(&app_data, &extracted_configs)?;
+    let mut config_replacement = replace_import_configs(
+        app_data,
+        runtime,
+        extracted_configs,
+        options.conflict_strategy,
+    )
+    .await?;
     result.imported_configs = config_replacement.imported_count();
 
     if has_db {
-        let import_pool = resolve_import_pool(&app, &app_data).await?;
+        let import_pool = resolve_import_pool(app, app_data).await?;
         let tmp_db = tmp_dir.join("import.db");
         // 必须用同一个连接：ATTACH DATABASE 是连接级别的操作
         let mut conn = import_pool.acquire().await.map_err(|e| {
@@ -4289,21 +4427,21 @@ pub async fn import_data(
         }
         transaction.commit().await?;
 
-        // Still under the exclusive database gate: no chat worker or view read
-        // can associate the replacement rows with the old process journal.
-        if let Some(runtime) =
-            app.try_state::<std::sync::Arc<crate::chat::runtime::ChatRuntimeState>>()
-        {
-            runtime.invalidate_imported_history();
-        }
-        if let Some(orchestrator) = app.try_state::<crate::ai::context::AIOrchestrator>() {
-            orchestrator.reset_runtime_owners().await;
-        }
-
-        // Database rows now reference the imported files. Do not let a later
-        // connection-level DETACH error remove those committed resources.
+        // The committed rows now reference the imported files. Publish the bot
+        // configuration before any further awaits can interrupt the import.
         promoted_resources.disarm();
         config_replacement.disarm();
+
+        // Still under the exclusive database gate: no chat worker or view read
+        // can associate the replacement rows with the old process journal.
+        if let Some(runtime) = app.and_then(|app| {
+            app.try_state::<std::sync::Arc<crate::chat::runtime::ChatRuntimeState>>()
+        }) {
+            runtime.invalidate_imported_history();
+        }
+        if let Some(orchestrator) = app.and_then(|app| app.try_state::<AIOrchestrator>()) {
+            orchestrator.reset_runtime_owners().await;
+        }
 
         detach_import_database_best_effort(&mut conn).await;
 
@@ -4336,7 +4474,7 @@ pub async fn import_data(
         result.imported_memories, result.imported_conversations, result.imported_configs
     );
 
-    Ok(Response(result))
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -5756,12 +5894,12 @@ mod tests {
         fs::write(&target, r#"{"old":true}"#).unwrap();
         let configs = vec![("llm_config.json".to_string(), r#"{"new":true}"#.to_string())];
 
-        let guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let guard = replace_configs_atomically(temp.path(), &configs, None).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"new":true}"#);
         drop(guard);
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"old":true}"#);
 
-        let mut guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let mut guard = replace_configs_atomically(temp.path(), &configs, None).unwrap();
         guard.disarm();
         drop(guard);
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"new":true}"#);
@@ -5781,12 +5919,279 @@ mod tests {
             r#"{"providers":[{"id":"local","extra":{}}]}"#.to_string(),
         )];
 
-        let mut guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let mut guard = replace_configs_atomically(temp.path(), &configs, None).unwrap();
         let restored = fs::read_to_string(&target).unwrap();
         guard.disarm();
 
         assert!(restored.contains("keep-this-secret"));
         assert!(restored.contains("keep-this-token"));
+    }
+
+    async fn bot_import_fixture(app_data: &Path) -> BotRuntimeService {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+
+        let mut config = BotConfig {
+            revision: 40,
+            ..Default::default()
+        };
+        config.telegram.allowed_chat_ids = vec![123, -456];
+        config.telegram.bot_token = Some("local-telegram-secret".into());
+        config.qq.allowed_user_openids = vec!["local-qq-user".into()];
+        config.qq.app_secret = Some("local-qq-secret".into());
+        let lifecycle = AppLifecycle::new();
+        let runtime = BotRuntimeService::with_config_path(
+            config.clone(),
+            lifecycle.scope(TaskStage::Work, "backup test"),
+            lifecycle.scope(TaskStage::Service, "backup test"),
+            app_data.join(BOT_CONFIG_FILENAME),
+        );
+        runtime.save_config(config).await.unwrap();
+        runtime
+    }
+
+    fn write_bot_backup(path: &Path, filename: &str, content: &str, database: Option<&Path>) {
+        let mut archive = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        let options = SimpleFileOptions::default();
+        archive
+            .start_file(format!("configs/{filename}"), options)
+            .unwrap();
+        archive.write_all(content.as_bytes()).unwrap();
+        if let Some(db) = database {
+            archive.start_file("kokoro.db", options).unwrap();
+            archive.write_all(&fs::read(db).unwrap()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    async fn seed_backup_conversation(app_data: &Path, conversation_id: &str) -> SqlitePool {
+        fs::create_dir_all(app_data).unwrap();
+        let pool = open_import_pool_without_orchestrator(app_data)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('backup-owner', 'Owner')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, created_at, updated_at) \
+             VALUES (?, 'backup-owner', '1', '1')",
+        )
+        .bind(conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    fn bot_import_options(
+        import_database: bool,
+        conflict_strategy: ConflictStrategy,
+    ) -> ImportOptions {
+        ImportOptions {
+            import_database,
+            import_configs: true,
+            conflict_strategy,
+            character_merges: Vec::new(),
+            ignored_characters: Vec::new(),
+        }
+    }
+
+    fn persisted_bot_config(runtime: &BotRuntimeService) -> BotConfig {
+        serde_json::from_slice(&fs::read(runtime.config_path()).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn bot_backup_restore_publishes_disk_revision_in_config_and_database_imports() {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+
+        for import_database in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let app_data = tmp.path().join("live");
+            let runtime = bot_import_fixture(&app_data).await;
+            let previous = runtime.current_config().await;
+            let source_data = tmp.path().join("source");
+            let source_db = db_path(&source_data);
+            if import_database {
+                seed_backup_conversation(&source_data, "from-backup")
+                    .await
+                    .close()
+                    .await;
+            }
+            let archive = tmp.path().join("restore.kokoro");
+            write_bot_backup(
+                &archive,
+                BOT_CONFIG_FILENAME,
+                r#"{
+                    "revision": 1000,
+                    "selected_platform": "qq",
+                    "telegram": {"allowed_chat_ids": [-456], "bot_token": "archive-token"},
+                    "qq": {"allowed_user_openids": ["imported-qq-user"], "app_secret": 42}
+                }"#,
+                import_database.then_some(source_db.as_path()),
+            );
+            let result = import_backup(
+                None,
+                &app_data,
+                &runtime,
+                &archive,
+                bot_import_options(import_database, ConflictStrategy::Overwrite),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.imported_configs, 1);
+            assert_eq!(result.imported_conversations, i64::from(import_database));
+            assert_eq!(db_path(&app_data).exists(), import_database);
+
+            let restored = runtime.current_config().await;
+            assert_eq!(restored, persisted_bot_config(&runtime));
+            assert_eq!(restored.revision, previous.revision + 1);
+            assert_eq!(restored.selected_platform, "qq");
+            assert_eq!(restored.telegram.bot_token, previous.telegram.bot_token);
+            assert_eq!(restored.qq.app_secret, previous.qq.app_secret);
+            assert_eq!(restored.telegram.allowed_chat_ids, [-456]);
+            assert_eq!(restored.qq.allowed_user_openids, ["imported-qq-user"]);
+            assert!(matches!(
+                runtime.save_config(previous).await,
+                Err(KokoroError::BotConfigConflict(_))
+            ));
+            let lifecycle = AppLifecycle::new();
+            let telegram = crate::telegram::TelegramService::new(
+                &runtime,
+                lifecycle.scope(TaskStage::Work, "backup test"),
+                lifecycle.scope(TaskStage::Service, "backup test"),
+            );
+            telegram
+                .assert_dispatched_text_chats(&[123, -456], &[-456])
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_backup_restore_rolls_back_disk_and_runtime_when_sqlite_import_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_data = tmp.path().join("live");
+        let runtime = bot_import_fixture(&app_data).await;
+        let previous = runtime.current_config().await;
+        let local = seed_backup_conversation(&app_data, "keep-local").await;
+        sqlx::query(
+            "CREATE TRIGGER fail_backup_conversation BEFORE INSERT ON conversations \
+             BEGIN SELECT RAISE(ABORT, 'blocked backup conversation'); END",
+        )
+        .execute(&local)
+        .await
+        .unwrap();
+        local.close().await;
+
+        let source_data = tmp.path().join("source");
+        seed_backup_conversation(&source_data, "from-backup")
+            .await
+            .close()
+            .await;
+        let archive = tmp.path().join("restore.kokoro");
+        write_bot_backup(
+            &archive,
+            BOT_CONFIG_FILENAME,
+            r#"{"telegram": {"allowed_chat_ids": [999]}}"#,
+            Some(&db_path(&source_data)),
+        );
+        let error = import_backup(
+            None,
+            &app_data,
+            &runtime,
+            &archive,
+            bot_import_options(true, ConflictStrategy::Overwrite),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, KokoroError::Database(message) if message.contains("blocked backup conversation"))
+        );
+        assert_eq!(runtime.current_config().await, previous);
+        assert_eq!(persisted_bot_config(&runtime), previous);
+        let pool = open_readonly_pool(&db_path(&app_data)).await.unwrap();
+        let conversations: Vec<String> = sqlx::query_scalar("SELECT id FROM conversations")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(conversations, ["keep-local"]);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_telegram_backup_respects_skip_and_restores_only_telegram_on_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_data = tmp.path().join("live");
+        let runtime = bot_import_fixture(&app_data).await;
+        let previous = runtime.current_config().await;
+        let archive = tmp.path().join("legacy.kokoro");
+        write_bot_backup(
+            &archive,
+            LEGACY_TELEGRAM_CONFIG_FILENAME,
+            r#"{"allowed_chat_ids": [], "bot_token": "archive-token"}"#,
+            None,
+        );
+        let skipped = import_backup(
+            None,
+            &app_data,
+            &runtime,
+            &archive,
+            bot_import_options(false, ConflictStrategy::Skip),
+        )
+        .await
+        .unwrap();
+        assert_eq!(skipped.imported_configs, 0);
+        assert_eq!(persisted_bot_config(&runtime), previous);
+        assert_eq!(runtime.current_config().await, previous);
+
+        let overwritten = import_backup(
+            None,
+            &app_data,
+            &runtime,
+            &archive,
+            bot_import_options(false, ConflictStrategy::Overwrite),
+        )
+        .await
+        .unwrap();
+        assert_eq!(overwritten.imported_configs, 1);
+        let mut expected = previous;
+        expected.revision += 1;
+        expected.telegram.allowed_chat_ids.clear();
+        assert_eq!(persisted_bot_config(&runtime), expected);
+        assert_eq!(runtime.current_config().await, expected);
+        assert!(!app_data.join(LEGACY_TELEGRAM_CONFIG_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    async fn rolling_back_bot_backup_releases_queued_writer_only_after_file_restoration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = bot_import_fixture(tmp.path()).await;
+        let previous = runtime.current_config().await;
+        let replacement = replace_import_configs(
+            tmp.path(),
+            &runtime,
+            vec![(
+                BOT_CONFIG_FILENAME.into(),
+                r#"{"telegram": {"allowed_chat_ids": [999]}}"#.into(),
+            )],
+            ConflictStrategy::Overwrite,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted_bot_config(&runtime).telegram.allowed_chat_ids,
+            [999]
+        );
+
+        let mut updated = previous.clone();
+        updated.telegram.allowed_chat_ids = vec![-456];
+        let mut save = std::pin::pin!(runtime.save_config(updated.clone()));
+        assert!(futures::poll!(save.as_mut()).is_pending());
+        drop(replacement);
+        assert_eq!(persisted_bot_config(&runtime), previous);
+        updated.revision += 1;
+        assert_eq!(save.await.unwrap(), updated);
+        assert_eq!(persisted_bot_config(&runtime), updated);
+        assert_eq!(runtime.current_config().await, updated);
     }
 
     #[test]

@@ -31,6 +31,7 @@ const server = http.createServer(async (request, response) => {
     finishPetRestore = undefined;
     response.writeHead(204); response.end(); return;
   }
+  request.setEncoding("utf8");
   let raw = ""; for await (const chunk of request) raw += chunk;
   let body; try { body = JSON.parse(raw); } catch { response.writeHead(400); response.end("invalid JSON"); return; }
   if (request.url === "/v1/audio/speech") {
@@ -56,6 +57,7 @@ const server = http.createServer(async (request, response) => {
   const match = content?.match(/\[case:([^\]]+)\]/);
   const name = match?.[1] ?? "system";
   const call = { index: calls.length + 1, name, streaming: body.stream === true, toolResult: body.messages?.some(message => message.role === "tool"), tools: body.tools?.map(tool => tool.function?.name) ?? [], startedAt: new Date().toISOString() };
+  if (["edit-long-history", "edit-utf8-limit", "edit-shortened-legacy", "edit-shortened-restart"].includes(name) && call.streaming) call.messages = body.messages;
   calls.push(call);
   const save = () => fs.writeFileSync(path.join(directory, "controlled-model-calls.json"), JSON.stringify(calls, null, 2));
   save();

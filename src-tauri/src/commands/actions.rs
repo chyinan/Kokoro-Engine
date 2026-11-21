@@ -492,6 +492,7 @@ fn direct_denial_error(decision: &PermissionDecision) -> Option<KokoroError> {
 fn hook_error_message(error: &KokoroError) -> String {
     match error {
         KokoroError::Config(message)
+        | KokoroError::BotConfigConflict(message)
         | KokoroError::Database(message)
         | KokoroError::Llm(message)
         | KokoroError::Tts(message)

@@ -3,17 +3,6 @@ import type { ChatPanelMessage } from "./turn-state";
 import type { EditConversationMessageRequest, EditConversationMessageResponse } from "@/lib/kokoro-bridge";
 
 describe("chat message editing persistence and optimistic synchronization", () => {
-    it("skips editing when new text is empty or whitespace only", () => {
-        const onEdit = vi.fn();
-        const editingText = "   \n  \t  ";
-
-        if (editingText.trim()) {
-            onEdit(editingText.trim());
-        }
-
-        expect(onEdit).not.toHaveBeenCalled();
-    });
-
     it("optimistically updates message and calls editConversationMessage by message_id", async () => {
         let messages: ChatPanelMessage[] = [
             { id: 42, role: "user", text: "Original question" },
@@ -304,48 +293,6 @@ describe("chat message editing persistence and optimistic synchronization", () =
         expect(editCalls).toHaveLength(1);
         expect(editCalls[0].message_id).toBe(105);
         expect(editCalls[0].new_content).toBe("Thanks a lot! How about tomorrow?");
-    });
-
-    it("updates message text with truncated content when backend enforces max_message_chars", async () => {
-        let messages: ChatPanelMessage[] = [
-            { id: 201, role: "user", text: "Short text" },
-        ];
-
-        const longInput = "A".repeat(3000);
-        const expectedTruncated = "A".repeat(2000) + "…[truncated]";
-
-        const editConversationMessage = vi.fn(async (req: EditConversationMessageRequest): Promise<EditConversationMessageResponse> => {
-            return {
-                message_id: req.message_id!,
-                updated_content: expectedTruncated,
-            };
-        });
-
-        // 1. Optimistic update
-        messages = [{ ...messages[0], text: longInput }];
-        expect(messages[0].text.length).toBe(3000);
-
-        // 2. Invoke edit
-        const res = await editConversationMessage({
-            message_id: 201,
-            new_content: longInput,
-        });
-
-        // 3. Backfill truncated content from backend
-        if (res?.message_id) {
-            const idx = messages.findIndex(m => m.id === res.message_id);
-            if (idx !== -1) {
-                messages = [...messages];
-                messages[idx] = {
-                    ...messages[idx],
-                    text: res.updated_content ?? messages[idx].text,
-                };
-            }
-        }
-
-        // Verify messages array updated with truncated content
-        expect(messages[0].text).toBe(expectedTruncated);
-        expect(messages[0].text.endsWith("…[truncated]")).toBe(true);
     });
 });
 

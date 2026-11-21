@@ -16,8 +16,10 @@ import {
     parseLegacyChatError,
     getEngineInfo,
     getKokoroErrorMessage,
+    getTelegramConfig,
     onChatError,
     playCue,
+    saveTelegramConfig,
     streamChat,
 } from "./kokoro-bridge";
 
@@ -166,6 +168,18 @@ describe("chat-error listener normalization", () => {
 });
 
 describe("bridge invoke error normalization", () => {
+    it("sends the Telegram read revision with the edit and preserves a typed conflict", async () => {
+        const config = { enabled: true, allowed_chat_ids: [-1001234567890], send_voice_reply: true };
+        const conflict = { code: "BotConfigConflict", message: "Settings changed" };
+        mockedInvoke.mockResolvedValueOnce({ revision: 12, config }).mockRejectedValueOnce(conflict);
+
+        const snapshot = await getTelegramConfig();
+        const edited = { ...snapshot.config, send_voice_reply: false };
+        await expect(saveTelegramConfig(snapshot.revision, edited)).rejects.toMatchObject(conflict);
+        expect(mockedInvoke).toHaveBeenCalledTimes(2);
+        expect(mockedInvoke).toHaveBeenNthCalledWith(2, "save_telegram_config", { expectedRevision: 12, config: edited }, undefined);
+    });
+
     it("keeps the business error variant sent by Rust", async () => {
         const businessError = { code: "Validation", message: "Cue cannot be empty" };
         mockedInvoke.mockRejectedValueOnce(businessError);

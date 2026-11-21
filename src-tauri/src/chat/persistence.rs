@@ -16,6 +16,27 @@ pub(crate) fn legacy_external_identity(platform: &str, peer: &str, message: &str
     )
 }
 
+// Resolve each identity with its own index. SQLite can otherwise pick a history scan
+// after ANALYZE when an identity is absent or repeated across most rows. UNION removes
+// duplicate row IDs before checking ownership in message order.
+const EXTERNAL_REQUEST_OWNER_SQL: &str = "
+    WITH candidate_ids AS (
+        SELECT id FROM conversation_messages INDEXED BY idx_chat_user_save_id
+        WHERE role = 'user' AND metadata IS NOT NULL
+          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?
+        UNION
+        SELECT id FROM conversation_messages INDEXED BY idx_chat_user_request_id
+        WHERE role = 'user' AND metadata IS NOT NULL
+          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.source') END = ?
+          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.client_request_id') END = ?
+    )
+    SELECT c.character_id,
+           CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END
+    FROM candidate_ids
+    CROSS JOIN conversation_messages m ON m.id = candidate_ids.id
+    CROSS JOIN conversations c ON c.id = m.conversation_id
+    ORDER BY m.id";
+
 /// An accepted platform request cannot be executed again under another owner,
 /// including after a restart or a change to the adapter's configured character.
 /// Old PR2 rows lack the save identity required for safe recovery: fail closed.
@@ -28,13 +49,13 @@ pub(crate) async fn validate_external_request_owner(
 ) -> Result<(), KokoroError> {
     let expected_save_id = format!("{request}:user");
     for id in std::iter::once(request).chain(previous_ids.iter().map(String::as_str)) {
-        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT c.character_id, CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata,'$.chat_save_id') END
-             FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
-             WHERE m.role='user' AND CASE WHEN json_valid(m.metadata) THEN
-               json_extract(m.metadata,'$.chat_save_id')=? OR
-               (json_extract(m.metadata,'$.source')=? AND json_extract(m.metadata,'$.client_request_id')=?) END",
-        ).bind(format!("{id}:user")).bind(source).bind(id).fetch_all(db).await.map_err(KokoroError::chat_persistence)?;
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(EXTERNAL_REQUEST_OWNER_SQL)
+            .bind(format!("{id}:user"))
+            .bind(source)
+            .bind(id)
+            .fetch_all(db)
+            .await
+            .map_err(KokoroError::chat_persistence)?;
         for (owner, save_id) in rows {
             if owner != character {
                 return Err(KokoroError::Chat("chat_request_conflict: request identity was already accepted by another character".into()));
@@ -284,16 +305,18 @@ async fn write_message(
 ) -> Result<SavedMessage, sqlx::Error> {
     let metadata = message.stored_metadata();
     if let Some(save_id) = &message.save_id {
-        let existing: Option<(i64, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, content, metadata FROM conversation_messages
-             WHERE conversation_id = ? AND role = ?
-             AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?",
-        )
-        .bind(conversation)
-        .bind(&message.role)
-        .bind(save_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let lookup = if message.role == "user" {
+            sqlx::query_as(SAVED_USER_MESSAGE_IDENTITY_SQL)
+                .bind(conversation)
+                .bind(save_id)
+        } else {
+            sqlx::query_as(SAVED_NON_USER_MESSAGE_IDENTITY_SQL)
+                .bind(conversation)
+                .bind(&message.role)
+                .bind(save_id)
+        };
+        let existing: Option<(i64, String, Option<String>)> =
+            lookup.fetch_optional(&mut **tx).await?;
         if let Some((id, content, previous_metadata)) = existing {
             if content != message.content || previous_metadata != metadata {
                 return Err(sqlx::Error::Protocol(
@@ -473,6 +496,21 @@ pub(crate) struct ExternalReplyExecution {
     pub memory_language: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExternalReplyCommit {
+    pub assistant_message_id: i64,
+    pub memory_work: Option<MemoryWork>,
+}
+
+pub(crate) struct PersistedExternalReply {
+    pub commit: ExternalReplyCommit,
+    pub text: String,
+    pub translation: Option<String>,
+    pub media: ExternalReplyMedia,
+    pub newly_committed: bool,
+    pub execution: Option<std::sync::Arc<ExternalReplyExecution>>,
+}
+
 #[derive(Clone)]
 struct PendingExternalReply {
     execution: Option<std::sync::Arc<ExternalReplyExecution>>,
@@ -580,17 +618,74 @@ impl ExternalReplies {
     }
 }
 
+// Match the partial index predicate in migration 0015 for these save-ID lookups.
+const SAVED_EXTERNAL_CONVERSATION_SQL: &str = "
+    SELECT m.conversation_id FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.character_id = ? AND m.role = 'user' AND m.metadata IS NOT NULL
+      AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?";
+
+const SAVED_EXTERNAL_INPUT_SQL: &str = "
+    SELECT m.content, m.metadata FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.character_id = ? AND m.role = 'user' AND m.metadata IS NOT NULL
+      AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?";
+
+const SAVED_EXTERNAL_MESSAGE_SQL: &str = "
+    SELECT m.conversation_id, m.content FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.character_id = ? AND m.role = 'user' AND m.metadata IS NOT NULL
+      AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?";
+
+const SAVED_EXTERNAL_METADATA_SQL: &str = "
+    SELECT metadata FROM conversation_messages INDEXED BY idx_chat_user_save_id
+    WHERE conversation_id = ? AND role = 'user' AND metadata IS NOT NULL
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?";
+
+const SAVED_USER_MESSAGE_IDENTITY_SQL: &str = "
+    SELECT id, content, metadata FROM conversation_messages INDEXED BY idx_chat_user_save_id
+    WHERE conversation_id = ? AND role = 'user' AND metadata IS NOT NULL
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?";
+
+// The role predicate matches migration 0016 for every non-user save-ID lookup.
+const SAVED_NON_USER_MESSAGE_IDENTITY_SQL: &str = "
+    SELECT id, content, metadata FROM conversation_messages INDEXED BY idx_chat_non_user_save_id
+    WHERE conversation_id = ? AND role = ? AND role <> 'user' AND metadata IS NOT NULL
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?";
+
+pub(crate) async fn saved_external_conversation_id(
+    db: &SqlitePool,
+    character_id: &str,
+    request_id: &str,
+) -> Result<Option<String>, KokoroError> {
+    sqlx::query_scalar(SAVED_EXTERNAL_CONVERSATION_SQL)
+        .bind(character_id)
+        .bind(format!("{request_id}:user"))
+        .fetch_optional(db)
+        .await
+        .map_err(KokoroError::chat_persistence)
+}
+
+pub(crate) async fn saved_external_input(
+    db: &SqlitePool,
+    character_id: &str,
+    request_id: &str,
+) -> Result<Option<(String, Option<String>)>, KokoroError> {
+    sqlx::query_as(SAVED_EXTERNAL_INPUT_SQL)
+        .bind(character_id)
+        .bind(format!("{request_id}:user"))
+        .fetch_optional(db)
+        .await
+        .map_err(KokoroError::chat_persistence)
+}
+
 /// Bind an external turn during its first write, then reuse that target for
 /// context reads and the assistant write even when the desktop selection moves.
 pub(crate) struct ExternalTurn {
     scope: std::sync::Arc<super::ownership::MemoryWriteScope>,
     pub target: ConversationTarget,
     pub history: Vec<crate::ai::context::Message>,
-    pub previous_reply: Option<(String, Option<String>)>,
-    pub previous_execution: Option<std::sync::Arc<ExternalReplyExecution>>,
-    pub previous_reply_newly_committed: bool,
-    pub previous_reply_media: ExternalReplyMedia,
-    pub previous_memory_work: Option<MemoryWork>,
+    pub previous_reply: Option<PersistedExternalReply>,
     pub(crate) user_message_id: i64,
     memory_ticket: Option<MemoryTicket>,
     pub(crate) request_id: String,
@@ -605,12 +700,7 @@ impl ExternalTurn {
         character_id: &str,
         request_id: &str,
     ) -> Result<Option<(String, String)>, KokoroError> {
-        sqlx::query_as(
-            "SELECT m.conversation_id, m.content FROM conversation_messages m
-             JOIN conversations c ON c.id = m.conversation_id
-             WHERE c.character_id = ? AND m.role = 'user'
-               AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?",
-        )
+        sqlx::query_as(SAVED_EXTERNAL_MESSAGE_SQL)
         .bind(character_id)
         .bind(format!("{request_id}:user"))
         .fetch_optional(&state.db)
@@ -718,9 +808,13 @@ impl ExternalTurn {
         });
         scope.ensure_owner_current()?;
         let save_id = format!("{request_id}:user");
-        let previous_metadata: Option<Option<String>> = sqlx::query_scalar(
-            "SELECT metadata FROM conversation_messages WHERE conversation_id=? AND role='user' AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.chat_save_id') END=?"
-        ).bind(&target.conversation_id).bind(&save_id).fetch_optional(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        let previous_metadata: Option<Option<String>> =
+            sqlx::query_scalar(SAVED_EXTERNAL_METADATA_SQL)
+                .bind(&target.conversation_id)
+                .bind(&save_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(KokoroError::chat_persistence)?;
         let tool_effects_pending = previous_metadata
             .as_ref()
             .and_then(|metadata| metadata.as_deref())
@@ -742,40 +836,42 @@ impl ExternalTurn {
         } else {
             None
         };
-        let mut previous_reply_media = ExternalReplyMedia::default();
-        let mut previous_memory_work = None;
-        let mut previous_reply_newly_committed = false;
-        let mut previous_execution = None;
         let previous_reply = if saved[0].changed {
             None
         } else {
-            let existing: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT content, metadata FROM conversation_messages
-                 WHERE conversation_id = ? AND role = 'assistant'
-                   AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?",
-            )
-            .bind(&target.conversation_id)
-            .bind(format!("{request_id}:assistant"))
-            .fetch_optional(&state.db)
-            .await
-            .map_err(KokoroError::chat_persistence)?;
-            if let Some((text, metadata)) = existing {
+            let existing: Option<(i64, String, Option<String>)> =
+                sqlx::query_as(SAVED_NON_USER_MESSAGE_IDENTITY_SQL)
+                    .bind(&target.conversation_id)
+                    .bind("assistant")
+                    .bind(format!("{request_id}:assistant"))
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(KokoroError::chat_persistence)?;
+            if let Some((assistant_message_id, text, metadata)) = existing {
                 let metadata = metadata
                     .as_deref()
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-                if let Some(media) = metadata
+                let media = metadata
                     .as_ref()
                     .and_then(|value| value.get("external_reply_media"))
-                {
-                    previous_reply_media = serde_json::from_value(media.clone())
-                        .map_err(KokoroError::chat_persistence)?;
-                }
-                Some((
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(KokoroError::chat_persistence)?
+                    .unwrap_or_default();
+                Some(PersistedExternalReply {
+                    commit: ExternalReplyCommit {
+                        assistant_message_id,
+                        memory_work: None,
+                    },
                     text,
-                    metadata
+                    translation: metadata
                         .as_ref()
                         .and_then(|value| value["translation"].as_str().map(str::to_owned)),
-                ))
+                    media,
+                    newly_committed: false,
+                    execution: None,
+                })
             } else if let Some(pending) = state
                 .external_replies
                 .get(&target.conversation_id, &request_id)
@@ -801,11 +897,14 @@ impl ExternalTurn {
                         .external_replies
                         .forget(&target.conversation_id, &request_id);
                 }
-                previous_memory_work = result?;
-                previous_reply_newly_committed = true;
-                previous_reply_media = pending.media;
-                previous_execution = pending.execution;
-                Some((pending.text, pending.translation))
+                Some(PersistedExternalReply {
+                    commit: result?,
+                    text: pending.text,
+                    translation: pending.translation,
+                    media: pending.media,
+                    newly_committed: true,
+                    execution: pending.execution,
+                })
             } else {
                 if tool_effects_pending {
                     return Err(KokoroError::Chat(
@@ -830,10 +929,6 @@ impl ExternalTurn {
             },
             history,
             previous_reply,
-            previous_execution,
-            previous_reply_newly_committed,
-            previous_reply_media,
-            previous_memory_work,
             user_message_id: saved[0].id,
             memory_ticket,
             request_id,
@@ -925,6 +1020,7 @@ impl ExternalTurn {
     ) -> Result<Option<MemoryWork>, KokoroError> {
         self.save_reply_batch(state, text, translation, media, Vec::new(), None)
             .await
+            .map(|commit| commit.memory_work)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -936,7 +1032,7 @@ impl ExternalTurn {
         media: ExternalReplyMedia,
         messages: Vec<MessageWrite>,
         execution: Option<std::sync::Arc<ExternalReplyExecution>>,
-    ) -> Result<Option<MemoryWork>, KokoroError> {
+    ) -> Result<ExternalReplyCommit, KokoroError> {
         let _selection = state.selection.conversation_switch_lock.lock().await;
         self.scope.ensure_owner_current()?;
         let revision = current_revision(&state.db, &self.target)
@@ -991,7 +1087,7 @@ impl ExternalTurn {
         memory_ticket: Option<&MemoryTicket>,
         expected_revision: Option<i64>,
         messages: &[MessageWrite],
-    ) -> Result<Option<MemoryWork>, KokoroError> {
+    ) -> Result<ExternalReplyCommit, KokoroError> {
         let input_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE id=? AND conversation_id=? AND role='user' AND json_extract(metadata,'$.chat_save_id')=?)")
             .bind(user_message_id).bind(&target.conversation_id).bind(format!("{request_id}:user"))
             .fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
@@ -1044,12 +1140,16 @@ impl ExternalTurn {
             .save_external_messages_locked(target, &batch, false, expected_revision)
             .await?;
         let assistant = saved.last().expect("assistant write");
-        Ok(if assistant.changed {
+        let memory_work = if assistant.changed {
             state
                 .external_memory
                 .complete(target, memory_ticket, assistant.id)
         } else {
             None
+        };
+        Ok(ExternalReplyCommit {
+            assistant_message_id: assistant.id,
+            memory_work,
         })
     }
 }
@@ -1063,6 +1163,12 @@ pub(crate) fn external_identity(platform: &str, parts: &[&str]) -> String {
     }
     format!("{platform}-{:x}", digest.finalize())
 }
+
+#[cfg(test)]
+mod external_request_lookup_tests;
+
+#[cfg(test)]
+mod external_request_owner_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1103,6 +1209,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_id_collisions_are_scoped_to_conversation_and_role() {
+        let state = state().await;
+        let local = target("write-scope", true);
+        let foreign = target("other-write-scope", true);
+        let write = |role, text, metadata| {
+            MessageWrite::new(role, text, metadata).with_save_id("shared-id".into())
+        };
+        let originals = [
+            write("user", "input", None),
+            write("assistant", "reply", None),
+            write("tool", "result", None),
+        ];
+        let saved = save(&state.db, &local, &originals).await.unwrap();
+        let other = save(
+            &state.db,
+            &foreign,
+            &[write("tool", "foreign result", None)],
+        )
+        .await
+        .unwrap();
+        assert_ne!(saved[2].id, other[0].id);
+        assert!(saved.iter().all(|row| row.changed));
+
+        let replayed = save(&state.db, &local, &originals).await.unwrap();
+        for (original, replay) in saved.iter().zip(replayed) {
+            assert_eq!(original.id, replay.id);
+            assert!(!replay.changed);
+        }
+        for collision in [
+            write("user", "different input", None),
+            write("tool", "result", Some(r#"{"changed":true}"#.into())),
+        ] {
+            let result = save_once(&state.db, &local, &[collision], None).await;
+            assert!(
+                matches!(result, Err(SaveError::Database(sqlx::Error::Protocol(error)))
+                if error == "Chat save identity was reused with different content")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_replay_uses_saved_metadata_and_reply_in_its_own_conversation() {
+        let state = state().await;
+        let local = target("replay-scope", true);
+        let foreign = target("other-replay-scope", true);
+        let metadata = serde_json::json!({
+            "source": "webhook",
+            "client_request_id": "historical-alias",
+            "external_input_text": "original caption",
+        });
+        let turn = ExternalTurn::begin_with_input_metadata(
+            &state,
+            local.clone(),
+            "current".into(),
+            "original input",
+            Some(metadata),
+            None,
+        )
+        .await
+        .unwrap();
+        validate_external_request_owner(
+            &state.db,
+            "default",
+            "webhook",
+            "current",
+            &["historical-alias".into()],
+        )
+        .await
+        .unwrap();
+        save(
+            &state.db,
+            &foreign,
+            &[MessageWrite::new("assistant", "other conversation", None)
+                .with_save_id("current:assistant".into())],
+        )
+        .await
+        .unwrap();
+        save(
+            &state.db,
+            &local,
+            &[
+                MessageWrite::new("tool", "other role", None)
+                    .with_save_id("current:assistant".into()),
+                MessageWrite::new("assistant", "invalid metadata", Some("{".into())),
+                MessageWrite::new("assistant", "empty metadata", Some(String::new())),
+            ],
+        )
+        .await
+        .unwrap();
+        let replay = || {
+            ExternalTurn::begin_with_input_metadata(
+                &state,
+                turn.target.clone(),
+                "current".into(),
+                "original input",
+                Some(serde_json::json!({"external_input_text": "new caption"})),
+                None,
+            )
+        };
+        assert!(matches!(replay().await, Err(KokoroError::Chat(error))
+            if error.contains("has no saved reply")));
+        let commit = turn
+            .save_reply_batch(
+                &state,
+                "original reply",
+                Some("translation"),
+                ExternalReplyMedia::default(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let replayed = replay().await.unwrap();
+        assert_eq!(replayed.user_message_id, turn.user_message_id);
+        assert!(replayed.history.is_empty());
+        let reply = replayed.previous_reply.unwrap();
+        assert_eq!(
+            reply.commit.assistant_message_id,
+            commit.assistant_message_id
+        );
+        assert_eq!(reply.text, "original reply");
+        assert_eq!(reply.translation.as_deref(), Some("translation"));
+        assert!(!reply.newly_committed);
+    }
+
+    #[tokio::test]
     async fn external_replay_reports_uncertain_tool_effects_until_reply_is_saved() {
         let state = state().await;
         let turn = external_turn(&state, "tool-effects", "request").await;
@@ -1123,7 +1355,9 @@ mod tests {
 
         turn.save_reply(&state, "saved reply", None).await.unwrap();
         let replay = external_turn(&state, "tool-effects", "request").await;
-        assert_eq!(replay.previous_reply, Some(("saved reply".into(), None)));
+        let reply = replay.previous_reply.unwrap();
+        assert_eq!(reply.text, "saved reply");
+        assert_eq!(reply.translation, None);
     }
 
     async fn desktop_turn(state: &AIOrchestrator, label: &str) -> u64 {
@@ -1342,8 +1576,10 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    assert_eq!(recovered.previous_reply, Some((answer.clone(), None)));
-                    recovered.previous_memory_work.unwrap()
+                    let reply = recovered.previous_reply.unwrap();
+                    assert_eq!(reply.text, answer);
+                    assert_eq!(reply.translation, None);
+                    reply.commit.memory_work.unwrap()
                 } else {
                     turn.save_reply(&state, &answer, None)
                         .await
@@ -1369,7 +1605,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert!(duplicate.previous_memory_work.is_none());
+                assert!(duplicate
+                    .previous_reply
+                    .unwrap()
+                    .commit
+                    .memory_work
+                    .is_none());
                 assert_eq!(state.get_memory_trigger_count().await, desktop_count);
 
                 if desktop_count < 20 {
@@ -1573,8 +1814,7 @@ mod tests {
                     .is_none());
                 let replay_fork = state.clone();
                 let replay = external_turn(&replay_fork, conversation, &request).await;
-                assert!(replay.previous_reply.is_some());
-                assert!(replay.previous_memory_work.is_none());
+                assert!(replay.previous_reply.unwrap().commit.memory_work.is_none());
             }
         }
         assert!(extraction_counts.values().all(|count| *count == 4));
@@ -1641,7 +1881,13 @@ mod tests {
             .unwrap();
         let retry_fork = state.clone();
         let replay = external_turn(&retry_fork, "faults", "fifth").await;
-        let work = replay.previous_memory_work.unwrap();
+        let work = replay
+            .previous_reply
+            .as_ref()
+            .unwrap()
+            .commit
+            .memory_work
+            .unwrap();
         assert_eq!(work.count, 5);
         assert!(work.extract());
         assert_eq!(
@@ -1655,7 +1901,10 @@ mod tests {
         );
         assert!(external_turn(&retry_fork, "faults", "fifth")
             .await
-            .previous_memory_work
+            .previous_reply
+            .unwrap()
+            .commit
+            .memory_work
             .is_none());
         let sixth = external_turn(&retry_fork, "faults", "sixth").await;
         assert_eq!(
@@ -1737,7 +1986,12 @@ mod tests {
             2
         );
         let disabled_replay = external_turn(&fresh, "switch", "disabled").await;
-        assert!(disabled_replay.previous_memory_work.is_none());
+        assert!(disabled_replay
+            .previous_reply
+            .unwrap()
+            .commit
+            .memory_work
+            .is_none());
     }
 
     #[tokio::test]
@@ -1822,11 +2076,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(
-                    replay.previous_reply,
-                    Some(("".into(), Some("translation".into())))
-                );
-                assert_eq!(replay.previous_reply_media, media);
+                let reply = replay.previous_reply.unwrap();
+                assert_eq!(reply.text, "");
+                assert_eq!(reply.translation.as_deref(), Some("translation"));
+                assert_eq!(reply.media, media);
                 assert!(replay.history.is_empty());
             }
             let count: i64 = sqlx::query_scalar(
