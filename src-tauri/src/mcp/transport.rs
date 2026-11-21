@@ -1,849 +1,399 @@
-// pattern: Imperative Shell
-//! MCP Transport Layer — trait-based abstraction for MCP server communication.
-//!
-//! Implements stdio transport (subprocess stdin/stdout),
-//! Streamable HTTP transport (POST JSON-RPC to an HTTP endpoint),
-//! and SSE transport (GET event stream + POST to dynamic endpoint).
+//! SDK transports, plus the legacy GET/SSE + POST binding removed from rmcp.
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use super::manager::McpServerConfig;
+use crate::error::KokoroError;
+use eventsource_stream::{Event, Eventsource};
+use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
+use reqwest_mcp::{header, redirect, Client, StatusCode, Url};
+use rmcp::{
+    model::{ClientJsonRpcMessage, ServerJsonRpcMessage},
+    service::{RxJsonRpcMessage, TxJsonRpcMessage},
+    transport::{
+        common::client_side_sse::NeverRetry,
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+        TokioChildProcess, Transport,
+    },
+    RoleClient,
+};
+use std::{future::Future, io, process::Stdio, sync::Arc, time::Duration};
+use tokio::{sync::oneshot, task::JoinHandle};
 
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
-type MessageSender = mpsc::Sender<(Value, Option<oneshot::Sender<Result<Value, String>>>)>;
-
-// ── JSON-RPC 2.0 Types ─────────────────────────────────
-
-#[derive(Debug, Clone, Serialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: String,
-    pub id: u64,
-    pub method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TransportMode {
+    Stdio,
+    StreamableHttp,
+    LegacySse,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct JsonRpcResponse {
-    pub jsonrpc: String,
-    pub id: Option<u64>,
-    pub result: Option<Value>,
-    pub error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct JsonRpcError {
-    pub code: i64,
-    pub message: String,
-    pub data: Option<Value>,
-}
-
-impl std::fmt::Display for JsonRpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "JSON-RPC Error {}: {}", self.code, self.message)
+pub(super) fn transport_mode(config: &McpServerConfig) -> Result<TransportMode, KokoroError> {
+    match config.transport_type.as_str() {
+        "streamable_http" | "streamable-http" => Ok(TransportMode::StreamableHttp),
+        "sse" => Ok(TransportMode::LegacySse),
+        _ if !config.command.is_empty() => Ok(TransportMode::Stdio),
+        _ => match config.url.as_deref() {
+            Some(url) if url.trim_end_matches('/').ends_with("/sse") => {
+                Ok(TransportMode::LegacySse)
+            }
+            Some(_) => Ok(TransportMode::StreamableHttp),
+            None => Err(KokoroError::Config(
+                "MCP server requires a command or URL".into(),
+            )),
+        },
     }
 }
 
-// ── Transport Trait ─────────────────────────────────────
-
-/// Abstract transport for MCP communication.
-/// Implementations handle the wire protocol (stdio, SSE, HTTP, etc.)
-#[async_trait]
-pub trait McpTransport: Send + Sync {
-    /// Send a JSON-RPC request and wait for the response.
-    #[must_use = "await or poll this future to send the MCP request and receive its response"]
-    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String>;
-
-    /// Send a notification (no response expected).
-    #[must_use = "await or poll this future to send the MCP notification"]
-    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String>;
-
-    /// Check if the transport is currently connected.
-    fn is_connected(&self) -> bool;
-
-    /// Gracefully shut down the transport.
-    #[must_use = "await or poll this future to shut down the MCP transport"]
-    async fn shutdown(&self) -> Result<(), String>;
+pub(super) fn server_url(config: &McpServerConfig) -> Result<Url, KokoroError> {
+    config
+        .url
+        .as_deref()
+        .and_then(|url| Url::parse(url).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+        .ok_or_else(|| KokoroError::Config("MCP server requires a valid HTTP or HTTPS URL".into()))
 }
 
-// ── Stdio Transport ─────────────────────────────────────
+pub(super) fn stdio(config: &McpServerConfig) -> Result<StdioTransport, KokoroError> {
+    #[cfg(windows)]
+    let mut command = {
+        // Resolve .cmd/.bat shims using the server's PATH without changing
+        // the application process environment or interpreting shell expressions.
+        let paths = config
+            .env
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| std::ffi::OsString::from(value))
+            .or_else(|| std::env::var_os("PATH"));
+        let cwd = std::env::current_dir()
+            .map_err(|err| KokoroError::Io(format!("MCP working directory unavailable: {err}")))?;
+        let executable = which::which_in(&config.command, paths, cwd)
+            .map_err(|_| KokoroError::Config("MCP executable was not found".into()))?;
+        tokio::process::Command::new(executable)
+    };
+    #[cfg(not(windows))]
+    let mut command = tokio::process::Command::new(&config.command);
 
-/// Spawns MCP server as subprocess, communicates via stdin/stdout JSON-RPC.
-pub struct StdioTransport {
-    /// Channel carries (raw JSON body, optional responder).
-    /// Requests include Some(responder) and have an "id" field.
-    /// Notifications include None and have no "id" field.
-    sender: MessageSender,
-    next_id: AtomicU64,
-    connected: Arc<std::sync::atomic::AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
-    pending: PendingMap,
-}
+    command.args(&config.args).envs(&config.env);
+    let mut wrapped = CommandWrap::from(command);
+    wrapped.wrap(KillOnDrop);
+    #[cfg(windows)]
+    {
+        let mut flags = process_wrap::tokio::CreationFlags(Default::default());
+        flags.0 .0 = 0x08000000; // CREATE_NO_WINDOW
+        wrapped.wrap(flags).wrap(process_wrap::tokio::JobObject);
+    }
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
 
-impl StdioTransport {
-    /// Spawn an MCP server process and set up communication channels.
-    pub async fn spawn(
-        command: &str,
-        args: &[String],
-        env: Option<&HashMap<String, String>>,
-    ) -> Result<Self, String> {
-        // On Windows, commands like "npx", "tsx" are actually .cmd/.bat scripts.
-        // Spawn via cmd.exe /C so Windows can resolve them automatically.
-        #[cfg(target_os = "windows")]
-        let mut cmd = {
-            let mut c = Command::new("cmd");
-            let mut cmd_args = vec!["/C".to_string(), command.to_string()];
-            cmd_args.extend(args.iter().cloned());
-            c.args(&cmd_args);
-            // CREATE_NO_WINDOW: prevent cmd.exe console window from appearing
-            c.creation_flags(0x08000000);
-            c
-        };
-        #[cfg(not(target_os = "windows"))]
-        let mut cmd = {
-            let mut c = Command::new(command);
-            c.args(args);
-            c
-        };
-
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        // Merge extra env vars
-        if let Some(env_vars) = env {
-            for (k, v) in env_vars {
-                cmd.env(k, v);
-            }
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn MCP server '{}': {}", command, e))?;
-
-        let stdin = match child.stdin.take() {
-            Some(stdin) => stdin,
-            None => {
-                let _ = child.kill().await;
-                return Err("Failed to get stdin".to_string());
-            }
-        };
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                let _ = child.kill().await;
-                return Err("Failed to get stdout".to_string());
-            }
-        };
-        let stderr = child.stderr.take();
-
-        let connected = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let connected_clone = connected.clone();
-
-        // Channel for sending requests/notifications from any thread.
-        // Tuple: (serialized JSON body, optional responder — None for notifications)
-        let (tx, mut rx) =
-            mpsc::channel::<(Value, Option<oneshot::Sender<Result<Value, String>>>)>(64);
-
-        // Pending response map — shared between writer and reader
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_reader = pending.clone();
-
-        // Always drain stderr. MCP servers commonly emit diagnostics even
-        // while speaking JSON-RPC on stdout; leaving this pipe unread can
-        // eventually block the child and make unrelated requests time out.
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let preview: String = line.chars().take(512).collect();
-                    tracing::debug!(target: "mcp", "[MCP/Stdio] stderr: {}", preview);
-                }
-            });
-        }
-
-        // ── Writer task: receives requests/notifications from channel, writes to stdin ──
-        let mut stdin = stdin;
-        let pending_cleanup = pending.clone();
-        let connected_writer = connected.clone();
+    let (transport, stderr) = TokioChildProcess::builder(wrapped)
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            KokoroError::ExternalService(format!("MCP process spawn failed: {error}"))
+        })?;
+    let stderr_drain = stderr.map(|mut stderr| {
+        // Servers may write credentials to stderr. Drain it without logging it or retaining it.
         tokio::spawn(async move {
-            while let Some((body, _responder)) = rx.recv().await {
-                // Serialize and write
-                let mut line = serde_json::to_string(&body).unwrap_or_default();
-                line.push('\n');
-
-                if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                    tracing::error!(target: "mcp", "[MCP/Stdio] Write error: {}", e);
-                    connected_writer.store(false, Ordering::SeqCst);
-                    // 清理所有 pending 请求，通知等待者连接已断开
-                    let mut pending = pending_cleanup.lock().await;
-                    for (_, responder) in pending.drain() {
-                        let _ = responder
-                            .send(Err("Transport write error: connection lost".to_string()));
-                    }
-                    break;
-                }
-                if let Err(e) = stdin.flush().await {
-                    tracing::error!(target: "mcp", "[MCP/Stdio] Flush error: {}", e);
-                    connected_writer.store(false, Ordering::SeqCst);
-                    let mut pending = pending_cleanup.lock().await;
-                    for (_, responder) in pending.drain() {
-                        let _ = responder
-                            .send(Err("Transport flush error: connection lost".to_string()));
-                    }
-                    break;
-                }
-            }
-        });
-
-        // ── Reader task: reads stdout lines, dispatches to pending responders ──
-        let reader = BufReader::new(stdout);
-        let pending_reader_cleanup = pending.clone();
-        tokio::spawn(async move {
-            let mut lines = reader.lines();
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        let line = line.trim().to_string();
-                        if line.is_empty() {
-                            continue;
-                        }
-
-                        match serde_json::from_str::<JsonRpcResponse>(&line) {
-                            Ok(response) => {
-                                if let Some(id) = response.id {
-                                    // Match response to pending request
-                                    if let Some(responder) = pending_reader.lock().await.remove(&id)
-                                    {
-                                        let result = if let Some(error) = response.error {
-                                            Err(error.to_string())
-                                        } else {
-                                            Ok(response.result.unwrap_or(Value::Null))
-                                        };
-                                        let _ = responder.send(result);
-                                    }
-                                }
-                                // Notifications (id=null) are silently ignored for now
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    target: "mcp",
-                                    "[MCP/Stdio] Parse error: {} — line: {}",
-                                    e,
-                                    &line[..line.len().min(200)]
-                                );
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        // EOF — process exited, 清理所有 pending 请求
-                        tracing::error!(target: "mcp", "[MCP/Stdio] Server process exited (stdout closed)");
-                        connected_clone.store(false, Ordering::SeqCst);
-                        let mut pending = pending_reader_cleanup.lock().await;
-                        for (_, responder) in pending.drain() {
-                            let _ = responder.send(Err("MCP server process exited".to_string()));
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!(target: "mcp", "[MCP/Stdio] Read error: {}", e);
-                        connected_clone.store(false, Ordering::SeqCst);
-                        let mut pending = pending_reader_cleanup.lock().await;
-                        for (_, responder) in pending.drain() {
-                            let _ = responder.send(Err(format!("MCP transport read error: {}", e)));
-                        }
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Self {
-            sender: tx,
-            next_id: AtomicU64::new(1),
-            connected,
-            child: Arc::new(Mutex::new(Some(child))),
-            pending,
+            let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
         })
-    }
+    });
+    Ok(StdioTransport {
+        child: Some(transport),
+        stderr_drain,
+    })
 }
 
-#[async_trait]
-impl McpTransport for StdioTransport {
-    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        if !self.is_connected() {
-            return Err("Transport disconnected".to_string());
-        }
+pub(super) struct StdioTransport {
+    child: Option<TokioChildProcess>,
+    stderr_drain: Option<JoinHandle<()>>,
+}
 
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let mut body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-        });
-        if let Some(p) = params {
-            body["params"] = p;
-        }
+impl Transport<RoleClient> for StdioTransport {
+    type Error = io::Error;
 
-        let (tx, rx) = oneshot::channel();
-        // Register before enqueueing so a very fast timeout cannot race the
-        // writer task and leave an unowned responder in the pending map.
-        self.pending.lock().await.insert(id, tx);
-        if self.sender.send((body, None)).await.is_err() {
-            self.pending.lock().await.remove(&id);
-            return Err("Transport channel closed".to_string());
-        }
+    fn send(
+        &mut self,
+        message: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.child.as_mut().expect("open MCP child").send(message)
+    }
 
-        // Timeout after 30 seconds
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(result) => result.map_err(|_| "Response channel dropped".to_string())?,
-            Err(_) => {
-                // The writer registers the request asynchronously. Removing
-                // here is idempotent and prevents timed-out requests from
-                // accumulating until the process eventually replies/ exits.
-                self.pending.lock().await.remove(&id);
-                return Err(format!("MCP request '{}' timed out", method));
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        self.child.as_mut()?.receive().await
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        let result = if let Some(mut child) = self.child.take() {
+            match child.graceful_shutdown().await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // A failed protocol close still owns the process. Reap it
+                    // here instead of relying on the SDK's asynchronous Drop.
+                    if let Some(mut process) = child.into_inner() {
+                        let reap = Box::into_pin(process.kill()).await;
+                        if reap.is_ok() {
+                            tracing::warn!(target: "mcp", %error, "MCP child was reaped after graceful shutdown failed");
+                        }
+                        reap
+                    } else {
+                        Err(error)
+                    }
+                }
             }
-        }
-    }
-
-    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
-        if !self.is_connected() {
-            return Err("Transport disconnected".to_string());
-        }
-
-        // JSON-RPC 通知：无 id 字段，无需等待响应，不进 pending map
-        let mut body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        });
-        if let Some(p) = params {
-            body["params"] = p;
-        }
-
-        self.sender
-            .send((body, None))
-            .await
-            .map_err(|_| "Transport channel closed".to_string())?;
-
-        Ok(())
-    }
-
-    fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::SeqCst)
-    }
-
-    async fn shutdown(&self) -> Result<(), String> {
-        self.connected.store(false, Ordering::SeqCst);
-
-        let mut pending = self.pending.lock().await;
-        for (_, responder) in pending.drain() {
-            let _ = responder.send(Err("Transport shutting down".to_string()));
-        }
-        drop(pending);
-
-        // Try to kill the child process
-        if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.kill().await;
-        }
-
-        Ok(())
-    }
-}
-
-// ── Streamable HTTP Transport ──────────────────────────
-
-/// Communicates with an MCP server over HTTP POST (Streamable HTTP transport).
-/// Each JSON-RPC request is sent as a POST to the endpoint URL.
-pub struct StreamableHttpTransport {
-    url: String,
-    client: reqwest::Client,
-    next_id: AtomicU64,
-    connected: Arc<std::sync::atomic::AtomicBool>,
-    /// MCP session ID returned by the server via `Mcp-Session-Id` header.
-    session_id: Arc<Mutex<Option<String>>>,
-}
-
-impl StreamableHttpTransport {
-    /// Create a new HTTP transport pointing at the given URL.
-    pub fn new(url: &str) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap_or_default();
-
-        Self {
-            url: url.trim_end_matches('/').to_string(),
-            client,
-            next_id: AtomicU64::new(1),
-            connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            session_id: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-#[async_trait]
-impl McpTransport for StreamableHttpTransport {
-    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        if !self.is_connected() {
-            return Err("Transport disconnected".to_string());
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let mut body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-        });
-        // Only include "params" when provided — some servers reject null params
-        if let Some(p) = params {
-            body["params"] = p;
-        }
-
-        let mut req = self
-            .client
-            .post(&self.url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
-
-        // Attach session ID if we have one
-        if let Some(ref sid) = *self.session_id.lock().await {
-            req = req.header("Mcp-Session-Id", sid.clone());
-        }
-
-        let resp = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-        // Capture session ID from response header
-        if let Some(sid) = resp.headers().get("mcp-session-id") {
-            if let Ok(s) = sid.to_str() {
-                *self.session_id.lock().await = Some(s.to_string());
-            }
-        }
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            self.connected.store(false, Ordering::SeqCst);
-            return Err(format!("HTTP {}: {}", status, text));
-        }
-
-        // Check content type — may be JSON or SSE
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-
-        if content_type.contains("text/event-stream") {
-            // SSE: read events until we find the JSON-RPC response
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("SSE read error: {}", e))?;
-            parse_sse_response(&text, id)
         } else {
-            // Plain JSON response
-            let json_resp: JsonRpcResponse = resp
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
-
-            if let Some(error) = json_resp.error {
-                Err(error.to_string())
-            } else {
-                Ok(json_resp.result.unwrap_or(Value::Null))
+            Ok(())
+        };
+        if let Some(drain) = self.stderr_drain.take() {
+            // The child's descendants can inherit stderr. Stop the drain
+            // after the process wrapper has completed shutdown.
+            drain.abort();
+            if let Err(error) = drain.await {
+                if !error.is_cancelled() {
+                    return Err(io::Error::other(error));
+                }
             }
         }
+        result
+    }
+}
+
+/// Return the resource to its owner even when the SDK drops its transport
+/// during negotiation. Only the owner reports success after the close joins.
+pub(super) struct RetainedTransport<T> {
+    transport: Option<T>,
+    returned: Option<oneshot::Sender<T>>,
+}
+
+impl<T> RetainedTransport<T> {
+    pub(super) fn new(transport: T) -> (Self, oneshot::Receiver<T>) {
+        let (returned, receiver) = oneshot::channel();
+        (
+            Self {
+                transport: Some(transport),
+                returned: Some(returned),
+            },
+            receiver,
+        )
+    }
+}
+
+impl<T: Transport<RoleClient>> Transport<RoleClient> for RetainedTransport<T> {
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        message: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.transport
+            .as_mut()
+            .expect("open MCP transport")
+            .send(message)
     }
 
-    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
-        if !self.is_connected() {
-            return Err("Transport disconnected".to_string());
-        }
-
-        // JSON-RPC notification: no `id` field
-        let mut body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        });
-        if let Some(p) = params {
-            body["params"] = p;
-        }
-
-        let mut req = self
-            .client
-            .post(&self.url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
-
-        if let Some(ref sid) = *self.session_id.lock().await {
-            req = req.header("Mcp-Session-Id", sid.clone());
-        }
-
-        let resp = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("HTTP notify failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP notify error {}: {}", status, text));
-        }
-
-        Ok(())
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        self.transport.as_mut()?.receive().await
     }
 
-    fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::SeqCst)
-    }
-
-    async fn shutdown(&self) -> Result<(), String> {
-        self.connected.store(false, Ordering::SeqCst);
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        // The owner closes the returned transport after joining the SDK.
         Ok(())
     }
 }
 
-/// Parse a JSON-RPC response from an SSE text stream.
-/// Looks for `data:` lines containing JSON with a matching `id`.
-fn parse_sse_response(sse_text: &str, expected_id: u64) -> Result<Value, String> {
-    for line in sse_text.lines() {
-        let line = line.trim();
-        if let Some(data) = line.strip_prefix("data:") {
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
+impl<T> Drop for RetainedTransport<T> {
+    fn drop(&mut self) {
+        if let (Some(returned), Some(transport)) = (self.returned.take(), self.transport.take()) {
+            let _ = returned.send(transport);
+        }
+    }
+}
+
+fn http_client(redirect: redirect::Policy) -> Result<Client, LegacySseError> {
+    // A POST can perform a side effect. Do not let redirects or HTTP retries replay it.
+    Client::builder()
+        .redirect(redirect)
+        .retry(reqwest_mcp::retry::never())
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| LegacySseError::Http(e.without_url()))
+}
+
+pub(super) fn streamable_http(
+    url: Url,
+) -> Result<StreamableHttpClientTransport<Client>, KokoroError> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.as_str())
+        .reinit_on_expired_session(false);
+    let mut config = config;
+    // Session loss is surfaced to Kokoro; only explicit reconnection can replace the peer.
+    config.retry_config = Arc::new(NeverRetry::default());
+    let client = http_client(redirect::Policy::none())
+        .map_err(|error| KokoroError::ExternalService(error.to_string()))?;
+    Ok(StreamableHttpClientTransport::with_client(client, config))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum LegacySseError {
+    #[error("MCP HTTP request failed: {0}")]
+    Http(#[source] reqwest_mcp::Error),
+    #[error("legacy MCP SSE returned HTTP {0}")]
+    Status(StatusCode),
+    #[error("legacy MCP SSE response is not text/event-stream")]
+    ContentType,
+    #[error("legacy MCP SSE did not provide a same-origin message endpoint")]
+    Endpoint,
+    #[error("legacy MCP SSE connection closed")]
+    Closed,
+}
+
+type Events = BoxStream<'static, Result<Event, LegacySseError>>;
+
+/// Only binds a legacy GET stream and its advertised POST address. The SDK owns
+/// every JSON-RPC envelope, request ID, response, notification, and cancellation.
+pub(super) struct LegacySse {
+    client: Client,
+    endpoint: Url,
+    events: Option<Events>,
+}
+
+impl LegacySse {
+    pub(super) async fn connect(url: Url) -> Result<Self, LegacySseError> {
+        // Discovery GET has no tool side effects. Preserve same-origin redirects
+        // there and resolve the endpoint relative to the effective stream URL.
+        let origin = url.origin();
+        let get_client = http_client(redirect::Policy::custom(move |attempt| {
+            if attempt.url().origin() == origin && attempt.previous().len() < 10 {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))?;
+        let response = get_client
+            .get(url.clone())
+            .header(header::ACCEPT, "text/event-stream")
+            .send()
+            .await
+            .map_err(|e| LegacySseError::Http(e.without_url()))?;
+        if !response.status().is_success() {
+            return Err(LegacySseError::Status(response.status()));
+        }
+        let event_stream = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
+        if !event_stream {
+            return Err(LegacySseError::ContentType);
+        }
+        let effective_url = response.url().clone();
+        let mut limit = SseFrameLimit::default();
+        let mut events = response
+            .bytes_stream()
+            .map_err(io::Error::other)
+            .and_then(move |chunk| std::future::ready(limit.check(&chunk).map(|()| chunk)))
+            .eventsource()
+            .map_err(|_| LegacySseError::Closed)
+            .boxed();
+        while let Some(event) = events.next().await {
+            let event = event?;
+            if event.event == "endpoint" {
+                let endpoint = effective_url
+                    .join(event.data.trim())
+                    .ok()
+                    .filter(|endpoint| {
+                        !event.data.trim().is_empty()
+                            && endpoint.origin() == url.origin()
+                            && endpoint.username().is_empty()
+                            && endpoint.password().is_none()
+                    })
+                    .ok_or(LegacySseError::Endpoint)?;
+                // Keep credentials from the user configuration only, even
+                // after the stream has redirected within its configured origin.
+                let mut post_url = url.clone();
+                post_url.set_path(endpoint.path());
+                post_url.set_query(endpoint.query());
+                post_url.set_fragment(None);
+                return Ok(Self {
+                    client: http_client(redirect::Policy::none())?,
+                    endpoint: post_url,
+                    events: Some(events),
+                });
+            }
+        }
+        Err(LegacySseError::Endpoint)
+    }
+}
+
+impl Transport<RoleClient> for LegacySse {
+    type Error = LegacySseError;
+
+    fn send(
+        &mut self,
+        item: ClientJsonRpcMessage,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let request = self.client.post(self.endpoint.clone()).json(&item);
+        async move {
+            let response = request
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|e| LegacySseError::Http(e.without_url()))?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                Err(LegacySseError::Status(response.status()))
+            }
+        }
+    }
+
+    async fn receive(&mut self) -> Option<ServerJsonRpcMessage> {
+        while let Some(Ok(event)) = self.events.as_mut()?.next().await {
+            if event.event == "message" {
+                // Malformed JSON-RPC is not silently converted into an empty tool result.
+                return serde_json::from_str(&event.data).ok();
+            }
+        }
+        None
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.events.take();
+        Ok(())
+    }
+}
+
+/// Bound input before the SSE parser buffers a possibly unfinished event.
+/// CRLF is one delimiter; comment lines do not accumulate across keep-alives.
+#[derive(Default)]
+struct SseFrameLimit {
+    event_bytes: usize,
+    line_bytes: usize,
+    comment: bool,
+    after_cr: bool,
+}
+
+impl SseFrameLimit {
+    fn check(&mut self, chunk: &[u8]) -> io::Result<()> {
+        for &byte in chunk {
+            if std::mem::take(&mut self.after_cr) && byte == b'\n' {
                 continue;
             }
-            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(data) {
-                if resp.id == Some(expected_id) {
-                    if let Some(error) = resp.error {
-                        return Err(error.to_string());
-                    }
-                    return Ok(resp.result.unwrap_or(Value::Null));
+            if matches!(byte, b'\r' | b'\n') {
+                self.after_cr = byte == b'\r';
+                let size = std::mem::take(&mut self.line_bytes);
+                if size == 0 {
+                    self.event_bytes = 0;
+                } else if !self.comment {
+                    self.event_bytes += size + 1;
                 }
-            }
-        }
-    }
-    Err("No matching JSON-RPC response found in SSE stream".to_string())
-}
-
-// ── SSE Transport ──────────────────────────────────────
-
-/// Communicates with an MCP server using the SSE transport protocol.
-///
-/// Protocol flow:
-/// 1. GET the configured URL to establish an SSE event stream
-/// 2. Server sends `event: endpoint` with the POST path (e.g. `/messages?sessionId=xxx`)
-/// 3. Client POSTs JSON-RPC requests to `{origin}{endpoint_path}`
-/// 4. Server pushes `event: message` with JSON-RPC responses via the SSE stream
-pub struct SseTransport {
-    /// The full SSE endpoint URL provided by the user (e.g. "http://localhost:8080/sse").
-    sse_url: String,
-    /// Origin extracted from the URL (e.g. "http://localhost:8080") for building POST URLs.
-    origin: String,
-    client: reqwest::Client,
-    next_id: AtomicU64,
-    connected: Arc<std::sync::atomic::AtomicBool>,
-    /// POST endpoint path received from the SSE stream (e.g. "/messages?sessionId=xxx").
-    post_endpoint: Arc<Mutex<Option<String>>>,
-    /// Pending request map: request ID → oneshot sender for the response.
-    pending: PendingMap,
-    /// Owned reader task. Aborting it closes the long-lived response stream
-    /// when this transport is disabled or replaced.
-    reader_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-}
-
-impl SseTransport {
-    pub fn new(url: &str) -> Self {
-        // No global timeout — SSE stream is long-lived.
-        // Per-request timeouts are applied on POST calls instead.
-        let client = reqwest::Client::builder().build().unwrap_or_default();
-
-        // Extract origin (scheme + host + port) from the URL for building POST URLs.
-        // e.g. "http://localhost:8080/sse" → "http://localhost:8080"
-        let origin = match reqwest::Url::parse(url) {
-            Ok(parsed) => parsed.origin().ascii_serialization(),
-            Err(_) => url.trim_end_matches('/').to_string(),
-        };
-
-        Self {
-            sse_url: url.to_string(),
-            origin,
-            client,
-            next_id: AtomicU64::new(1),
-            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            post_endpoint: Arc::new(Mutex::new(None)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            reader_task: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Establish the SSE connection by GET-ing the configured URL.
-    /// Spawns a background task that reads the event stream and dispatches responses.
-    pub async fn connect(&self) -> Result<(), String> {
-        tracing::info!(target: "mcp", "[MCP/SSE] Connecting to {}", self.sse_url);
-
-        let resp = self
-            .client
-            .get(&self.sse_url)
-            .header("Accept", "text/event-stream")
-            .send()
-            .await
-            .map_err(|e| format!("SSE GET failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("SSE connect failed HTTP {}: {}", status, text));
-        }
-
-        self.connected.store(true, Ordering::SeqCst);
-
-        let connected = self.connected.clone();
-        let post_endpoint = self.post_endpoint.clone();
-        let pending = self.pending.clone();
-
-        // Spawn background task to read the SSE stream
-        let reader_task = tokio::spawn(async move {
-            use futures::StreamExt;
-
-            let mut stream = resp.bytes_stream();
-            let mut buffer = String::new();
-            let mut current_event = String::new();
-
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!(target: "mcp", "[MCP/SSE] Stream read error: {}", e);
-                        break;
-                    }
-                };
-
-                let text = match std::str::from_utf8(&chunk) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-
-                buffer.push_str(text);
-
-                // Process complete lines from the buffer
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
-
-                    if line.is_empty() {
-                        // Empty line = end of event, reset event type
-                        current_event.clear();
-                        continue;
-                    }
-
-                    if let Some(event_type) = line.strip_prefix("event:") {
-                        current_event = event_type.trim().to_string();
-                    } else if let Some(data) = line.strip_prefix("data:") {
-                        let data = data.trim();
-
-                        match current_event.as_str() {
-                            "endpoint" => {
-                                tracing::info!(target: "mcp", "[MCP/SSE] Received endpoint: {}", data);
-                                *post_endpoint.lock().await = Some(data.to_string());
-                            }
-                            "message" => {
-                                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(data) {
-                                    if let Some(id) = resp.id {
-                                        if let Some(sender) = pending.lock().await.remove(&id) {
-                                            let result = if let Some(error) = resp.error {
-                                                Err(error.to_string())
-                                            } else {
-                                                Ok(resp.result.unwrap_or(Value::Null))
-                                            };
-                                            let _ = sender.send(result);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Ignore unknown event types
-                            }
-                        }
-                    }
-                    // Ignore lines that don't match event:/data: (e.g. comments starting with :)
+            } else {
+                if self.line_bytes == 0 {
+                    self.comment = byte == b':';
                 }
+                self.line_bytes += 1;
             }
-
-            // Stream ended — mark disconnected and notify all pending requests
-            tracing::error!(target: "mcp", "[MCP/SSE] Event stream closed");
-            connected.store(false, Ordering::SeqCst);
-            let mut pending = pending.lock().await;
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err("SSE stream closed".to_string()));
+            if self.event_bytes + self.line_bytes > 16 * 1024 * 1024 {
+                return Err(io::Error::other("MCP SSE event exceeded 16 MiB"));
             }
-        });
-        *self.reader_task.lock().await = Some(reader_task);
-
-        // Wait for the endpoint to be received (with timeout)
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if self.post_endpoint.lock().await.is_some() {
-                tracing::info!(target: "mcp", "[MCP/SSE] Connected successfully");
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                self.shutdown().await?;
-                return Err("Timed out waiting for SSE endpoint event".to_string());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    /// Build the full POST URL from the base URL and the endpoint path.
-    /// 验证绝对 URL 的 origin 与初始连接一致，防止 SSRF。
-    async fn get_post_url(&self) -> Result<String, String> {
-        let endpoint = self
-            .post_endpoint
-            .lock()
-            .await
-            .clone()
-            .ok_or("SSE endpoint not yet received")?;
-
-        // The endpoint may be an absolute path or a relative path
-        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-            // 验证 origin 与初始连接一致，防止恶意服务器重定向到内网地址（SSRF）
-            let ep_origin = reqwest::Url::parse(&endpoint)
-                .ok()
-                .map(|u| u.origin().ascii_serialization());
-            if ep_origin.as_deref() != Some(&self.origin) {
-                return Err(format!(
-                    "SSE endpoint origin '{}' does not match expected origin '{}'",
-                    ep_origin.unwrap_or_default(),
-                    self.origin
-                ));
-            }
-            Ok(endpoint)
-        } else {
-            Ok(format!("{}{}", self.origin, endpoint))
-        }
-    }
-}
-
-#[async_trait]
-impl McpTransport for SseTransport {
-    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        if !self.is_connected() {
-            return Err("Transport disconnected".to_string());
-        }
-
-        let url = self.get_post_url().await?;
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-
-        let mut body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-        });
-        if let Some(p) = params {
-            body["params"] = p;
-        }
-
-        // Register pending response before sending
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
-        // POST the request (with per-request timeout, not global)
-        let resp = match self
-            .client
-            .post(&url)
-            .timeout(std::time::Duration::from_secs(30))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(error) => {
-                // A failed POST has no chance of producing a response on the
-                // SSE stream, so remove its waiter before returning.
-                self.pending.lock().await.remove(&id);
-                return Err(format!("SSE POST failed: {}", error));
-            }
-        };
-
-        if !resp.status().is_success() {
-            self.pending.lock().await.remove(&id);
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("SSE POST HTTP {}: {}", status, text));
-        }
-
-        // Wait for the response to arrive via the SSE stream
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-            Ok(result) => result.map_err(|_| "SSE response channel dropped".to_string())?,
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                return Err(format!("MCP SSE request '{}' timed out", method));
-            }
-        }
-    }
-
-    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
-        if !self.is_connected() {
-            return Err("Transport disconnected".to_string());
-        }
-
-        let url = self.get_post_url().await?;
-
-        let mut body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        });
-        if let Some(p) = params {
-            body["params"] = p;
-        }
-
-        let resp = self
-            .client
-            .post(&url)
-            .timeout(std::time::Duration::from_secs(30))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("SSE notify POST failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("SSE notify HTTP {}: {}", status, text));
-        }
-
-        Ok(())
-    }
-
-    fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::SeqCst)
-    }
-
-    async fn shutdown(&self) -> Result<(), String> {
-        self.connected.store(false, Ordering::SeqCst);
-        if let Some(task) = self.reader_task.lock().await.take() {
-            task.abort();
-        }
-        // Clean up all pending requests
-        let mut pending = self.pending.lock().await;
-        for (_, sender) in pending.drain() {
-            let _ = sender.send(Err("Transport shutting down".to_string()));
         }
         Ok(())
     }

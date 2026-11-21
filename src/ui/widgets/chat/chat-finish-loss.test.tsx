@@ -11,14 +11,14 @@ describe("application recovery when lifecycle notifications are lost", () => {
     vi.useFakeTimers(); const h = harness();
     h.set({ revision: 1, busy: true, turns: [turn("a", 1, "accepted")] });
     const stop = h.app.subscribe(() => {}); await vi.advanceTimersByTimeAsync(0);
-    h.set({ revision: 2, busy: false, turns: [turn("a", 2, status)], messages: status === "completed" ? [{ id: 2, role: "assistant", content: "saved answer", created_at: "now" }] : [] });
+    h.set({ revision: 2, busy: false, turns: [turn("a", 2, status)], messages: status === "completed" ? [{ metadata: null, id: 2, role: "assistant", content: "saved answer", created_at: "now" }] : [] });
     await vi.advanceTimersByTimeAsync(800);
     expect(h.app.getSnapshot().busy).toBe(false);
     expect(projectMessages(h.app.getSnapshot())).toHaveLength(status === "completed" ? 1 : 0);
     expect(h.io.send).not.toHaveBeenCalled(); stop();
   });
   it("recovers persisted user identity before chat-turn-start without an optimistic duplicate", async () => {
-    const h = harness(); h.set({ revision: 2, busy: true, turns: [{ ...turn("preparing", 2, "accepted"), text: "" }], messages: [{ id: 1, role: "user", content: "question", created_at: "now" }] });
+    const h = harness(); h.set({ revision: 2, busy: true, turns: [{ ...turn("preparing", 2, "accepted"), text: "" }], messages: [{ metadata: null, id: 1, role: "user", content: "question", created_at: "now" }] });
     await h.app.refresh(); expect(projectMessages(h.app.getSnapshot())).toHaveLength(1);
   });
   it("keeps context and tool evidence when the assistant shares their turn id", async () => {

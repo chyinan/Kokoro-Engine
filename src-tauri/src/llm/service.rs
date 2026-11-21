@@ -2,6 +2,7 @@
 // pattern: Imperative Shell
 
 use crate::error::KokoroError;
+use crate::lifecycle::AppLifecycle;
 use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::codex_runtime::CodexRuntimeProvider;
 use crate::llm::llama_cpp::LlamaCppProvider;
@@ -22,6 +23,7 @@ const CONNECTION_TEST_PROMPT: &str = "Reply with the single word OK.";
 /// Managed state for LLM access. Holds provider map + active provider id + config.
 #[derive(Clone)]
 pub struct LlmService {
+    pub(crate) lifecycle: AppLifecycle,
     providers: Arc<RwLock<HashMap<String, Arc<dyn LlmProvider>>>>,
     active_provider_id: Arc<RwLock<String>>,
     config: Arc<RwLock<LlmConfig>>,
@@ -32,14 +34,14 @@ pub struct LlmService {
     config_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct LlmConnectionTestedTarget {
     pub role: String,
     pub provider_id: String,
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct LlmConnectionTestResult {
     pub tested_targets: Vec<LlmConnectionTestedTarget>,
 }
@@ -74,8 +76,43 @@ struct ConnectionTestTarget {
 }
 
 impl LlmService {
+    #[cfg(test)]
+    pub(crate) fn for_test(provider: Arc<dyn LlmProvider>) -> Self {
+        let id = provider.id().to_owned();
+        let config = LlmConfig {
+            active_provider: id.clone(),
+            ..LlmConfig::default()
+        };
+        Self {
+            lifecycle: AppLifecycle::new(),
+            providers: Arc::new(RwLock::new(HashMap::from([(id.clone(), provider)]))),
+            active_provider_id: Arc::new(RwLock::new(id)),
+            config: Arc::new(RwLock::new(config)),
+            state_snapshot: Arc::new(RwLock::new(())),
+            config_path: PathBuf::new(),
+        }
+    }
+
+    #[cfg(all(test, target_os = "windows"))]
+    pub(crate) async fn replace_test_provider(&self, provider: Arc<dyn LlmProvider>) {
+        let _snapshot = self.state_snapshot.write().await;
+        let id = provider.id().to_owned();
+        self.providers.write().await.insert(id.clone(), provider);
+        *self.active_provider_id.write().await = id.clone();
+        self.config.write().await.active_provider = id;
+    }
+
     /// Create a new LlmService from a persisted config.
-    pub fn from_config(config: LlmConfig, config_path: PathBuf) -> Self {
+    #[cfg(test)]
+    fn from_config(config: LlmConfig, config_path: PathBuf) -> Self {
+        Self::from_config_with_lifecycle(config, config_path, AppLifecycle::new())
+    }
+
+    pub(crate) fn from_config_with_lifecycle(
+        config: LlmConfig,
+        config_path: PathBuf,
+        lifecycle: AppLifecycle,
+    ) -> Self {
         let original_config = config.clone();
         let normalized_config = normalize_config(config);
         if normalized_config != original_config {
@@ -95,12 +132,13 @@ impl LlmService {
             }
         }
 
-        let providers = build_provider_map(&normalized_config);
+        let providers = build_provider_map(&normalized_config, &lifecycle);
         let active_provider_id = resolve_active_provider_id(&normalized_config)
             .map(str::to_owned)
             .unwrap_or_else(|| "openai".to_string());
 
         Self {
+            lifecycle,
             providers: Arc::new(RwLock::new(providers)),
             active_provider_id: Arc::new(RwLock::new(active_provider_id)),
             config: Arc::new(RwLock::new(normalized_config)),
@@ -143,12 +181,42 @@ impl LlmService {
         self.config.read().await.clone()
     }
 
+    /// Read one committed provider generation for the entire chat turn.
+    pub(crate) async fn execution_snapshot(
+        &self,
+    ) -> (LlmConfig, Arc<dyn LlmProvider>, Arc<dyn LlmProvider>) {
+        let _snapshot_guard = self.state_snapshot.read().await;
+        let config = self.config.read().await.clone();
+        let active_id = self.active_provider_id.read().await.clone();
+        let providers = self.providers.read().await;
+        let chat =
+            try_provider_by_id(&providers, &active_id).unwrap_or_else(|_| default_provider());
+        let system_id = config
+            .system_provider
+            .as_ref()
+            .filter(|id| providers.contains_key(*id))
+            .unwrap_or(&active_id);
+        let mut system = try_provider_by_id(&providers, system_id).unwrap_or_else(|_| chat.clone());
+        if let Some(model) = &config.system_model {
+            if let Some(provider) = config
+                .providers
+                .iter()
+                .find(|provider| &provider.id == system_id && provider.enabled)
+            {
+                let mut provider = provider.clone();
+                provider.model = Some(model.clone());
+                system = Arc::from(build_from_provider_config(&provider, &self.lifecycle));
+            }
+        }
+        (config, chat, system)
+    }
+
     /// Update config, persist to disk, and hot-swap the active provider.
     pub async fn update_config(&self, new_config: LlmConfig) -> Result<(), KokoroError> {
         let _snapshot_guard = self.state_snapshot.write().await;
         let normalized_config = normalize_config(new_config);
         // Rebuild providers + active id first
-        let rebuilt_providers = try_build_provider_map(&normalized_config)?;
+        let rebuilt_providers = try_build_provider_map(&normalized_config, &self.lifecycle)?;
         let rebuilt_active_provider_id = resolve_active_provider_id(&normalized_config)
             .map(str::to_owned)
             .unwrap_or_else(|| "openai".to_string());
@@ -196,7 +264,10 @@ impl LlmService {
             {
                 let mut temporary_provider_config = provider_config.clone();
                 temporary_provider_config.model = Some(model_override);
-                return Arc::from(build_from_provider_config(&temporary_provider_config));
+                return Arc::from(build_from_provider_config(
+                    &temporary_provider_config,
+                    &self.lifecycle,
+                ));
             }
         }
 
@@ -204,15 +275,16 @@ impl LlmService {
     }
 }
 
-pub async fn test_config_connection(
+pub(crate) async fn test_config_connection(
     config: LlmConfig,
+    lifecycle: &AppLifecycle,
 ) -> Result<LlmConnectionTestResult, KokoroError> {
     let normalized_config = normalize_config(config);
     let test_targets = build_connection_test_targets(&normalized_config)?;
     let mut tested_targets = Vec::with_capacity(test_targets.len());
 
     for target in test_targets {
-        let provider = try_build_from_provider_config(&target.provider_config)?;
+        let provider = try_build_from_provider_config(&target.provider_config, lifecycle)?;
         let response = provider.chat(vec![user_text_message(CONNECTION_TEST_PROMPT)], None);
         let response = tokio::time::timeout(Duration::from_secs(15), response)
             .await
@@ -433,7 +505,10 @@ fn normalized_model_value(model: Option<String>) -> Option<String> {
     })
 }
 
-fn build_provider_map(config: &LlmConfig) -> HashMap<String, Arc<dyn LlmProvider>> {
+fn build_provider_map(
+    config: &LlmConfig,
+    lifecycle: &AppLifecycle,
+) -> HashMap<String, Arc<dyn LlmProvider>> {
     config
         .providers
         .iter()
@@ -441,7 +516,7 @@ fn build_provider_map(config: &LlmConfig) -> HashMap<String, Arc<dyn LlmProvider
         .map(|cfg| {
             (
                 cfg.id.clone(),
-                Arc::<dyn LlmProvider>::from(build_from_provider_config(cfg)),
+                Arc::<dyn LlmProvider>::from(build_from_provider_config(cfg, lifecycle)),
             )
         })
         .collect()
@@ -457,6 +532,7 @@ fn default_provider() -> Arc<dyn LlmProvider> {
 
 fn try_build_provider_map(
     config: &LlmConfig,
+    lifecycle: &AppLifecycle,
 ) -> Result<HashMap<String, Arc<dyn LlmProvider>>, KokoroError> {
     config
         .providers
@@ -465,14 +541,17 @@ fn try_build_provider_map(
         .map(|cfg| {
             Ok((
                 cfg.id.clone(),
-                Arc::<dyn LlmProvider>::from(try_build_from_provider_config(cfg)?),
+                Arc::<dyn LlmProvider>::from(try_build_from_provider_config(cfg, lifecycle)?),
             ))
         })
         .collect()
 }
 
-fn build_from_provider_config(cfg: &LlmProviderConfig) -> Box<dyn LlmProvider> {
-    try_build_from_provider_config(cfg).unwrap_or_else(|error| {
+fn build_from_provider_config(
+    cfg: &LlmProviderConfig,
+    lifecycle: &AppLifecycle,
+) -> Box<dyn LlmProvider> {
+    try_build_from_provider_config(cfg, lifecycle).unwrap_or_else(|error| {
         tracing::warn!(
             target: "llm",
             "Failed to build provider {}: {}. Falling back to OpenAI-compatible provider",
@@ -490,6 +569,7 @@ fn build_from_provider_config(cfg: &LlmProviderConfig) -> Box<dyn LlmProvider> {
 
 fn try_build_from_provider_config(
     cfg: &LlmProviderConfig,
+    lifecycle: &AppLifecycle,
 ) -> Result<Box<dyn LlmProvider>, KokoroError> {
     match cfg.provider_type.as_str() {
         "anthropic" => {
@@ -541,6 +621,7 @@ fn try_build_from_provider_config(
             Ok(Box::new(CodexRuntimeProvider::new(
                 cfg.id.clone(),
                 cfg.model.clone(),
+                lifecycle,
             )))
         }
         "openai" => {
@@ -627,9 +708,9 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let responses_provider = try_build_from_provider_config(&responses)
+        let responses_provider = try_build_from_provider_config(&responses, &AppLifecycle::new())
             .expect("Responses provider should be supported");
-        let openai_provider = try_build_from_provider_config(&openai)
+        let openai_provider = try_build_from_provider_config(&openai, &AppLifecycle::new())
             .expect("OpenAI provider should remain supported");
 
         assert_eq!(responses_provider.id(), "responses");
@@ -717,7 +798,7 @@ mod tests {
             presets: vec![],
         };
 
-        let providers = build_provider_map(&config);
+        let providers = build_provider_map(&config, &AppLifecycle::new());
 
         assert_eq!(providers.len(), 1);
         assert!(providers.contains_key("enabled-provider"));
@@ -757,7 +838,7 @@ mod tests {
             presets: vec![],
         };
 
-        let providers = try_build_provider_map(&config).unwrap();
+        let providers = try_build_provider_map(&config, &AppLifecycle::new()).unwrap();
 
         assert_eq!(providers.len(), 1);
         assert!(providers.contains_key("enabled-provider"));
@@ -1139,7 +1220,8 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let provider = try_build_from_provider_config(&cfg).expect("llama.cpp should be supported");
+        let provider = try_build_from_provider_config(&cfg, &AppLifecycle::new())
+            .expect("llama.cpp should be supported");
 
         assert_eq!(provider.id(), "local-llama");
         assert!(provider.supports_native_tools());
@@ -1159,7 +1241,8 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let provider = try_build_from_provider_config(&cfg).expect("anthropic should be supported");
+        let provider = try_build_from_provider_config(&cfg, &AppLifecycle::new())
+            .expect("anthropic should be supported");
 
         assert_eq!(provider.id(), "claude");
         assert!(provider.supports_native_tools());
@@ -1179,7 +1262,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let provider = try_build_from_provider_config(&cfg)
+        let provider = try_build_from_provider_config(&cfg, &AppLifecycle::new())
             .expect("Codex runtime provider should be supported");
 
         assert_eq!(provider.id(), "codex-runtime");

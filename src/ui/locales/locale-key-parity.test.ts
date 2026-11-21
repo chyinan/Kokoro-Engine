@@ -16,6 +16,7 @@ type Locale = Readonly<{
     }>;
   }>;
   chat: Readonly<{
+    tool_only_completion: string;
     history: Readonly<{
       pinned: string;
       pin: string;
@@ -40,6 +41,12 @@ type Locale = Readonly<{
 const locales: Readonly<Record<string, Locale>> = { en, zh, zhTw, ja, ko, ru };
 
 describe("locale keys parity", () => {
+  it("keeps the tool-only completion notice at the root chat path in every locale", () => {
+    for (const [locale, messages] of Object.entries(locales)) {
+      expect(messages.chat.tool_only_completion?.trim(), `${locale} missing chat.tool_only_completion`).toBeTruthy();
+    }
+  });
+
   it("keeps provider discovery errors translated in every supported locale", () => {
     const expected = Object.keys(en.onboarding.workflow.errors).sort();
 

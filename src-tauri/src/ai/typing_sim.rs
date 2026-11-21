@@ -6,10 +6,10 @@
 //! and estimated response complexity. Makes the character feel like
 //! they're actually thinking before speaking.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Typing simulation parameters.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 pub struct TypingParams {
     /// How long the typing indicator should show (milliseconds).
     pub duration_ms: u64,
@@ -17,7 +17,7 @@ pub struct TypingParams {
     pub speed: TypingSpeed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, specta::Type)]
 pub enum TypingSpeed {
     Instant,  // < 300ms
     Fast,     // 300-800ms

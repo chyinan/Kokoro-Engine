@@ -241,7 +241,7 @@ export default function TtsTab({
         onTtsConfigChange({ ...ttsConfig, providers: newProviders });
     };
 
-    const updateProviderExtra = (index: number, provider: ProviderConfigData, key: string, value: unknown) => {
+    const updateProviderExtra = (index: number, provider: ProviderConfigData, key: string, value: ProviderConfigData["extra"][string] | undefined) => {
         const nextExtra = { ...(provider.extra || {}) };
         if (value === "" || value === null || value === undefined) {
             delete nextExtra[key];

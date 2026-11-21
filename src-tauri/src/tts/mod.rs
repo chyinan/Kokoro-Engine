@@ -3,6 +3,7 @@ pub mod browser;
 pub mod cache;
 pub mod cloud_base;
 pub mod config;
+pub(crate) mod desktop;
 pub mod edge;
 pub mod interface;
 pub mod local_gpt_sovits;
@@ -21,3 +22,4 @@ pub use interface::{
     TtsParams, TtsProvider, VoiceProfile,
 };
 pub use manager::{ProviderStatus, TtsService};
+pub(crate) use manager::{TtsPlayback, TtsPlaybackEvent};

@@ -27,6 +27,7 @@ import type {
   VisionConfig,
 } from "../../lib/kokoro-bridge";
 import type { BackgroundConfig } from "../hooks/useBackgroundSlideshow";
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 
 describe("Settings Dirty Checking", () => {
   describe("isCharacterEditDirty", () => {
@@ -36,6 +37,7 @@ describe("Settings Dirty Checking", () => {
       user_nickname: "Master",
       persona: "Helpful companion",
       source_format: "manual",
+      ...emptyCharacterDetails,
       created_at: 1000,
       updated_at: 1000,
     };
@@ -147,6 +149,8 @@ describe("Settings Dirty Checking", () => {
       vlm_provider: "ollama",
       camera_enabled: false,
       camera_device_id: null,
+      display_id: null,
+      vlm_region: null,
     };
 
     it("returns false for unchanged config", () => {

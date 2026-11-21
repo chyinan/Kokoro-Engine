@@ -1,44 +1,18 @@
+use super::live2d::legacy_app_data_dir;
 use crate::ai::context::AIOrchestrator;
-use crate::commands::live2d::load_active_live2d_profile;
 use crate::error::KokoroError;
+use crate::live2d::Live2dStore;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::{command, Manager, State};
-use tokio::sync::RwLock;
 
 const GITHUB_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/chyinan/Kokoro-Engine/releases/latest";
 
-#[derive(Clone)]
-pub struct WindowSizeState {
-    pub width: Arc<RwLock<u32>>,
-    pub height: Arc<RwLock<u32>>,
-}
-
-impl Default for WindowSizeState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WindowSizeState {
-    pub fn new() -> Self {
-        Self {
-            width: Arc::new(RwLock::new(1200)),
-            height: Arc::new(RwLock::new(800)),
-        }
-    }
-    pub async fn get(&self) -> (u32, u32) {
-        (*self.width.read().await, *self.height.read().await)
-    }
-    pub async fn set(&self, w: u32, h: u32) {
-        *self.width.write().await = w;
-        *self.height.write().await = h;
-    }
-}
+use crate::imagegen::WindowSizeState;
 
 #[command]
+#[specta::specta]
 pub async fn set_window_size(
     state: State<'_, WindowSizeState>,
     width: u32,
@@ -48,14 +22,14 @@ pub async fn set_window_size(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct EngineInfo {
     pub name: String,
     pub version: String,
     pub platform: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct ReleaseUpdateInfo {
     pub current_version: String,
     pub latest_version: String,
@@ -69,7 +43,7 @@ struct GitHubReleaseResponse {
     html_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct SystemStatus {
     pub engine_running: bool,
     pub active_modules: Vec<String>,
@@ -78,6 +52,7 @@ pub struct SystemStatus {
 
 /// Returns basic engine metadata for the frontend to display.
 #[tauri::command]
+#[specta::specta]
 pub fn get_engine_info() -> EngineInfo {
     EngineInfo {
         name: "Kokoro Engine".to_string(),
@@ -87,6 +62,7 @@ pub fn get_engine_info() -> EngineInfo {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn check_latest_release() -> Result<ReleaseUpdateInfo, KokoroError> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let client = reqwest::Client::builder()
@@ -119,6 +95,7 @@ pub async fn check_latest_release() -> Result<ReleaseUpdateInfo, KokoroError> {
 
 /// Returns the current system status including active modules.
 #[tauri::command]
+#[specta::specta]
 pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>) -> SystemStatus {
     let mut active_modules = Vec::new();
 
@@ -158,7 +135,10 @@ pub fn get_system_status(app: tauri::AppHandle, state: State<'_, AIOrchestrator>
     {
         active_modules.push("vision".to_string());
     }
-    if load_active_live2d_profile().is_some() {
+    if Live2dStore::new(legacy_app_data_dir())
+        .active_profile()
+        .is_some()
+    {
         active_modules.push("live2d".to_string());
     }
     if state.is_memory_enabled() {

@@ -6,7 +6,7 @@ use std::path::Path;
 
 // ── Provider Config ────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ImageGenProviderConfig {
     pub id: String,
     pub provider_type: String, // "openai", "stable_diffusion"
@@ -14,18 +14,28 @@ pub struct ImageGenProviderConfig {
     pub enabled: bool,
 
     // Common fields
+    #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
     pub api_key_env: Option<String>,
+    #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,           // e.g. "dall-e-3", "sd_xl"
+    #[serde(default)]
     pub size: Option<String>,            // e.g. "1024x1024"
+    #[serde(default)]
     pub quality: Option<String>,         // e.g. "standard", "hd"
+    #[serde(default)]
     pub style: Option<String>,           // e.g. "vivid", "natural"
+    #[serde(default)]
     pub prompt_prefix: Option<String>,   // SD: positive prompt prefix
+    #[serde(default)]
     pub negative_prompt: Option<String>, // SD: negative prompt
 
     /// Catch-all for provider-specific config
     #[serde(default)]
+    #[specta(type = std::collections::HashMap<String, crate::ipc::wire::JsonValue>)]
     pub extra: HashMap<String, Value>,
 }
 
@@ -41,7 +51,7 @@ fn default_true() -> bool {
 
 // ── System Config ──────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ImageGenSystemConfig {
     #[serde(default)]
     pub default_provider: Option<String>,

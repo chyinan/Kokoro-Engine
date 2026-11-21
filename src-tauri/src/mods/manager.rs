@@ -1,30 +1,44 @@
 // pattern: Imperative Shell
+#[cfg(test)]
+use super::script_queue::SCRIPT_EVENT_CAPACITY;
+use super::script_queue::{ModScriptQueue, ScriptCommand, ScriptModule};
+use crate::chat::event_payloads::CueEvent;
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, ModHookPayload};
+use crate::ipc::{
+    events::{ModComponentsRegister, ModLayoutOverride, ModThemeOverride, ModUnload},
+    wire::{emit, JsonPayload},
+};
+use crate::lifecycle::{AppLifecycle, TaskScope, TaskStage};
 use crate::mods::api::ScriptEvent;
 use crate::mods::manifest::ModManifest;
 use crate::mods::theme::ModThemeJson;
+use futures::FutureExt;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
+use tauri::Manager;
+use tokio_util::sync::CancellationToken;
 
 const SCRIPT_EXECUTION_BUDGET: Duration = Duration::from_secs(5);
 const SCRIPT_EVENT_BUDGET: Duration = Duration::from_millis(250);
-const SCRIPT_EVENT_CAPACITY: usize = 32;
 
-fn install_script_interrupt_handler(runtime: &rquickjs::Runtime) -> Arc<Mutex<Option<Instant>>> {
+fn install_script_interrupt_handler(
+    runtime: &rquickjs::Runtime,
+    stopping: impl Fn() -> bool + Send + 'static,
+) -> Arc<Mutex<Option<Instant>>> {
     let deadline = Arc::new(Mutex::new(None));
     let interrupt_deadline = deadline.clone();
     runtime.set_interrupt_handler(Some(Box::new(move || {
-        interrupt_deadline
-            .lock()
-            .map(|deadline| deadline.is_some_and(|deadline| Instant::now() >= deadline))
-            .unwrap_or(true)
+        stopping()
+            || interrupt_deadline
+                .lock()
+                .map(|deadline| deadline.is_some_and(|deadline| Instant::now() >= deadline))
+                .unwrap_or(true)
     })));
     deadline
 }
@@ -93,99 +107,6 @@ fn safe_join(base_dir: &Path, file_path: &str) -> Result<PathBuf, String> {
     }
 }
 
-struct ScriptModule {
-    id: String,
-    scripts: Vec<(String, String)>,
-}
-
-enum ScriptCommand {
-    DispatchEvent {
-        event: String,
-        payload: JsonValue,
-        slot: Option<OwnedSemaphorePermit>,
-    },
-    ReplaceListeners {
-        module: Option<ScriptModule>,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-}
-
-/// All commands enter the same FIFO so a listener replacement cannot overtake
-/// previously accepted events. Only completions and serialized lifecycle
-/// changes bypass the limit; chat fragments and cues may be shed under load.
-#[derive(Clone)]
-pub(crate) struct ModScriptQueue {
-    tx: mpsc::UnboundedSender<ScriptCommand>,
-    event_slots: Arc<Semaphore>,
-}
-
-impl ModScriptQueue {
-    fn channel() -> (Self, mpsc::UnboundedReceiver<ScriptCommand>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            Self {
-                tx,
-                event_slots: Arc::new(Semaphore::new(SCRIPT_EVENT_CAPACITY)),
-            },
-            rx,
-        )
-    }
-
-    pub(crate) fn enqueue_chat_event(&self, name: &str, payload: JsonValue) {
-        let event = match name {
-            "chat-turn-delta" => "chat",
-            "chat-turn-finish" => "chat-done",
-            "chat-cue" => "cue",
-            _ => return,
-        };
-        let slot = if event == "chat-done" {
-            None
-        } else {
-            let Ok(slot) = self.event_slots.clone().try_acquire_owned() else {
-                return;
-            };
-            Some(slot)
-        };
-        // The receiver can only disconnect if the runtime has stopped.
-        let _ = self.send_event(event, payload, slot);
-    }
-
-    fn send_event(
-        &self,
-        event: &str,
-        payload: JsonValue,
-        slot: Option<OwnedSemaphorePermit>,
-    ) -> Result<(), String> {
-        self.tx
-            .send(ScriptCommand::DispatchEvent {
-                event: event.into(),
-                payload,
-                slot,
-            })
-            .map_err(|_| "Script runtime disconnected".to_string())
-    }
-
-    async fn dispatch_event(&self, event: &str, payload: JsonValue) -> Result<(), String> {
-        let slot = self
-            .event_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|err| err.to_string())?;
-        self.send_event(event, payload, Some(slot))
-    }
-
-    async fn replace_listeners(&self, module: Option<ScriptModule>) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.tx
-            .send(ScriptCommand::ReplaceListeners { module, reply })
-            .map_err(|_| "Script runtime disconnected".to_string())?;
-        result
-            .await
-            .map_err(|_| "Script runtime disconnected".to_string())?
-    }
-}
-
 fn dispatch_script_event(
     context: &rquickjs::Context,
     deadline: &Arc<Mutex<Option<Instant>>>,
@@ -238,22 +159,29 @@ fn run_script_command(
     deadline: &Arc<Mutex<Option<Instant>>>,
     command: ScriptCommand,
     event_budget: Duration,
+    stopping: &CancellationToken,
 ) {
     match command {
         ScriptCommand::DispatchEvent {
             event,
             payload,
             slot: _slot,
+            work: _work,
         } => {
-            dispatch_script_event(context, deadline, &event, &payload, event_budget);
+            if !stopping.is_cancelled() {
+                dispatch_script_event(context, deadline, &event, &payload, event_budget);
+            }
         }
         ScriptCommand::ReplaceListeners { module, reply } => {
             let result = eval_script_with_budget(context, deadline, "globalThis.__listeners = { __proto__: null };", SCRIPT_EXECUTION_BUDGET)
-                .map(|()| {
+                .and_then(|()| {
                     if let Some(module) = module {
                         // Install and initialize the replacement in one command so
                         // no event can run in the gap between reset and registration.
                         for (path, code) in module.scripts {
+                            if stopping.is_cancelled() {
+                                return Err("Script installation stopped during shutdown".into());
+                            }
                             match eval_script_with_budget(context, deadline, &code, SCRIPT_EXECUTION_BUDGET) {
                                 Ok(()) => tracing::info!(target: "mods", "[ModManager] Script '{}' executed for mod '{}'", path, module.id),
                                 Err(error) => tracing::error!(target: "mods", "[ModManager] Script '{}' error: {}", path, error),
@@ -261,30 +189,152 @@ fn run_script_command(
                         }
                         dispatch_script_event(context, deadline, "init", &serde_json::json!({ "modId": module.id }), event_budget);
                     }
+                    if stopping.is_cancelled() {
+                        return Err("Script installation stopped during shutdown".into());
+                    }
+                    Ok(())
                 });
             let _ = reply.send(result);
         }
+        ScriptCommand::Stop => {}
     }
 }
 
+fn start_script_workers(
+    service: &TaskScope,
+    queue: ModScriptQueue,
+    rx: tokio::sync::mpsc::UnboundedReceiver<ScriptCommand>,
+    state: Arc<AtomicU8>,
+    mut forward: impl FnMut(ScriptEvent) + Send + 'static,
+) -> Result<(), crate::lifecycle::Stopping> {
+    let shutdown = service.token();
+    let owner = service.clone();
+    service.spawn_durable("QuickJS runtime and relay", async move {
+        let (event_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let worker_state = state.clone();
+        let stop = queue.token();
+        let work = queue.work_token();
+        let vm_stop = stop.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            run_script_runtime(rx, event_tx, &vm_stop, &work, &worker_state)
+        });
+        let relay = async {
+            let health = tokio::time::sleep(Duration::from_millis(500));
+            tokio::pin!(health);
+            let mut checked = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled(), if !stop.is_cancelled() => queue.stop(),
+                    _ = &mut health, if !checked => {
+                        checked = true;
+                        if state.compare_exchange(
+                            ModRuntimeState::Initializing.as_u8(),
+                            ModRuntimeState::Failed.as_u8(),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ).is_ok() {
+                            queue.stop();
+                            tracing::error!(target: "mods", "QuickJS runtime initialization timed out");
+                        }
+                    }
+                    event = events.recv() => {
+                        let Some(event) = event else { break };
+                        forward(event);
+                    }
+                }
+            }
+        };
+        let relay = async {
+            if AssertUnwindSafe(relay).catch_unwind().await.is_err() {
+                queue.stop();
+                owner.report_failure("QuickJS relay", "event forwarding panicked");
+            }
+        };
+        let (result, ()) = tokio::join!(worker, relay);
+        match result {
+            Ok(Ok(())) if state.load(Ordering::SeqCst) != ModRuntimeState::Failed.as_u8() => {
+                state.store(ModRuntimeState::Disconnected.as_u8(), Ordering::SeqCst);
+            }
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(target: "mods", "QuickJS runtime failed: {error}");
+                state.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
+            }
+            Err(error) => {
+                tracing::error!(target: "mods", "QuickJS worker failed: {error}");
+                owner.report_failure("QuickJS worker", &error.to_string());
+                state.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
+            }
+        }
+    })?;
+    Ok(())
+}
+
+fn run_script_runtime(
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<ScriptCommand>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<ScriptEvent>,
+    stop: &CancellationToken,
+    work: &CancellationToken,
+    state: &AtomicU8,
+) -> Result<(), String> {
+    let runtime = rquickjs::Runtime::new().map_err(|error| error.to_string())?;
+    let context = rquickjs::Context::full(&runtime).map_err(|error| error.to_string())?;
+    let external_command = Arc::new(AtomicBool::new(false));
+    let deadline = install_script_interrupt_handler(&runtime, {
+        let stop = stop.clone();
+        let work = work.clone();
+        let external_command = external_command.clone();
+        move || {
+            stop.is_cancelled() || (external_command.load(Ordering::Relaxed) && work.is_cancelled())
+        }
+    });
+    context
+        .with(|ctx| crate::mods::api::register_api(&ctx, event_tx))
+        .map_err(|error| error.to_string())?;
+    if state
+        .compare_exchange(
+            ModRuntimeState::Initializing.as_u8(),
+            ModRuntimeState::Running.as_u8(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Ok(());
+    }
+    while let Some(command) = commands.blocking_recv() {
+        if stop.is_cancelled() {
+            break;
+        }
+        let external = matches!(
+            &command,
+            ScriptCommand::DispatchEvent { work: Some(_), .. }
+                | ScriptCommand::ReplaceListeners { .. }
+        );
+        external_command.store(external, Ordering::Relaxed);
+        let stopping = if external { work } else { stop };
+        run_script_command(&context, &deadline, command, SCRIPT_EVENT_BUDGET, stopping);
+    }
+    Ok(())
+}
+
 /// Payload for the mod:script-event Tauri event
-#[derive(serde::Serialize, Clone)]
-struct ScriptEventPayload {
+#[derive(serde::Serialize, Clone, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "mod:script-event")]
+pub(crate) struct ScriptEventPayload {
     event: String,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     payload: serde_json::Value,
 }
 
 /// Payload for the mod:ui-message Tauri event
-#[derive(serde::Serialize, Clone)]
-struct UiMessagePayload {
+#[derive(serde::Serialize, Clone, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "mod:ui-message")]
+pub(crate) struct UiMessagePayload {
     component: String,
+    #[specta(type = crate::ipc::wire::JsonValue)]
     payload: serde_json::Value,
-}
-
-/// Payload for character cue events
-#[derive(serde::Serialize, Clone)]
-struct CuePayload {
-    cue: String,
 }
 
 fn validate_manifest_capabilities(manifest: &ModManifest) -> Result<(), String> {
@@ -404,64 +454,25 @@ impl ModManager {
     pub(crate) fn init<R: tauri::Runtime>(
         &mut self,
         app_handle: tauri::AppHandle<R>,
+        lifecycle: &AppLifecycle,
     ) -> ModScriptQueue {
         self.set_runtime_state(ModRuntimeState::Initializing);
-
-        let (scripts, mut rx) = ModScriptQueue::channel();
+        let (scripts, rx) =
+            ModScriptQueue::channel_with_scope(lifecycle.scope(TaskStage::Work, "mods"));
         self.scripts = Some(scripts.clone());
 
-        // Outgoing event channel: QuickJS closures → event relay → Tauri
-        // Using std::sync::mpsc because QuickJS closures are !Send and run on a std thread
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<ScriptEvent>();
-        let state_for_script = self.runtime_state.clone();
-        let state_for_health = self.runtime_state.clone();
-
-        // ── QuickJS runtime thread ──
-        std::thread::spawn(move || {
-            let rt = match rquickjs::Runtime::new() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!(target: "mods", "[ModManager] Failed to create QuickJS runtime: {}", e);
-                    state_for_script.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
-                    return;
-                }
-            };
-            let ctx = match rquickjs::Context::full(&rt) {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    tracing::error!(target: "mods", "[ModManager] Failed to create QuickJS context: {}", e);
-                    state_for_script.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
-                    return;
-                }
-            };
-            let script_deadline = install_script_interrupt_handler(&rt);
-
-            // Register the Kokoro API with the event sender
-            ctx.with(|ctx| {
-                if let Err(e) = crate::mods::api::register_api(&ctx, event_tx) {
-                    eprintln!("Failed to register Kokoro API: {}", e);
-                }
-            });
-
-            state_for_script.store(ModRuntimeState::Running.as_u8(), Ordering::SeqCst);
-
-            // Event loop: process incoming script commands
-            while let Some(cmd) = rx.blocking_recv() {
-                run_script_command(&ctx, &script_deadline, cmd, SCRIPT_EVENT_BUDGET);
-            }
-
-            state_for_script.store(ModRuntimeState::Disconnected.as_u8(), Ordering::SeqCst);
-            tracing::info!(target: "mods", "[ModManager] Script thread shut down.");
-        });
-
-        // ── Event relay task: forward ScriptEvents to Tauri event bus ──
-        let handle = app_handle.clone();
-        std::thread::spawn(move || {
-            while let Ok(event) = event_rx.recv() {
+        let workers = lifecycle.scope(TaskStage::Service, "mods");
+        let runtime = start_script_workers(
+            &workers,
+            scripts.clone(),
+            rx,
+            self.runtime_state.clone(),
+            move |event| {
+                let handle = &app_handle;
                 match event {
                     ScriptEvent::Emit { event, payload } => {
-                        let _ = handle.emit(
-                            "mod:script-event",
+                        let _ = emit(
+                            handle,
                             ScriptEventPayload {
                                 event: event.clone(),
                                 payload: payload.clone(),
@@ -474,8 +485,8 @@ impl ModManager {
                         );
                     }
                     ScriptEvent::UiSend { component, data } => {
-                        let _ = handle.emit(
-                            "mod:ui-message",
+                        let _ = emit(
+                            handle,
                             UiMessagePayload {
                                 component: component.clone(),
                                 payload: data.clone(),
@@ -484,26 +495,22 @@ impl ModManager {
                         tracing::info!(target: "mods", "[ModManager] UI message sent to component '{}'", component);
                     }
                     ScriptEvent::PlayCue { cue } => {
-                        let _ = handle.emit("chat-cue", CuePayload { cue: cue.clone() });
+                        let _ = emit(
+                            handle,
+                            CueEvent {
+                                cue: cue.clone(),
+                                ..Default::default()
+                            },
+                        );
                         tracing::info!(target: "mods", "[ModManager] Cue triggered '{}'", cue);
                     }
                 }
-            }
-            tracing::info!(target: "mods", "[ModManager] Event relay shut down.");
-        });
-
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
-            if ModRuntimeState::from_u8(state_for_health.load(Ordering::SeqCst))
-                == ModRuntimeState::Initializing
-            {
-                state_for_health.store(ModRuntimeState::Failed.as_u8(), Ordering::SeqCst);
-                tracing::error!(
-                    target: "mods",
-                    "[ModManager] Runtime health check timed out during initialization"
-                );
-            }
-        });
+            },
+        );
+        if runtime.is_err() {
+            self.set_runtime_state(ModRuntimeState::Failed);
+            scripts.stop();
+        }
         scripts
     }
 
@@ -578,6 +585,11 @@ impl ModManager {
         mod_id: &str,
         app_handle: &tauri::AppHandle<R>,
     ) -> Result<(), String> {
+        let _admission = self
+            .scripts
+            .as_ref()
+            .map(|queue| queue.admit("load MOD"))
+            .transpose()?;
         let manifest = self
             .loaded_mods
             .get(mod_id)
@@ -615,7 +627,7 @@ impl ModManager {
                         }
 
                         self.active_theme = Some(theme.clone());
-                        let _ = app_handle.emit("mod:theme-override", &theme);
+                        let _ = emit(app_handle, ModThemeOverride(theme));
                         tracing::info!(target: "mods", "[ModManager] Theme loaded for mod '{}'", mod_id);
                     }
                     Err(e) => {
@@ -641,7 +653,7 @@ impl ModManager {
                 Ok(content) => match serde_json::from_str::<JsonValue>(&content) {
                     Ok(layout) => {
                         self.active_layout = Some(layout.clone());
-                        let _ = app_handle.emit("mod:layout-override", &layout);
+                        let _ = emit(app_handle, ModLayoutOverride(JsonPayload(layout)));
                         tracing::info!(target: "mods", "[ModManager] Layout loaded for mod '{}'", mod_id);
                     }
                     Err(e) => {
@@ -661,11 +673,12 @@ impl ModManager {
                 .iter()
                 .map(|(slot, path)| (slot.clone(), format!("mod://{}/{}", mod_id, path)))
                 .collect();
-            let _ = app_handle.emit("mod:components-register", &component_map);
+            let component_count = component_map.len();
+            let _ = emit(app_handle, ModComponentsRegister(component_map));
             tracing::info!(
                 target: "mods",
                 "[ModManager] Registered {} components for mod '{}'",
-                component_map.len(),
+                component_count,
                 mod_id
             );
         }
@@ -736,9 +749,7 @@ impl ModManager {
             return Err("Script runtime sender missing".to_string());
         };
 
-        queue.dispatch_event(event, payload).await.inspect_err(|_| {
-            self.set_runtime_state(ModRuntimeState::Disconnected);
-        })
+        queue.dispatch_event(event, payload).await
     }
 
     pub fn runtime_status_module_tag(&self) -> Option<String> {
@@ -780,7 +791,15 @@ impl ModManager {
     }
 
     /// 卸载当前活跃的 Mod（清除主题、布局、组件），恢复原生模式
-    pub async fn unload_mod<R: tauri::Runtime>(&mut self, app_handle: &tauri::AppHandle<R>) {
+    pub async fn unload_mod<R: tauri::Runtime>(
+        &mut self,
+        app_handle: &tauri::AppHandle<R>,
+    ) -> Result<(), String> {
+        let _admission = self
+            .scripts
+            .as_ref()
+            .map(|queue| queue.admit("unload MOD"))
+            .transpose()?;
         let manifest = self
             .active_mod_id
             .as_deref()
@@ -794,7 +813,7 @@ impl ModManager {
                 tracing::warn!(target: "mods", "Failed to reset MOD listeners during unload: {}", error);
             }
         }
-        let _ = app_handle.emit("mod:unload", ());
+        let _ = emit(app_handle, ModUnload);
         if let (Some(hooks), Some(manifest)) = (app_handle.try_state::<HookRuntime>(), manifest) {
             hooks
                 .emit_best_effort(
@@ -804,6 +823,7 @@ impl ModManager {
                 .await;
         }
         tracing::info!(target: "mods", "[ModManager] Active mod unloaded, native mode restored");
+        Ok(())
     }
 }
 
@@ -814,11 +834,113 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn managed_runtime() -> (
+        AppLifecycle,
+        ModScriptQueue,
+        Arc<AtomicU8>,
+        tokio::sync::mpsc::UnboundedReceiver<ScriptEvent>,
+    ) {
+        let lifecycle = AppLifecycle::new();
+        let service = lifecycle.scope(TaskStage::Service, "mods");
+        let (queue, commands) =
+            ModScriptQueue::channel_with_scope(lifecycle.scope(TaskStage::Work, "mods"));
+        let state = Arc::new(AtomicU8::new(ModRuntimeState::Initializing.as_u8()));
+        let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+        start_script_workers(
+            &service,
+            queue.clone(),
+            commands,
+            state.clone(),
+            move |event| {
+                let _ = send.send(event);
+            },
+        )
+        .unwrap();
+        (lifecycle, queue, state, receive)
+    }
+
+    #[tokio::test]
+    async fn mod_shutdown_preserves_admitted_chat_until_work_drains() {
+        let (lifecycle, queue, state, mut events) = managed_runtime();
+        queue
+            .replace_listeners(Some(ScriptModule {
+                id: "shutdown-fixture".into(),
+                scripts: vec![(
+                    "fixture.js".into(),
+                    "Kokoro.on('chat-done', event => Kokoro.emit('from-accepted-chat', event));"
+                        .into(),
+                )],
+            }))
+            .await
+            .unwrap();
+        let admitted = queue.admit("accepted chat fixture").unwrap();
+        let shutdown = lifecycle
+            .try_begin_shutdown(Duration::from_secs(5))
+            .unwrap();
+        assert!(queue
+            .dispatch_event("unaccepted", JsonValue::Null)
+            .await
+            .is_err());
+        queue.enqueue_chat_event(
+            "chat-turn-finish",
+            serde_json::json!({"turn_id": "accepted"}),
+        );
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap();
+        assert!(matches!(event, Some(ScriptEvent::Emit { event, payload })
+            if event == "from-accepted-chat" && payload["turn_id"] == "accepted"));
+        drop(admitted);
+        let report = shutdown
+            .finish_with_finalizer(|_| async { Vec::new() }, |_| async { Ok(()) })
+            .await;
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(
+            ModRuntimeState::from_u8(state.load(Ordering::SeqCst)),
+            ModRuntimeState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_shutdown_interrupts_an_external_script_and_joins_quickjs() {
+        let (lifecycle, queue, state, mut events) = managed_runtime();
+        let load = tokio::spawn(async move {
+            let _admission = queue.admit("install script fixture").unwrap();
+            queue
+                .replace_listeners(Some(ScriptModule {
+                    id: "shutdown-fixture".into(),
+                    scripts: vec![(
+                        "loop.js".into(),
+                        "Kokoro.emit('script-entered', {}); while (true) {}".into(),
+                    )],
+                }))
+                .await
+        });
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, Some(ScriptEvent::Emit { event, .. }) if event == "script-entered")
+        );
+        let shutdown = lifecycle
+            .try_begin_shutdown(Duration::from_secs(3))
+            .unwrap();
+        let report = shutdown
+            .finish_with_finalizer(|_| async { Vec::new() }, |_| async { Ok(()) })
+            .await;
+        assert!(report.is_clean(), "{report:?}");
+        assert!(load.await.unwrap().is_err());
+        assert_eq!(
+            ModRuntimeState::from_u8(state.load(Ordering::SeqCst)),
+            ModRuntimeState::Disconnected
+        );
+    }
+
     fn script_context(code: &str) -> (rquickjs::Context, Arc<Mutex<Option<Instant>>>) {
         let runtime = rquickjs::Runtime::new().unwrap();
         let context = rquickjs::Context::full(&runtime).unwrap();
-        let deadline = install_script_interrupt_handler(&runtime);
-        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let deadline = install_script_interrupt_handler(&runtime, || false);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         context.with(|ctx| {
             crate::mods::api::register_api(&ctx, event_tx).unwrap();
             ctx.eval::<(), _>(code).unwrap();
@@ -869,7 +991,13 @@ mod tests {
             // The consumer has not run yet; reset or replacement must not overtake
             // the original notifications already waiting in the same queue.
             while let Ok(command) = rx.try_recv() {
-                run_script_command(&context, &deadline, command, SCRIPT_EVENT_BUDGET);
+                run_script_command(
+                    &context,
+                    &deadline,
+                    command,
+                    SCRIPT_EVENT_BUDGET,
+                    &CancellationToken::new(),
+                );
             }
             replace.await.unwrap();
             let mut expected = vec![["old-chat", "before"], ["old-done", "original"]];
@@ -952,7 +1080,13 @@ mod tests {
         // consumer has not freed a single slot. Only the two completions bypass the limit.
         assert_eq!(rx.len(), SCRIPT_EVENT_CAPACITY + 2);
         while let Ok(command) = rx.try_recv() {
-            run_script_command(&context, &deadline, command, Duration::from_millis(75));
+            run_script_command(
+                &context,
+                &deadline,
+                command,
+                Duration::from_millis(75),
+                &CancellationToken::new(),
+            );
         }
         assert_eq!(
             received(&context),
@@ -966,7 +1100,7 @@ mod tests {
                 ["second-done", ""]
             ]),
         );
-        assert_eq!(queue.event_slots.available_permits(), SCRIPT_EVENT_CAPACITY);
+        assert_eq!(queue.available_event_slots(), SCRIPT_EVENT_CAPACITY);
     }
 
     /// Helper: create a temp dir with a fake mod inside
@@ -1139,7 +1273,7 @@ mod tests {
     fn script_execution_budget_interrupts_an_infinite_loop() {
         let runtime = rquickjs::Runtime::new().expect("runtime should initialize");
         let context = rquickjs::Context::full(&runtime).expect("context should initialize");
-        let deadline = install_script_interrupt_handler(&runtime);
+        let deadline = install_script_interrupt_handler(&runtime, || false);
 
         let result = eval_script_with_budget(
             &context,
@@ -1161,7 +1295,7 @@ mod tests {
     fn script_execution_budget_allows_a_short_script() {
         let runtime = rquickjs::Runtime::new().expect("runtime should initialize");
         let context = rquickjs::Context::full(&runtime).expect("context should initialize");
-        let deadline = install_script_interrupt_handler(&runtime);
+        let deadline = install_script_interrupt_handler(&runtime, || false);
 
         let result = eval_script_with_budget(
             &context,

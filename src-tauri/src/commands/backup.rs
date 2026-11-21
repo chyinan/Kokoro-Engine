@@ -3,6 +3,7 @@
 use crate::ai::context::{
     acquire_database_operation_read_guard, acquire_database_operation_write_guard, AIOrchestrator,
 };
+use crate::bot::{BotConfig, BotRuntimeService, PreparedBotConfigCommit};
 use crate::characters::activation::CommittedCharacterRuntime;
 use crate::characters::catalog::{
     validate_package_directory as validate_catalog_package_directory, CharacterCatalog,
@@ -13,6 +14,8 @@ use crate::characters::instance_resource::{
 };
 use crate::characters::{validate_package_content, PackageContentEntry};
 use crate::error::KokoroError;
+use crate::lifecycle::WorkLease;
+use crate::ipc::wire::Response;
 use crate::registry::client::verify_registry_entry_archive;
 use crate::registry::manifest::{RegistryEntry, RegistryIndex, OFFICIAL_REGISTRY_URL};
 use semver::Version;
@@ -37,6 +40,9 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
 // pattern: Imperative Shell
 
+const BOT_CONFIG_FILENAME: &str = "bot_config.json";
+const LEGACY_TELEGRAM_CONFIG_FILENAME: &str = "telegram_config.json";
+
 /// All JSON config filenames we back up.
 const CONFIG_FILES: &[&str] = &[
     "llm_config.json",
@@ -45,8 +51,8 @@ const CONFIG_FILES: &[&str] = &[
     "vision_config.json",
     "imagegen_config.json",
     "mcp_servers.json",
-    "bot_config.json",
-    "telegram_config.json",
+    BOT_CONFIG_FILENAME,
+    LEGACY_TELEGRAM_CONFIG_FILENAME,
     "jailbreak_prompt.json",
     "proactive_enabled.json",
     "memory_system_config.json",
@@ -84,7 +90,7 @@ pub(crate) const BACKUP_FORMAT_VERSION: &str = "2";
 
 // ── Types ────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, specta::Type)]
 pub struct BackupManifest {
     pub version: String,
     pub created_at: String,
@@ -93,7 +99,7 @@ pub struct BackupManifest {
     pub includes_character_resources: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, specta::Type)]
 pub struct ExportOptions {
     #[serde(default)]
     pub include_character_resources: bool,
@@ -318,7 +324,7 @@ pub struct BackupArchiveInspection {
     pub includes_provider_credentials: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, specta::Type)]
 pub struct BackupStats {
     pub memories: i64,
     pub conversations: i64,
@@ -326,7 +332,7 @@ pub struct BackupStats {
     pub configs: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct ExportResult {
     pub path: String,
     pub size_bytes: u64,
@@ -339,7 +345,7 @@ pub struct ExportResult {
 /// reuses a local id. The preview exposes them so the user can decide, per
 /// character, whether to import it as a new instance or merge its data into an
 /// existing one.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, specta::Type)]
 pub struct BackupCharacterSummary {
     pub id: String,
     pub name: String,
@@ -347,7 +353,7 @@ pub struct BackupCharacterSummary {
     pub conversation_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct ImportPreview {
     pub manifest: BackupManifest,
     pub has_database: bool,
@@ -359,7 +365,7 @@ pub struct ImportPreview {
 }
 
 /// Routes the rows of one imported character to a local character instance.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, specta::Type)]
 pub struct CharacterMerge {
     /// Character id as stored inside the backup.
     pub imported_id: String,
@@ -367,7 +373,7 @@ pub struct CharacterMerge {
     pub target_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 pub struct ImportOptions {
     pub import_database: bool,
     pub import_configs: bool,
@@ -382,7 +388,7 @@ pub struct ImportOptions {
     pub ignored_characters: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum ConflictStrategy {
     Skip,
@@ -398,7 +404,7 @@ impl ConflictStrategy {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, specta::Type)]
 pub struct ImportResult {
     pub imported_memories: i64,
     pub imported_conversations: i64,
@@ -1122,13 +1128,29 @@ pub(crate) fn validate_backup_resource_totals(
 fn replace_configs_atomically(
     app_data: &Path,
     configs: &[(String, String)],
+    bot_commit: Option<PreparedBotConfigCommit>,
 ) -> Result<ConfigReplacementGuard, KokoroError> {
+    let bot_content = bot_commit
+        .as_ref()
+        .and_then(PreparedBotConfigCommit::next)
+        .map(serde_json::to_string_pretty)
+        .transpose()
+        .map_err(|error| KokoroError::Config(format!("Failed to serialize bot config: {error}")))?;
+    let mut plans = Vec::with_capacity(configs.len() + usize::from(bot_content.is_some()));
+    let configs = configs
+        .iter()
+        .map(|(filename, content)| (filename.as_str(), content.as_str()))
+        .chain(
+            bot_content
+                .as_deref()
+                .map(|content| (BOT_CONFIG_FILENAME, content)),
+        );
     ensure_non_redirected_parent_chain(app_data, app_data)?;
     create_non_redirected_directory_chain(app_data)?;
-    for (filename, _) in configs {
+    for (filename, _) in configs.clone() {
         let target = app_data.join(filename);
         if let Ok(metadata) = fs::symlink_metadata(&target) {
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            if is_filesystem_redirect(&metadata) || !metadata.is_file() {
                 return Err(KokoroError::Validation(format!(
                     "config target is not a regular non-symlink file: {filename}"
                 )));
@@ -1136,22 +1158,25 @@ fn replace_configs_atomically(
         }
     }
     let token = Uuid::new_v4();
-    let mut plans: Vec<(PathBuf, PathBuf, PathBuf, bool, bool)> = Vec::with_capacity(configs.len());
     for (filename, content) in configs {
         let target = app_data.join(filename);
         let temporary = app_data.join(format!(".{filename}.{token}.import"));
         let backup = app_data.join(format!(".{filename}.{token}.backup"));
-        let prepared_content = match prepare_backup_config_for_install(app_data, filename, content)
-        {
-            Ok(content) => content,
-            Err(error) => {
-                for (_, staged, _, _, _) in &plans {
-                    let _ = fs::remove_file(staged);
+        let prepared_content = if filename == BOT_CONFIG_FILENAME {
+            // The owner prepared this exact configuration while holding its write lock.
+            std::borrow::Cow::Borrowed(content)
+        } else {
+            match prepare_backup_config_for_install(app_data, filename, content) {
+                Ok(content) => std::borrow::Cow::Owned(content),
+                Err(error) => {
+                    for (_, staged, _, _, _) in &plans {
+                        let _ = fs::remove_file(staged);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
         };
-        if let Err(error) = fs::write(&temporary, prepared_content) {
+        if let Err(error) = fs::write(&temporary, prepared_content.as_bytes()) {
             for (_, staged, _, _, _) in &plans {
                 let _ = fs::remove_file(staged);
             }
@@ -1165,7 +1190,7 @@ fn replace_configs_atomically(
             ensure_non_redirected_parent_chain(app_data, app_data)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             if let Ok(metadata) = fs::symlink_metadata(&*target) {
-                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                if is_filesystem_redirect(&metadata) || !metadata.is_file() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("config target is not a regular file: {}", target.display()),
@@ -1199,12 +1224,14 @@ fn replace_configs_atomically(
     }
     Ok(ConfigReplacementGuard {
         plans,
+        bot_commit,
         is_armed: true,
     })
 }
 
 struct ConfigReplacementGuard {
     plans: Vec<(PathBuf, PathBuf, PathBuf, bool, bool)>,
+    bot_commit: Option<PreparedBotConfigCommit>,
     is_armed: bool,
 }
 
@@ -1223,6 +1250,9 @@ impl ConfigReplacementGuard {
             }
         }
         self.is_armed = false;
+        if let Some(commit) = self.bot_commit.take() {
+            commit.publish();
+        }
     }
 }
 
@@ -1231,6 +1261,7 @@ impl Drop for ConfigReplacementGuard {
         if !self.is_armed {
             return;
         }
+        // The bot commit still owns its write lock while these files are rolled back.
         for (target, temporary, backup, had_original, was_installed) in self.plans.iter().rev() {
             let _ = fs::remove_file(temporary);
             if *was_installed {
@@ -3069,8 +3100,11 @@ async fn open_import_pool_without_orchestrator(app_data: &Path) -> Result<Sqlite
     Ok(orchestrator.db)
 }
 
-async fn resolve_import_pool(app: &AppHandle, app_data: &Path) -> Result<SqlitePool, KokoroError> {
-    if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
+async fn resolve_import_pool(
+    app: Option<&AppHandle>,
+    app_data: &Path,
+) -> Result<SqlitePool, KokoroError> {
+    if let Some(orchestrator) = app.and_then(|app| app.try_state::<AIOrchestrator>()) {
         return Ok(orchestrator.db.clone());
     }
 
@@ -3377,15 +3411,104 @@ fn prepare_backup_config_for_install(
     })
 }
 
+fn decode_backup_bot_config<T: serde::de::DeserializeOwned>(
+    filename: &str,
+    content: &str,
+) -> Result<T, KokoroError> {
+    let sanitized = sanitize_backup_config(content, filename)?;
+    serde_json::from_str(&sanitized).map_err(|error| {
+        KokoroError::Validation(format!("invalid backup configuration {filename}: {error}"))
+    })
+}
+
+fn restore_bot_config(
+    current: &BotConfig,
+    bot_config: Option<&str>,
+    legacy_telegram: Option<&str>,
+) -> Result<BotConfig, KokoroError> {
+    let mut restored: BotConfig = match bot_config {
+        Some(content) => decode_backup_bot_config(BOT_CONFIG_FILENAME, content)?,
+        None => current.clone(),
+    };
+    // Pre-revision archives could store Telegram settings in a separate file.
+    if let Some(content) = legacy_telegram.filter(|_| {
+        bot_config.is_none()
+            || (restored.revision == 0
+                && !crate::bot::telegram_config_has_user_values(&restored.telegram))
+    }) {
+        restored.telegram = decode_backup_bot_config(LEGACY_TELEGRAM_CONFIG_FILENAME, content)?;
+    }
+
+    // Re-encoding the typed configuration fills in sections omitted by older
+    // archives. Strip those sections' default credentials before restoring the
+    // corresponding secrets from the owner's current snapshot.
+    let mut restored = serde_json::to_value(restored)?;
+    sanitize_backup_json(&mut restored);
+    merge_local_backup_secrets(&mut restored, &serde_json::to_value(current)?);
+    Ok(serde_json::from_value(restored)?)
+}
+
+async fn replace_import_configs(
+    app_data: &Path,
+    runtime: &BotRuntimeService,
+    configs: Vec<(String, String)>,
+    strategy: ConflictStrategy,
+) -> Result<ConfigReplacementGuard, KokoroError> {
+    let skip = strategy == ConflictStrategy::Skip;
+    let mut bot_config = None;
+    let mut legacy_telegram = None;
+    let other_configs: Vec<_> = configs
+        .into_iter()
+        .filter_map(|(filename, content)| match filename.as_str() {
+            BOT_CONFIG_FILENAME => {
+                bot_config = Some(content);
+                None
+            }
+            LEGACY_TELEGRAM_CONFIG_FILENAME => {
+                if !skip || !app_data.join(&filename).exists() {
+                    legacy_telegram = Some(content);
+                }
+                None
+            }
+            _ if skip && app_data.join(&filename).exists() => None,
+            _ => Some((filename, content)),
+        })
+        .collect();
+    let bot_commit = if bot_config.is_some() || legacy_telegram.is_some() {
+        if runtime.config_path() != app_data.join(BOT_CONFIG_FILENAME) {
+            return Err(KokoroError::Config(
+                "Backup and bot runtime configuration paths differ".into(),
+            ));
+        }
+        let commit = runtime
+            .prepare_restored_config(skip, |current| {
+                restore_bot_config(current, bot_config.as_deref(), legacy_telegram.as_deref())
+                    .map(Some)
+            })
+            .await?;
+        // A skipped configuration must not hold the lock across the database import.
+        commit.next().is_some().then_some(commit)
+    } else {
+        None
+    };
+    replace_configs_atomically(app_data, &other_configs, bot_commit)
+}
+
 // ── Commands ─────────────────────────────────────────
 
+pub(super) fn admit_backup_operation(app: &AppHandle, name: &str) -> Result<WorkLease, KokoroError> {
+    crate::ipc::admit_operation(app, "backup", name)
+}
+
 #[tauri::command]
+#[specta::specta]
 pub async fn export_data(
     app: AppHandle,
     export_path: String,
     _characters_json: Option<String>,
     options: Option<ExportOptions>,
-) -> Result<ExportResult, KokoroError> {
+) -> Result<Response<ExportResult>, KokoroError> {
+    let _export = admit_backup_operation(&app, "manual-export")?;
     let _database_operation_guard = acquire_database_operation_read_guard().await;
     let app_data = app_data_dir(&app)?;
     ensure_non_redirected_parent_chain(&app_data, &app_data)?;
@@ -3468,11 +3591,11 @@ pub async fn export_data(
         export_path, size_bytes, stats.memories, stats.conversations, stats.configs
     );
 
-    Ok(ExportResult {
+    Ok(Response(ExportResult {
         path: export_path,
         size_bytes,
         stats,
-    })
+    }))
 }
 
 /// 核心导出逻辑，供自动备份模块复用（不需要 AppHandle）
@@ -3551,7 +3674,12 @@ pub async fn export_data_to_path(
 }
 
 #[tauri::command]
-pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroError> {
+#[specta::specta]
+pub async fn preview_import(
+    app: AppHandle,
+    file_path: String,
+) -> Result<Response<ImportPreview>, KokoroError> {
+    let _preview = admit_backup_operation(&app, "preview-import")?;
     let path = PathBuf::from(&file_path);
     let file = fs::File::open(&path).map_err(KokoroError::from)?;
     let mut archive = zip::ZipArchive::new(file)
@@ -3620,14 +3748,14 @@ pub async fn preview_import(file_path: String) -> Result<ImportPreview, KokoroEr
         )
     };
 
-    Ok(ImportPreview {
+    Ok(Response(ImportPreview {
         manifest,
         has_database,
         has_configs,
         config_files,
         stats,
         characters,
-    })
+    }))
 }
 
 /// List the character instances stored in a backup database, with the amount of
@@ -3682,15 +3810,38 @@ async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool, sqlx::Erro
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn import_data(
     app: AppHandle,
     file_path: String,
     options: ImportOptions,
-) -> Result<ImportResult, KokoroError> {
+) -> Result<Response<ImportResult>, KokoroError> {
+    let _import = admit_backup_operation(&app, "import")?;
     let _database_operation_guard = acquire_database_operation_write_guard().await;
     let app_data = app_data_dir(&app)?;
+    let runtime = app.try_state::<BotRuntimeService>().ok_or_else(|| {
+        KokoroError::Internal("Bot runtime unavailable during backup import".into())
+    })?;
+    import_backup(
+        Some(&app),
+        &app_data,
+        &runtime,
+        Path::new(&file_path),
+        options,
+    )
+    .await
+    .map(Response)
+}
+
+async fn import_backup(
+    app: Option<&AppHandle>,
+    app_data: &Path,
+    runtime: &BotRuntimeService,
+    file_path: &Path,
+    options: ImportOptions,
+) -> Result<ImportResult, KokoroError> {
     let staged_configs = if options.import_configs {
-        stage_backup_configs(Path::new(&file_path))?
+        stage_backup_configs(file_path)?
     } else {
         Vec::new()
     };
@@ -3700,18 +3851,17 @@ pub async fn import_data(
     let tmp_dir = tmp_guard.path();
 
     // Validate every resource before touching live database rows or package paths.
-    let inspection = inspect_backup_archive(Path::new(&file_path))?;
+    let inspection = inspect_backup_archive(file_path)?;
     let resource_staging = tmp_dir.join("character-resources");
     let staged_resources = if should_stage_character_resources(&options, &inspection) {
-        stage_character_resources(Path::new(&file_path), &resource_staging)?
+        stage_character_resources(file_path, &resource_staging)?
     } else {
         StagedCharacterResources::default()
     };
     let mut has_db = false;
 
     {
-        let path = PathBuf::from(&file_path);
-        let file = fs::File::open(&path).map_err(KokoroError::from)?;
+        let file = fs::File::open(file_path).map_err(KokoroError::from)?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| KokoroError::Internal(format!("Invalid ZIP archive: {}", e)))?;
 
@@ -3730,9 +3880,6 @@ pub async fn import_data(
     let extracted_configs: Vec<(String, String)> = staged_configs
         .into_iter()
         .filter(|(filename, _)| should_import_config(filename, options.import_database, has_db))
-        .filter(|(filename, _)| {
-            options.conflict_strategy != ConflictStrategy::Skip || !app_data.join(filename).exists()
-        })
         .collect();
 
     let mut promoted_resources = if has_db
@@ -3788,11 +3935,17 @@ pub async fn import_data(
         skipped_memories: 0,
         debug_log: Vec::new(),
     };
-    let mut config_replacement = replace_configs_atomically(&app_data, &extracted_configs)?;
+    let mut config_replacement = replace_import_configs(
+        app_data,
+        runtime,
+        extracted_configs,
+        options.conflict_strategy,
+    )
+    .await?;
     result.imported_configs = config_replacement.imported_count();
 
     if has_db {
-        let import_pool = resolve_import_pool(&app, &app_data).await?;
+        let import_pool = resolve_import_pool(app, app_data).await?;
         let tmp_db = tmp_dir.join("import.db");
         // 必须用同一个连接：ATTACH DATABASE 是连接级别的操作
         let mut conn = import_pool.acquire().await.map_err(|e| {
@@ -4274,16 +4427,21 @@ pub async fn import_data(
         }
         transaction.commit().await?;
 
-        // Still under the exclusive database gate: no chat worker or view read
-        // can associate the replacement rows with the old process journal.
-        if let Some(runtime) = app.try_state::<std::sync::Arc<crate::chat::runtime::ChatRuntimeState>>() {
-            runtime.invalidate_imported_history();
-        }
-
-        // Database rows now reference the imported files. Do not let a later
-        // connection-level DETACH error remove those committed resources.
+        // The committed rows now reference the imported files. Publish the bot
+        // configuration before any further awaits can interrupt the import.
         promoted_resources.disarm();
         config_replacement.disarm();
+
+        // Still under the exclusive database gate: no chat worker or view read
+        // can associate the replacement rows with the old process journal.
+        if let Some(runtime) = app.and_then(|app| {
+            app.try_state::<std::sync::Arc<crate::chat::runtime::ChatRuntimeState>>()
+        }) {
+            runtime.invalidate_imported_history();
+        }
+        if let Some(orchestrator) = app.and_then(|app| app.try_state::<AIOrchestrator>()) {
+            orchestrator.reset_runtime_owners().await;
+        }
 
         detach_import_database_best_effort(&mut conn).await;
 
@@ -4772,23 +4930,73 @@ mod tests {
                 .execute(&mut *connection).await.unwrap();
             sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (50, 'local', 'user', 'local prompt', '1')")
                 .execute(&mut *connection).await.unwrap();
-            sqlx::query("ATTACH DATABASE ':memory:' AS import_db").execute(&mut *connection).await.unwrap();
+            sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
             create_import_conversation_tables(&mut connection).await;
-            sqlx::query("CREATE TABLE import_db.characters (id TEXT PRIMARY KEY)").execute(&mut *connection).await.unwrap();
-            sqlx::query("INSERT INTO import_db.characters VALUES ('remote'), ('bridge')").execute(&mut *connection).await.unwrap();
+            sqlx::query("CREATE TABLE import_db.characters (id TEXT PRIMARY KEY)")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO import_db.characters VALUES ('remote'), ('bridge')")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
             let cases = [
                 ("valid", "remote", "remote", "valid", "turn-valid", true),
-                ("target-alias", "remote", "default", "target-alias", "turn-target", false),
-                ("chain-alias", "remote", "bridge", "chain-alias", "turn-chain", false),
-                ("foreign-character", "remote", "other", "foreign-character", "turn-foreign", false),
-                ("foreign-conversation", "remote", "remote", "valid", "turn-conversation", false),
+                (
+                    "target-alias",
+                    "remote",
+                    "default",
+                    "target-alias",
+                    "turn-target",
+                    false,
+                ),
+                (
+                    "chain-alias",
+                    "remote",
+                    "bridge",
+                    "chain-alias",
+                    "turn-chain",
+                    false,
+                ),
+                (
+                    "foreign-character",
+                    "remote",
+                    "other",
+                    "foreign-character",
+                    "turn-foreign",
+                    false,
+                ),
+                (
+                    "foreign-conversation",
+                    "remote",
+                    "remote",
+                    "valid",
+                    "turn-conversation",
+                    false,
+                ),
                 ("empty-turn", "remote", "remote", "empty-turn", "", false),
-                ("valid-bridge", "bridge", "bridge", "valid-bridge", "turn-bridge", true),
+                (
+                    "valid-bridge",
+                    "bridge",
+                    "bridge",
+                    "valid-bridge",
+                    "turn-bridge",
+                    true,
+                ),
             ];
-            for (index, (conversation, owner, event_owner, event_conversation, turn, _)) in cases.iter().enumerate() {
+            for (index, (conversation, owner, event_owner, event_conversation, turn, _)) in
+                cases.iter().enumerate()
+            {
                 let prompt = (index * 2 + 1) as i64;
                 sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES (?, ?)")
-                    .bind(conversation).bind(owner).execute(&mut *connection).await.unwrap();
+                    .bind(conversation)
+                    .bind(owner)
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
                 sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, 'user', 'failed prompt', NULL, '1')")
                     .bind(prompt).bind(conversation).execute(&mut *connection).await.unwrap();
                 let metadata = serde_json::json!({ "type": "failure_event", "user_message_id": prompt, "keep_through_message_id": prompt,
@@ -4802,18 +5010,36 @@ mod tests {
                 .bind(serde_json::json!({ "type": "failure_event", "user_message_id": 1, "keep_through_message_id": 2,
                     "event": { "character_id": "default", "conversation_id": "valid", "turn_id": "foreign-tail" } }).to_string())
                 .execute(&mut *connection).await.unwrap();
-            let mut merges = vec![CharacterMerge { imported_id: "remote".into(), target_id: if chain.is_some() { "bridge" } else { "default" }.into() }];
+            let mut merges = vec![CharacterMerge {
+                imported_id: "remote".into(),
+                target_id: if chain.is_some() { "bridge" } else { "default" }.into(),
+            }];
             if let Some(reverse) = chain {
-                merges.push(CharacterMerge { imported_id: "bridge".into(), target_id: "default".into() });
-                if reverse { merges.reverse(); }
+                merges.push(CharacterMerge {
+                    imported_id: "bridge".into(),
+                    target_id: "default".into(),
+                });
+                if reverse {
+                    merges.reverse();
+                }
             }
             // Chained mappings are accepted production inputs, in either order.
-            validate_character_selection(&mut connection, true, &merges, &[]).await.unwrap();
+            validate_character_selection(&mut connection, true, &merges, &[])
+                .await
+                .unwrap();
             let mut tx = connection.begin().await.unwrap();
-            apply_import_character_merges(&mut tx, &merges).await.unwrap();
+            apply_import_character_merges(&mut tx, &merges)
+                .await
+                .unwrap();
             if overwrite {
-                sqlx::query("DELETE FROM conversation_messages").execute(&mut *tx).await.unwrap();
-                sqlx::query("DELETE FROM conversations").execute(&mut *tx).await.unwrap();
+                sqlx::query("DELETE FROM conversation_messages")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM conversations")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
             } else {
                 prepare_skip_conversation_scope(&mut tx).await.unwrap();
             }
@@ -4827,44 +5053,112 @@ mod tests {
             }
             tx.commit().await.unwrap();
             drop(connection);
-            for (index, (conversation, original_owner, event_owner, event_conversation, turn, valid)) in cases.iter().enumerate() {
+            for (
+                index,
+                (conversation, original_owner, event_owner, event_conversation, turn, valid),
+            ) in cases.iter().enumerate()
+            {
                 let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
                     "SELECT id, role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id")
                     .bind(conversation).fetch_all(&state.db).await.unwrap();
-                assert_eq!(rows.len(), if *conversation == "valid" { 3 } else { 2 }, "keep every original row");
+                assert_eq!(
+                    rows.len(),
+                    if *conversation == "valid" { 3 } else { 2 },
+                    "keep every original row"
+                );
                 assert_eq!(rows[1].2, "original diagnostic");
-                assert_eq!(rows[0].0, (index * 2 + 1) as i64 + if overwrite { 0 } else { 50 });
-                let owner: String = sqlx::query_scalar("SELECT character_id FROM conversations WHERE id = ?")
-                    .bind(conversation).fetch_one(&state.db).await.unwrap();
-                let revision = crate::chat::retry::conversation_message_revision(&mut *state.db.acquire().await.unwrap(), conversation).await.unwrap();
-                let tail = rows.iter().rev().find(|(_, role, _, meta)| is_visible_message_raw(role, meta.as_deref())).unwrap().0;
-                let retry = FailureRetry { diagnostic_message_id: rows[1].0, expected_tail_message_id: tail, expected_history_revision: revision };
+                assert_eq!(
+                    rows[0].0,
+                    (index * 2 + 1) as i64 + if overwrite { 0 } else { 50 }
+                );
+                let owner: String =
+                    sqlx::query_scalar("SELECT character_id FROM conversations WHERE id = ?")
+                        .bind(conversation)
+                        .fetch_one(&state.db)
+                        .await
+                        .unwrap();
+                let revision = crate::chat::retry::conversation_message_revision(
+                    &mut *state.db.acquire().await.unwrap(),
+                    conversation,
+                )
+                .await
+                .unwrap();
+                let tail = rows
+                    .iter()
+                    .rev()
+                    .find(|(_, role, _, meta)| is_visible_message_raw(role, meta.as_deref()))
+                    .unwrap()
+                    .0;
+                let retry = FailureRetry {
+                    diagnostic_message_id: rows[1].0,
+                    expected_tail_message_id: tail,
+                    expected_history_revision: revision,
+                };
                 let runtime = ChatRuntimeState::default();
-                let plan = RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), &owner, conversation, "failed prompt").await;
+                let plan = RegenerationPlan::prepare(
+                    &state,
+                    &runtime,
+                    Regeneration::Failure(&retry),
+                    &owner,
+                    conversation,
+                    "failed prompt",
+                )
+                .await;
                 if *valid {
                     assert_eq!(plan.unwrap().user_message_id, rows[0].0);
                 } else {
                     assert!(plan.is_err(), "foreign diagnostic gained retry authority: {conversation}, overwrite={overwrite}, chain={chain:?}");
-                    assert_eq!(tail, rows[0].0, "invalid diagnostics must not become visible tail rows");
-                    assert_eq!(crate::commands::chat::resolve_trailing_visible_user_message(&state.db, conversation).await.unwrap(),
-                        Some((rows[0].0, "failed prompt".into())));
+                    assert_eq!(
+                        tail, rows[0].0,
+                        "invalid diagnostics must not become visible tail rows"
+                    );
+                    assert_eq!(
+                        crate::chat::application::resolve_trailing_visible_user_message(
+                            &state.db,
+                            conversation
+                        )
+                        .await
+                        .unwrap(),
+                        Some((rows[0].0, "failed prompt".into()))
+                    );
                 }
-                let metadata: serde_json::Value = serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
-                assert_eq!(metadata["type"], if *valid { "failure_event" } else { "invalid_failure_event" });
-                assert_eq!(metadata["event"]["character_id"], if *valid { owner.as_str() } else { *event_owner });
+                let metadata: serde_json::Value =
+                    serde_json::from_str(rows[1].3.as_deref().unwrap()).unwrap();
+                assert_eq!(
+                    metadata["type"],
+                    if *valid {
+                        "failure_event"
+                    } else {
+                        "invalid_failure_event"
+                    }
+                );
+                assert_eq!(
+                    metadata["event"]["character_id"],
+                    if *valid { owner.as_str() } else { *event_owner }
+                );
                 assert_eq!(metadata["event"]["conversation_id"], *event_conversation);
                 assert_eq!(metadata["event"]["turn_id"], *turn);
                 assert_eq!(metadata["user_message_id"], rows[0].0);
                 assert_eq!(metadata["keep_through_message_id"], rows[0].0);
                 if *conversation == "valid" {
-                    let trailing: serde_json::Value = serde_json::from_str(rows[2].3.as_deref().unwrap()).unwrap();
+                    let trailing: serde_json::Value =
+                        serde_json::from_str(rows[2].3.as_deref().unwrap()).unwrap();
                     assert_eq!(trailing["type"], "invalid_failure_event");
                     assert_eq!(trailing["user_message_id"], rows[0].0);
                     assert_eq!(trailing["keep_through_message_id"], rows[1].0);
                     assert_eq!(tail, rows[1].0);
                 }
                 if *valid && owner != *original_owner {
-                    assert!(RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), original_owner, conversation, "failed prompt").await.is_err());
+                    assert!(RegenerationPlan::prepare(
+                        &state,
+                        &runtime,
+                        Regeneration::Failure(&retry),
+                        original_owner,
+                        conversation,
+                        "failed prompt"
+                    )
+                    .await
+                    .is_err());
                 }
             }
         }
@@ -4896,7 +5190,10 @@ mod tests {
                 .execute(&mut *connection).await.unwrap();
             sqlx::query("INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (50, 'local', 'user', 'local prompt', '1')")
                 .execute(&mut *connection).await.unwrap();
-            sqlx::query("ATTACH DATABASE ':memory:' AS import_db").execute(&mut *connection).await.unwrap();
+            sqlx::query("ATTACH DATABASE ':memory:' AS import_db")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
             create_import_conversation_tables(&mut connection).await;
             sqlx::query("INSERT INTO import_db.conversations (id, character_id) VALUES ('imported', 'remote'), ('foreign', 'other')")
                 .execute(&mut *connection).await.unwrap();
@@ -4910,34 +5207,76 @@ mod tests {
                 (4, "system", "imported", "invalid json".into()),
                 (5, "system", "foreign", valid.to_string()),
                 (6, "system", "imported", {
-                    let mut foreign = valid.clone(); foreign["event"]["character_id"] = "other".into(); foreign.to_string()
+                    let mut foreign = valid.clone();
+                    foreign["event"]["character_id"] = "other".into();
+                    foreign.to_string()
                 }),
                 (7, "system", "imported", {
-                    let mut foreign = valid.clone(); foreign["event"]["conversation_id"] = "foreign".into(); foreign.to_string()
+                    let mut foreign = valid.clone();
+                    foreign["event"]["conversation_id"] = "foreign".into();
+                    foreign.to_string()
                 }),
             ] {
                 sqlx::query("INSERT INTO import_db.conversation_messages VALUES (?, ?, ?, 'model failed', ?, '1')")
                     .bind(id).bind(conversation).bind(role).bind(metadata).execute(&mut *connection).await.unwrap();
             }
             let mut tx = connection.begin().await.unwrap();
-            apply_import_character_merges(&mut tx, &[CharacterMerge { imported_id: "remote".into(), target_id: "default".into() }]).await.unwrap();
-            let mapped: String = sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages WHERE id = 2")
-                .fetch_one(&mut *tx).await.unwrap();
-            let mut expected = valid.clone(); expected["event"]["character_id"] = "default".into();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&mapped).unwrap(), expected);
+            apply_import_character_merges(
+                &mut tx,
+                &[CharacterMerge {
+                    imported_id: "remote".into(),
+                    target_id: "default".into(),
+                }],
+            )
+            .await
+            .unwrap();
+            let mapped: String = sqlx::query_scalar(
+                "SELECT metadata FROM import_db.conversation_messages WHERE id = 2",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            let mut expected = valid.clone();
+            expected["event"]["character_id"] = "default".into();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&mapped).unwrap(),
+                expected
+            );
             for id in [3, 5, 7] {
-                let metadata: String = sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages WHERE id = ?")
-                    .bind(id).fetch_one(&mut *tx).await.unwrap();
-                assert_eq!(serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["event"]["character_id"], "remote");
+                let metadata: String = sqlx::query_scalar(
+                    "SELECT metadata FROM import_db.conversation_messages WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&metadata).unwrap()["event"]
+                        ["character_id"],
+                    "remote"
+                );
             }
-            let malformed: String = sqlx::query_scalar("SELECT metadata FROM import_db.conversation_messages WHERE id = 4")
-                .fetch_one(&mut *tx).await.unwrap();
+            let malformed: String = sqlx::query_scalar(
+                "SELECT metadata FROM import_db.conversation_messages WHERE id = 4",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
             assert_eq!(malformed, "invalid json");
             // Keep the valid failed turn for the actual copy/retry contract.
-            sqlx::query("DELETE FROM import_db.conversation_messages WHERE id > 2").execute(&mut *tx).await.unwrap();
+            sqlx::query("DELETE FROM import_db.conversation_messages WHERE id > 2")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             if overwrite {
-                sqlx::query("DELETE FROM conversation_messages").execute(&mut *tx).await.unwrap();
-                sqlx::query("DELETE FROM conversations").execute(&mut *tx).await.unwrap();
+                sqlx::query("DELETE FROM conversation_messages")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM conversations")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
             } else {
                 prepare_skip_conversation_scope(&mut tx).await.unwrap();
             }
@@ -4953,12 +5292,39 @@ mod tests {
             drop(connection);
             let diagnostic: i64 = sqlx::query_scalar("SELECT id FROM conversation_messages WHERE conversation_id = 'imported' AND role = 'system'")
                 .fetch_one(&state.db).await.unwrap();
-            let revision = crate::chat::retry::conversation_message_revision(&mut *state.db.acquire().await.unwrap(), "imported").await.unwrap();
-            let retry = FailureRetry { diagnostic_message_id: diagnostic, expected_tail_message_id: diagnostic, expected_history_revision: revision };
+            let revision = crate::chat::retry::conversation_message_revision(
+                &mut *state.db.acquire().await.unwrap(),
+                "imported",
+            )
+            .await
+            .unwrap();
+            let retry = FailureRetry {
+                diagnostic_message_id: diagnostic,
+                expected_tail_message_id: diagnostic,
+                expected_history_revision: revision,
+            };
             let runtime = ChatRuntimeState::default();
-            let plan = RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), "default", "imported", "failed prompt").await.unwrap();
+            let plan = RegenerationPlan::prepare(
+                &state,
+                &runtime,
+                Regeneration::Failure(&retry),
+                "default",
+                "imported",
+                "failed prompt",
+            )
+            .await
+            .unwrap();
             assert_eq!(plan.user_message_id, if overwrite { 1 } else { 51 });
-            assert!(RegenerationPlan::prepare(&state, &runtime, Regeneration::Failure(&retry), "remote", "imported", "failed prompt").await.is_err());
+            assert!(RegenerationPlan::prepare(
+                &state,
+                &runtime,
+                Regeneration::Failure(&retry),
+                "remote",
+                "imported",
+                "failed prompt"
+            )
+            .await
+            .is_err());
         }
     }
 
@@ -5528,12 +5894,12 @@ mod tests {
         fs::write(&target, r#"{"old":true}"#).unwrap();
         let configs = vec![("llm_config.json".to_string(), r#"{"new":true}"#.to_string())];
 
-        let guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let guard = replace_configs_atomically(temp.path(), &configs, None).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"new":true}"#);
         drop(guard);
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"old":true}"#);
 
-        let mut guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let mut guard = replace_configs_atomically(temp.path(), &configs, None).unwrap();
         guard.disarm();
         drop(guard);
         assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"new":true}"#);
@@ -5553,12 +5919,279 @@ mod tests {
             r#"{"providers":[{"id":"local","extra":{}}]}"#.to_string(),
         )];
 
-        let mut guard = replace_configs_atomically(temp.path(), &configs).unwrap();
+        let mut guard = replace_configs_atomically(temp.path(), &configs, None).unwrap();
         let restored = fs::read_to_string(&target).unwrap();
         guard.disarm();
 
         assert!(restored.contains("keep-this-secret"));
         assert!(restored.contains("keep-this-token"));
+    }
+
+    async fn bot_import_fixture(app_data: &Path) -> BotRuntimeService {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+
+        let mut config = BotConfig {
+            revision: 40,
+            ..Default::default()
+        };
+        config.telegram.allowed_chat_ids = vec![123, -456];
+        config.telegram.bot_token = Some("local-telegram-secret".into());
+        config.qq.allowed_user_openids = vec!["local-qq-user".into()];
+        config.qq.app_secret = Some("local-qq-secret".into());
+        let lifecycle = AppLifecycle::new();
+        let runtime = BotRuntimeService::with_config_path(
+            config.clone(),
+            lifecycle.scope(TaskStage::Work, "backup test"),
+            lifecycle.scope(TaskStage::Service, "backup test"),
+            app_data.join(BOT_CONFIG_FILENAME),
+        );
+        runtime.save_config(config).await.unwrap();
+        runtime
+    }
+
+    fn write_bot_backup(path: &Path, filename: &str, content: &str, database: Option<&Path>) {
+        let mut archive = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        let options = SimpleFileOptions::default();
+        archive
+            .start_file(format!("configs/{filename}"), options)
+            .unwrap();
+        archive.write_all(content.as_bytes()).unwrap();
+        if let Some(db) = database {
+            archive.start_file("kokoro.db", options).unwrap();
+            archive.write_all(&fs::read(db).unwrap()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    async fn seed_backup_conversation(app_data: &Path, conversation_id: &str) -> SqlitePool {
+        fs::create_dir_all(app_data).unwrap();
+        let pool = open_import_pool_without_orchestrator(app_data)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO characters (id, name) VALUES ('backup-owner', 'Owner')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, created_at, updated_at) \
+             VALUES (?, 'backup-owner', '1', '1')",
+        )
+        .bind(conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    fn bot_import_options(
+        import_database: bool,
+        conflict_strategy: ConflictStrategy,
+    ) -> ImportOptions {
+        ImportOptions {
+            import_database,
+            import_configs: true,
+            conflict_strategy,
+            character_merges: Vec::new(),
+            ignored_characters: Vec::new(),
+        }
+    }
+
+    fn persisted_bot_config(runtime: &BotRuntimeService) -> BotConfig {
+        serde_json::from_slice(&fs::read(runtime.config_path()).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn bot_backup_restore_publishes_disk_revision_in_config_and_database_imports() {
+        use crate::lifecycle::{AppLifecycle, TaskStage};
+
+        for import_database in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let app_data = tmp.path().join("live");
+            let runtime = bot_import_fixture(&app_data).await;
+            let previous = runtime.current_config().await;
+            let source_data = tmp.path().join("source");
+            let source_db = db_path(&source_data);
+            if import_database {
+                seed_backup_conversation(&source_data, "from-backup")
+                    .await
+                    .close()
+                    .await;
+            }
+            let archive = tmp.path().join("restore.kokoro");
+            write_bot_backup(
+                &archive,
+                BOT_CONFIG_FILENAME,
+                r#"{
+                    "revision": 1000,
+                    "selected_platform": "qq",
+                    "telegram": {"allowed_chat_ids": [-456], "bot_token": "archive-token"},
+                    "qq": {"allowed_user_openids": ["imported-qq-user"], "app_secret": 42}
+                }"#,
+                import_database.then_some(source_db.as_path()),
+            );
+            let result = import_backup(
+                None,
+                &app_data,
+                &runtime,
+                &archive,
+                bot_import_options(import_database, ConflictStrategy::Overwrite),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.imported_configs, 1);
+            assert_eq!(result.imported_conversations, i64::from(import_database));
+            assert_eq!(db_path(&app_data).exists(), import_database);
+
+            let restored = runtime.current_config().await;
+            assert_eq!(restored, persisted_bot_config(&runtime));
+            assert_eq!(restored.revision, previous.revision + 1);
+            assert_eq!(restored.selected_platform, "qq");
+            assert_eq!(restored.telegram.bot_token, previous.telegram.bot_token);
+            assert_eq!(restored.qq.app_secret, previous.qq.app_secret);
+            assert_eq!(restored.telegram.allowed_chat_ids, [-456]);
+            assert_eq!(restored.qq.allowed_user_openids, ["imported-qq-user"]);
+            assert!(matches!(
+                runtime.save_config(previous).await,
+                Err(KokoroError::BotConfigConflict(_))
+            ));
+            let lifecycle = AppLifecycle::new();
+            let telegram = crate::telegram::TelegramService::new(
+                &runtime,
+                lifecycle.scope(TaskStage::Work, "backup test"),
+                lifecycle.scope(TaskStage::Service, "backup test"),
+            );
+            telegram
+                .assert_dispatched_text_chats(&[123, -456], &[-456])
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_backup_restore_rolls_back_disk_and_runtime_when_sqlite_import_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_data = tmp.path().join("live");
+        let runtime = bot_import_fixture(&app_data).await;
+        let previous = runtime.current_config().await;
+        let local = seed_backup_conversation(&app_data, "keep-local").await;
+        sqlx::query(
+            "CREATE TRIGGER fail_backup_conversation BEFORE INSERT ON conversations \
+             BEGIN SELECT RAISE(ABORT, 'blocked backup conversation'); END",
+        )
+        .execute(&local)
+        .await
+        .unwrap();
+        local.close().await;
+
+        let source_data = tmp.path().join("source");
+        seed_backup_conversation(&source_data, "from-backup")
+            .await
+            .close()
+            .await;
+        let archive = tmp.path().join("restore.kokoro");
+        write_bot_backup(
+            &archive,
+            BOT_CONFIG_FILENAME,
+            r#"{"telegram": {"allowed_chat_ids": [999]}}"#,
+            Some(&db_path(&source_data)),
+        );
+        let error = import_backup(
+            None,
+            &app_data,
+            &runtime,
+            &archive,
+            bot_import_options(true, ConflictStrategy::Overwrite),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, KokoroError::Database(message) if message.contains("blocked backup conversation"))
+        );
+        assert_eq!(runtime.current_config().await, previous);
+        assert_eq!(persisted_bot_config(&runtime), previous);
+        let pool = open_readonly_pool(&db_path(&app_data)).await.unwrap();
+        let conversations: Vec<String> = sqlx::query_scalar("SELECT id FROM conversations")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(conversations, ["keep-local"]);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_telegram_backup_respects_skip_and_restores_only_telegram_on_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_data = tmp.path().join("live");
+        let runtime = bot_import_fixture(&app_data).await;
+        let previous = runtime.current_config().await;
+        let archive = tmp.path().join("legacy.kokoro");
+        write_bot_backup(
+            &archive,
+            LEGACY_TELEGRAM_CONFIG_FILENAME,
+            r#"{"allowed_chat_ids": [], "bot_token": "archive-token"}"#,
+            None,
+        );
+        let skipped = import_backup(
+            None,
+            &app_data,
+            &runtime,
+            &archive,
+            bot_import_options(false, ConflictStrategy::Skip),
+        )
+        .await
+        .unwrap();
+        assert_eq!(skipped.imported_configs, 0);
+        assert_eq!(persisted_bot_config(&runtime), previous);
+        assert_eq!(runtime.current_config().await, previous);
+
+        let overwritten = import_backup(
+            None,
+            &app_data,
+            &runtime,
+            &archive,
+            bot_import_options(false, ConflictStrategy::Overwrite),
+        )
+        .await
+        .unwrap();
+        assert_eq!(overwritten.imported_configs, 1);
+        let mut expected = previous;
+        expected.revision += 1;
+        expected.telegram.allowed_chat_ids.clear();
+        assert_eq!(persisted_bot_config(&runtime), expected);
+        assert_eq!(runtime.current_config().await, expected);
+        assert!(!app_data.join(LEGACY_TELEGRAM_CONFIG_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    async fn rolling_back_bot_backup_releases_queued_writer_only_after_file_restoration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = bot_import_fixture(tmp.path()).await;
+        let previous = runtime.current_config().await;
+        let replacement = replace_import_configs(
+            tmp.path(),
+            &runtime,
+            vec![(
+                BOT_CONFIG_FILENAME.into(),
+                r#"{"telegram": {"allowed_chat_ids": [999]}}"#.into(),
+            )],
+            ConflictStrategy::Overwrite,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted_bot_config(&runtime).telegram.allowed_chat_ids,
+            [999]
+        );
+
+        let mut updated = previous.clone();
+        updated.telegram.allowed_chat_ids = vec![-456];
+        let mut save = std::pin::pin!(runtime.save_config(updated.clone()));
+        assert!(futures::poll!(save.as_mut()).is_pending());
+        drop(replacement);
+        assert_eq!(persisted_bot_config(&runtime), previous);
+        updated.revision += 1;
+        assert_eq!(save.await.unwrap(), updated);
+        assert_eq!(persisted_bot_config(&runtime), updated);
+        assert_eq!(runtime.current_config().await, updated);
     }
 
     #[test]
@@ -6015,7 +6648,12 @@ mod tests {
             .execute(&mut *connection)
             .await
             .unwrap();
-        for (id, prompt, boundary) in [(5_i64, 3_i64, Some(4)), (6, 3, Some(91)), (7, 3, None), (8, 2, None)] {
+        for (id, prompt, boundary) in [
+            (5_i64, 3_i64, Some(4)),
+            (6, 3, Some(91)),
+            (7, 3, None),
+            (8, 2, None),
+        ] {
             let mut metadata = serde_json::json!({ "type": "failure_event", "user_message_id": prompt,
                 "event": { "conversation_id": "new-conversation", "character_id": "bob", "turn_id": "turn" } });
             if let Some(boundary) = boundary {
@@ -6029,7 +6667,12 @@ mod tests {
                 .unwrap();
         }
         for (id, role, kind, prompt) in [
-            (9_i64, "assistant", "assistant_tool_calls", serde_json::json!(3)),
+            (
+                9_i64,
+                "assistant",
+                "assistant_tool_calls",
+                serde_json::json!(3),
+            ),
             (10, "tool", "tool_result", serde_json::json!(3)),
             (11, "tool", "tool_result", serde_json::json!(2)),
             (12, "tool", "tool_result", serde_json::json!(4)),
@@ -6117,12 +6760,48 @@ mod tests {
         assert_eq!(
             tools,
             vec![
-                (11, "assistant".into(), "tool-turn".into(), Some("integer".into()), Some(5)),
-                (12, "tool".into(), "tool-turn".into(), Some("integer".into()), Some(5)),
-                (13, "tool".into(), "tool-turn".into(), Some("null".into()), None),
-                (14, "tool".into(), "tool-turn".into(), Some("null".into()), None),
-                (15, "tool".into(), "tool-turn".into(), Some("null".into()), None),
-                (17, "tool".into(), "tool-turn".into(), Some("null".into()), None),
+                (
+                    11,
+                    "assistant".into(),
+                    "tool-turn".into(),
+                    Some("integer".into()),
+                    Some(5)
+                ),
+                (
+                    12,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("integer".into()),
+                    Some(5)
+                ),
+                (
+                    13,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
+                (
+                    14,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
+                (
+                    15,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
+                (
+                    17,
+                    "tool".into(),
+                    "tool-turn".into(),
+                    Some("null".into()),
+                    None
+                ),
                 (18, "tool".into(), "legacy".into(), None, None),
             ],
             "tool rows must point to their remapped earlier user or explicitly have no owner"

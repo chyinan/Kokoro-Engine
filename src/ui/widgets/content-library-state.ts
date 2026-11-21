@@ -7,6 +7,7 @@ export const CONTENT_LIBRARY_OFFICIAL_REGISTRY =
 export const CONTENT_LIBRARY_OFFICIAL_IDENTITY = "github.com/chyinan/Kokoro-Engine/registry-v1";
 
 export type ContentLibraryTab = "character" | "mod";
+export type ContentLibraryEntry = RegistryEntry & { content_type: ContentLibraryTab };
 export type ContentOperation = "install" | "update" | "remove";
 export type ContentVersionState = "available" | "installed" | "update-available";
 
@@ -134,8 +135,9 @@ export function reduceContentLibraryState(
 export function selectRegistryEntries(
   entries: ReadonlyArray<RegistryEntry>,
   tab: ContentLibraryTab,
-): Array<RegistryEntry> {
-  return entries.filter((entry) => entry.content_type === tab && isValidContentId(entry.id) && isValidContentVersion(entry.version));
+): Array<ContentLibraryEntry> {
+  return entries.filter((entry): entry is ContentLibraryEntry =>
+    entry.content_type === tab && isValidContentId(entry.id) && isValidContentVersion(entry.version));
 }
 
 export function contentKey(contentType: ContentLibraryTab, id: string): string {

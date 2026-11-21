@@ -16,8 +16,8 @@ describe("character cue profile", () => {
       },
     })).toEqual({
       cueMap: {
-        bright: { expression: "smile" },
-        bounce: { motion_group: "TapBody" },
+        bright: { expression: "smile", motion_group: null, exclude_from_prompt: false },
+        bounce: { expression: null, motion_group: "TapBody", exclude_from_prompt: false },
       },
       semanticCueMap: { default: "bright" },
     });

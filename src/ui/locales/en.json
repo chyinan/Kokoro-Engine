@@ -1136,7 +1136,11 @@
         }
     },
     "chat": {
+        "tool_only_completion": "The tool calls finished, but no text reply was generated.",
         "speech_failed": "Could not read this reply aloud: {{error}}",
+        "persistence_failed": "Could not save this chat to the database.",
+        "reply_unfinished": "Unfinished reply",
+        "retry_save": "Retry saving",
         "status": {
             "streaming": "STREAMING",
             "chat": "CHAT"
@@ -1300,6 +1304,12 @@
     },
     "bot": {
         "title": "Bot Integrations",
+        "config_conflict": {
+            "stale": "Bot settings changed while you were editing. Refresh and review your edits before saving again.",
+            "overlap": "Some of the same fields changed in your draft and in the saved settings. You can keep the saved values for those fields and review the rest of your edits.",
+            "refresh": "Refresh Bot settings",
+            "keep_saved": "Keep saved values for overlapping edits"
+        },
         "status": {
             "enabled": "Enabled",
             "disabled": "Disabled",
@@ -1388,7 +1398,7 @@
         },
         "whitelist": {
             "label": "ALLOWED CHAT IDS",
-            "desc": "Only these chat IDs can interact with the bot. Empty = reject all.",
+            "desc": "Only listed chat IDs are allowed, not sender IDs. A group ID authorizes the whole chat. An empty list means no chats are authorized: all messages and commands are rejected, even while the bot is running.",
             "placeholder": "Chat ID (number)",
             "add": "Add"
         },

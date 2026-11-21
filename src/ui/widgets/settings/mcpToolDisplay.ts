@@ -362,7 +362,7 @@ export function getToolRiskKeys(tool: ActionInfo): Array<string> {
     return [...tool.risk_tags];
 }
 
-export function normalizeToolServerName(serverName?: string): string {
+export function normalizeToolServerName(serverName?: string | null): string {
     return serverName || 'unnamed';
 }
 

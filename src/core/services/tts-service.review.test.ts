@@ -31,7 +31,14 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
   emit: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ label: "pet" }) }));
+vi.mock("@tauri-apps/api/window", async () => {
+  const { listen } = await import("@tauri-apps/api/event");
+  return { getCurrentWindow: () => ({
+    label: "pet",
+    listen: (name: string, callback: Parameters<typeof listen>[1]) =>
+      listen(name, callback, { target: { kind: "Window", label: "pet" } }),
+  }) };
+});
 vi.mock("../services", () => ({ audioPlayer: fakes.player }));
 vi.mock("../../lib/kokoro-bridge", () => ({
   cancelTts: fakes.cancelTts,
@@ -77,7 +84,9 @@ describe("review_r09 TTS event lifecycle", () => {
   it("subscribes only to its physical window's playback events", async () => {
     const { listen } = await import("@tauri-apps/api/event");
     expect(vi.mocked(listen).mock.calls).toHaveLength(5);
-    for (const call of vi.mocked(listen).mock.calls) expect(call[2]).toEqual({ target: "pet" });
+    for (const call of vi.mocked(listen).mock.calls) {
+      expect(call[2]).toEqual({ target: { kind: "Window", label: "pet" } });
+    }
   });
 
   it("keeps earlier browser sentences queued until playback finishes", () => {

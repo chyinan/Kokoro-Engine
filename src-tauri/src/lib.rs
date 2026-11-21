@@ -2,13 +2,20 @@
 // Reason: 应用入口文件需要同时声明模块、注册 Tauri 命令、初始化服务与恢复磁盘状态，天然属于编排层。
 pub mod actions;
 pub mod ai;
+mod app_shutdown;
+pub(crate) mod bot;
 pub mod characters;
 pub mod chat;
 pub mod commands;
 pub mod config;
+mod desktop_chat;
+mod desktop_heartbeat;
 pub mod error;
 pub mod hooks;
 pub mod imagegen;
+pub mod ipc;
+mod lifecycle;
+pub mod live2d;
 pub mod llm;
 pub mod mcp;
 pub mod mods;
@@ -20,11 +27,34 @@ pub mod tts;
 pub mod utils;
 pub mod vision;
 use crate::hooks::{AuditLogHookHandler, HookRuntime};
+use crate::lifecycle::{AppLifecycle, TaskScope, TaskStage};
 use crate::mods::ModManager;
 use crate::utils::logging::init_logging;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::Manager;
+
+fn spawn_startup<F>(
+    scope: &TaskScope,
+    name: &str,
+    delay: Duration,
+    start: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let cancel = scope.token();
+    if let Err(error) = scope.spawn_durable(name, async move {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        start.await;
+    }) {
+        tracing::debug!(target: "startup", task = name, %error, "skipped startup job");
+    }
+}
 
 async fn auto_start_pet_on_launch<F, Fut>(
     pet_enabled: bool,
@@ -38,7 +68,9 @@ async fn auto_start_pet_on_launch<F, Fut>(
         return;
     }
 
-    tokio::time::sleep(delay).await;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
 
     if let Err(e) = show_pet().await {
         tracing::error!(target: "pet", "auto-start failed: {}", e);
@@ -76,7 +108,14 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let ipc = ipc::builder();
+    let desktop_owner = Arc::new(std::sync::Mutex::new(None));
+    let setup_desktop_owner = desktop_owner.clone();
+    let lifecycle = AppLifecycle::with_runtime(tauri::async_runtime::handle().inner().clone());
+    let exit_completion = app_shutdown::ExitCompletion::default();
+    let application = tauri::Builder::default()
+        .manage(lifecycle)
+        .manage(exit_completion.clone())
         .manage(crate::characters::activation::ActivationCoordinator::default())
         .manage(Arc::new(crate::chat::runtime::ChatRuntimeState::default()))
         .plugin(tauri_plugin_dialog::init())
@@ -90,197 +129,11 @@ pub fn run() {
             "character-instance-resource",
             commands::live2d_protocol::handle_character_instance_resource_request(),
         )
-        .invoke_handler(tauri::generate_handler![
-            commands::system::get_engine_info,
-            commands::system::check_latest_release,
-            commands::system::get_system_status,
-            commands::system::set_window_size,
-            commands::character::get_character_state,
-            commands::character::play_cue,
-            commands::character::send_message,
-            commands::database::init_db,
-            commands::database::test_vector_store,
-            commands::chat::stream_chat,
-            commands::chat::get_chat_runtime_snapshot,
-            commands::chat::get_chat_view,
-            commands::chat::recover_chat_draft_submission,
-            commands::chat::finish_chat_playback,
-            commands::chat::get_context_settings,
-            commands::chat::set_context_settings,
-            commands::chat::approve_tool_approval,
-            commands::chat::reject_tool_approval,
-            commands::chat::cancel_chat_turn,
-            commands::chat::is_chat_busy,
-            commands::context::set_persona,
-            commands::context::set_character_name,
-            commands::context::set_active_character_id,
-            commands::context::get_user_profile_settings,
-            commands::context::set_user_name,
-            commands::context::set_user_persona,
-            commands::context::set_response_language,
-            commands::context::set_user_language,
-            commands::context::set_jailbreak_prompt,
-            commands::context::get_jailbreak_prompt,
-            commands::context::set_proactive_enabled,
-            commands::context::get_proactive_enabled,
-            commands::context::set_memory_enabled,
-            commands::context::get_memory_enabled,
-            commands::context::set_memory_upgrade_config,
-            commands::context::get_memory_upgrade_config,
-            commands::context::get_memory_observability_summary,
-            commands::context::get_latest_memory_write_event,
-            commands::context::get_latest_memory_retrieval_log,
-            commands::context::get_latest_memory_retrieval_eval_summary,
-            commands::context::clear_history,
-            commands::context::delete_last_messages,
-            commands::context::end_session,
-            commands::tts::synthesize,
-            commands::tts::cancel_tts,
-            commands::tts::list_tts_providers,
-            commands::tts::list_tts_voices,
-            commands::tts::list_openai_tts_models,
-            commands::tts::get_tts_provider_status,
-            commands::tts::clear_tts_cache,
-            commands::tts::get_tts_config,
-            commands::tts::save_tts_config,
-            commands::tts::list_gpt_sovits_models,
-            commands::mods::list_mods,
-            commands::mods::load_mod,
-            commands::mods::install_mod,
-            commands::mods::update_mod,
-            commands::mods::install_mod_from_registry,
-            commands::mods::remove_mod,
-            commands::mods::install_mod_from_url,
-            commands::mods::get_mod_theme,
-            commands::mods::get_mod_layout,
-            commands::mods::dispatch_mod_event,
-            commands::mods::unload_mod,
-            commands::live2d::import_live2d_zip,
-            commands::live2d::import_live2d_folder,
-            commands::live2d::export_live2d_model,
-            commands::live2d::list_live2d_models,
-            commands::live2d::delete_live2d_model,
-            commands::live2d::rename_live2d_model,
-            commands::live2d::get_live2d_model_profile,
-            commands::live2d::save_live2d_model_profile,
-            commands::live2d::set_active_live2d_model,
-            commands::imagegen::generate_image,
-            commands::imagegen::get_imagegen_config,
-            commands::imagegen::save_imagegen_config,
-            commands::imagegen::test_sd_connection,
-            commands::vision::upload_vision_image,
-            commands::vision::get_vision_config,
-            commands::vision::list_vision_screens,
-            commands::vision::save_vision_config,
-            commands::vision::start_vision_watcher,
-            commands::vision::stop_vision_watcher,
-            commands::vision::set_vision_text_input_focused,
-            commands::vision::capture_screen_now,
-            commands::memory::list_memories,
-            commands::memory::update_memory,
-            commands::memory::delete_memory,
-            commands::memory::update_memory_tier,
-            commands::memory::run_dream_now,
-            commands::memory::get_dreaming_summary,
-            commands::memory::list_dream_jobs,
-            commands::memory::list_dream_proposals,
-            commands::memory::approve_dream_proposal,
-            commands::memory::reject_dream_proposal,
-            commands::memory::get_memory_embedding_model_status,
-            commands::memory::download_memory_embedding_model,
-            commands::characters::list_characters,
-            commands::characters::create_character,
-            commands::characters::create_character_with_avatar,
-            commands::characters::update_character_with_avatar,
-            commands::characters::update_character,
-            commands::characters::delete_character,
-            commands::characters::duplicate_character,
-            commands::characters::restore_character_defaults,
-            commands::characters::list_character_templates,
-            commands::characters::instantiate_character_template,
-            commands::characters::reconcile_character_template,
-            commands::characters::apply_character_template_reconciliation,
-            commands::characters::prepare_character_activation,
-            commands::characters::commit_character_activation,
-            commands::characters::get_committed_character_runtime,
-            commands::registry::list_registry_entries,
-            commands::registry::install_character_from_registry,
-            commands::registry::install_character_from_url,
-            commands::registry::remove_character_package,
-            commands::conversation::list_conversations,
-            commands::conversation::load_conversation,
-            commands::conversation::delete_conversation,
-            commands::conversation::create_conversation,
-            commands::conversation::rename_conversation,
-            commands::conversation::update_conversation_state,
-            commands::conversation::edit_conversation_message,
-            commands::conversation::list_character_ids,
-            commands::llm::get_llm_config,
-            commands::llm::save_llm_config,
-            commands::llm::test_llm_connection,
-            commands::llm::list_ollama_models,
-            commands::llm::list_anthropic_models,
-            commands::llm::get_llama_cpp_status,
-            commands::llm::get_codex_runtime_status,
-            commands::llm::list_codex_runtime_models,
-            commands::stt::transcribe_audio,
-            commands::stt::get_stt_config,
-            commands::stt::save_stt_config,
-            commands::stt::transcribe_wake_word_audio,
-            commands::stt::start_native_mic,
-            commands::stt::stop_native_mic,
-            commands::stt::start_native_wake_word,
-            commands::stt::stop_native_wake_word,
-            commands::stt::get_sensevoice_local_status,
-            commands::stt::download_sensevoice_local_model,
-            commands::actions::list_actions,
-            commands::actions::list_builtin_tools,
-            commands::actions::execute_action,
-            commands::tool_settings::get_tool_settings,
-            commands::tool_settings::save_tool_settings,
-            commands::mcp::list_mcp_servers,
-            commands::mcp::add_mcp_server,
-            commands::mcp::remove_mcp_server,
-            commands::mcp::refresh_mcp_tools,
-            commands::mcp::reconnect_mcp_server,
-            commands::mcp::toggle_mcp_server,
-            commands::bot::get_bot_config,
-            commands::bot::save_bot_config,
-            commands::bot::respond_qq_authorization,
-            commands::bot::start_bot_platform,
-            commands::bot::stop_bot_platform,
-            commands::bot::get_bot_status,
-            commands::telegram::get_telegram_config,
-            commands::telegram::save_telegram_config,
-            commands::telegram::start_telegram_bot,
-            commands::telegram::stop_telegram_bot,
-            commands::telegram::get_telegram_status,
-            commands::backup::export_data,
-            commands::backup::preview_import,
-            commands::backup::import_data,
-            commands::auto_backup::get_auto_backup_config,
-            commands::auto_backup::save_auto_backup_config,
-            commands::auto_backup::run_auto_backup_now,
-            commands::pet::show_pet_window,
-            commands::pet::hide_pet_window,
-            commands::pet::toggle_pet_window,
-            commands::pet::set_pet_drag_mode,
-            commands::pet::get_pet_config,
-            commands::pet::save_pet_config,
-            commands::pet::move_pet_window,
-            commands::pet::resize_pet_window,
-            commands::pet::show_bubble_window,
-            commands::pet::update_bubble_text,
-            commands::pet::hide_bubble_window,
-            stt::stream::process_audio_chunk,
-            stt::stream::complete_audio_stream,
-            stt::stream::discard_audio_stream,
-            stt::stream::snapshot_audio_stream,
-            stt::stream::prune_audio_buffer,
-        ])
+        .invoke_handler(ipc::invoke_handler(&ipc))
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    api.prevent_close();
                     window.app_handle().exit(0);
                     return;
                 }
@@ -307,12 +160,19 @@ pub fn run() {
                 _ => {}
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            ipc.mount_events(app);
+            let host = Arc::new(app.handle().clone());
+            let desktop = desktop_chat::TauriChatDesktop::new(&host);
+            *setup_desktop_owner.lock().unwrap() = Some(host);
             let startup_begin = std::time::Instant::now();
             tracing::info!(target: "startup", "setup begin");
             app.manage(crate::commands::pet::PetShortcutState::default());
+            let app_lifecycle = app.state::<AppLifecycle>().inner().clone();
+            let startup_scope = app_lifecycle.scope(TaskStage::Work, "startup");
 
             let app_handle = app.handle();
+            let lifecycle_for_ai = app_lifecycle.clone();
             tauri::async_runtime::block_on(async move {
                 tracing::info!(
                     target: "startup",
@@ -325,7 +185,10 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(&app_data_dir);
                 let db_path = app_data_dir.join("kokoro.db");
                 let db_url = format!("sqlite:///{}", db_path.to_string_lossy().replace('\\', "/"));
-                match crate::ai::context::AIOrchestrator::new(&db_url).await {
+                match crate::ai::context::AIOrchestrator::new_with_lifecycle(
+                    &db_url,
+                    lifecycle_for_ai,
+                ).await {
                     Ok(orchestrator) => {
                         tracing::info!(
                             target: "startup",
@@ -366,21 +229,10 @@ pub fn run() {
                             }
                         }
 
-                        // Restore context_settings from disk
-                        let ctx_settings_path = app_data_dir.join("context_settings.json");
-                        if let Ok(content) = std::fs::read_to_string(&ctx_settings_path) {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                                let strategy = val.get("strategy")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("window")
-                                    .to_string();
-                                let max_chars = val.get("max_message_chars")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(2000) as usize;
-                                orchestrator.set_context_settings(strategy.clone(), max_chars).await;
-                                tracing::info!(target: "ai", "Restored context_settings: strategy={}, max_chars={}", strategy, max_chars);
-                            }
-                        }
+                        crate::chat::settings::ContextSettings::restore(
+                            &orchestrator,
+                            &app_data_dir.join("context_settings.json"),
+                        ).await;
 
                         let vision_config_path = app_data_dir.join("vision_config.json");
                         let vision_config = crate::vision::config::load_config(&vision_config_path);
@@ -401,7 +253,7 @@ pub fn run() {
                             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(id) = val.get("conversation_id").and_then(|v| v.as_str()) {
                                     {
-                                        let mut conv_id = orchestrator.current_conversation_id.lock().await;
+                                        let mut conv_id = orchestrator.selection.current_conversation_id.lock().await;
                                         *conv_id = Some(id.to_string());
                                     }
                                     // Reload messages into in-memory history so LLM has conversation context
@@ -413,7 +265,7 @@ pub fn run() {
                                     .await {
                                         let total = rows.len();
                                         orchestrator.sync_history_from_rows(rows).await;
-                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages, windowed to {})", id, total, orchestrator.history.lock().await.len());
+                                        tracing::info!(target: "ai", "Restored current_conversation_id: {} ({} messages, windowed to {})", id, total, orchestrator.selection.history.lock().await.len());
                                     }
                                 }
                             }
@@ -548,7 +400,10 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let tts_service = tauri::async_runtime::block_on(async {
-                crate::tts::TtsService::init_from_config(&tts_config).await
+                crate::tts::TtsService::init_from_config_with_scope(
+                    &tts_config,
+                    app_lifecycle.scope(TaskStage::Service, "tts-process"),
+                ).await
             });
             app.manage(tts_service);
             tracing::info!(
@@ -577,7 +432,7 @@ pub fn run() {
             );
 
             // WindowSizeState
-            app.manage(crate::commands::system::WindowSizeState::new());
+            app.manage(crate::imagegen::WindowSizeState::new());
 
             // LLM
             let llm_config_path = app_data.join("llm_config.json");
@@ -587,8 +442,11 @@ pub fn run() {
                 "stage=llm.init.start elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-            let llm_service =
-                crate::llm::service::LlmService::from_config(llm_config, llm_config_path);
+            let llm_service = crate::llm::service::LlmService::from_config_with_lifecycle(
+                llm_config,
+                llm_config_path,
+                app_lifecycle.clone(),
+            );
             app.manage(llm_service);
             tracing::info!(
                 target: "startup",
@@ -605,7 +463,10 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let stt_service = tauri::async_runtime::block_on(async {
-                crate::stt::SttService::init_from_config(&stt_config).await
+                crate::stt::SttService::init_from_config_with_scope(
+                    &stt_config,
+                    app_lifecycle.scope(TaskStage::Work, "stt"),
+                ).await
             });
             app.manage(stt_service);
             tracing::info!(
@@ -617,8 +478,8 @@ pub fn run() {
             let hook_runtime = HookRuntime::new();
             hook_runtime.register(Arc::new(AuditLogHookHandler));
             app.manage(hook_runtime);
-            app.manage(Arc::new(crate::commands::chat::PendingToolApprovalState::new()));
-            app.manage(Arc::new(crate::commands::chat::TurnCancellationState::new()));
+            app.manage(Arc::new(crate::chat::application::PendingToolApprovalState::new()));
+            app.manage(Arc::new(crate::chat::application::TurnCancellationState::new()));
 
             // Action Registry
             let mut action_registry = crate::actions::ActionRegistry::new();
@@ -644,8 +505,10 @@ pub fn run() {
                 "stage=mcp.init.start elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-            let mut mcp_manager =
-                crate::mcp::McpManager::new(mcp_config_path.to_str().unwrap_or("mcp_servers.json"));
+            let mut mcp_manager = crate::mcp::McpManager::new_with_scope(
+                mcp_config_path.to_str().unwrap_or("mcp_servers.json"),
+                app_lifecycle.scope(TaskStage::Service, "mcp"),
+            );
             mcp_manager.load_configs();
             let mcp_manager = Arc::new(tokio::sync::Mutex::new(mcp_manager));
             app.manage(mcp_manager.clone());
@@ -655,86 +518,11 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
 
-            // Connect MCP servers in background — per-server tasks so the
-            // manager lock is only held briefly and list_mcp_servers stays responsive.
-            let mcp_mgr_clone = mcp_manager.clone();
+            // Each supported server connects independently outside application state locks.
             let mcp_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                // Delay to let app fully init
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-                // Grab configs & mark "connecting", then release lock immediately
-                let configs = {
-                    let mut mgr = mcp_mgr_clone.lock().await;
-                    mgr.prepare_connect_all()
-                };
-
-                // Spawn a task per server so they connect in parallel
-                let mut handles = Vec::new();
-                for (cfg, generation) in configs {
-                    let mgr_arc = mcp_mgr_clone.clone();
-                    let app_handle = mcp_app.clone();
-                    handles.push(tauri::async_runtime::spawn(async move {
-                        // Slow I/O (process spawn / TCP / MCP handshake) happens
-                        // outside the lock so list_mcp_servers stays responsive.
-                        let build_result =
-                            crate::mcp::manager::build_connected_client(&cfg).await;
-
-                        // Brief lock only to insert the result.
-                        let (connect_result, stale_client) = {
-                            let mut mgr = mgr_arc.lock().await;
-                            match build_result {
-                                Ok(client) => match mgr.commit_client(cfg.name.clone(), generation, client) {
-                                    Ok(()) => (Ok(()), None),
-                                    Err(client) => (Err("connection result was superseded".to_string()), Some(client)),
-                                },
-                                Err(e) => {
-                                    let display_error = match &e {
-                                        crate::error::KokoroError::Config(message)
-                                        | crate::error::KokoroError::Database(message)
-                                        | crate::error::KokoroError::Llm(message)
-                                        | crate::error::KokoroError::Tts(message)
-                                        | crate::error::KokoroError::Stt(message)
-                                        | crate::error::KokoroError::Io(message)
-                                        | crate::error::KokoroError::ExternalService(message)
-                                        | crate::error::KokoroError::Mod(message)
-                                        | crate::error::KokoroError::NotFound(message)
-                                        | crate::error::KokoroError::Unauthorized(message)
-                                        | crate::error::KokoroError::Internal(message)
-                                        | crate::error::KokoroError::Chat(message)
-                                        | crate::error::KokoroError::Validation(message) => message.clone(),
-                                    };
-                                    if mgr.finish_connection_error(&cfg.name, generation, display_error.clone()) {
-                                        (Err(display_error), None)
-                                    } else {
-                                        (
-                                            Err("connection result was superseded".to_string()),
-                                            None,
-                                        )
-                                    }
-                                }
-                            }
-                        };
-                        if let Some(client) = stale_client {
-                            let _ = client.shutdown().await;
-                        }
-
-                        if let Ok(()) = connect_result {
-                            tracing::info!(target: "mcp", "Connected '{}', registering tools...", cfg.name);
-                            if let Some(registry) =
-                                app_handle.try_state::<std::sync::Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>()
-                            {
-                                crate::mcp::bridge::register_mcp_tools(&mgr_arc, registry.inner()).await;
-                            }
-                        } else if let Err(e) = connect_result {
-                            tracing::error!(target: "mcp", "Failed to connect '{}': {}", cfg.name, e);
-                        }
-                    }));
-                }
-
-                // Wait for all to finish (fire-and-forget is also fine)
-                for h in handles {
-                    let _ = h.await;
+            spawn_startup(&startup_scope, "mcp-connect", Duration::from_secs(3), async move {
+                if let Some(registry) = mcp_app.try_state::<Arc<tokio::sync::RwLock<crate::actions::ActionRegistry>>>() {
+                    crate::mcp::bridge::start_enabled(&mcp_manager, registry.inner()).await;
                 }
             });
 
@@ -745,8 +533,11 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let mut vision_server = crate::vision::server::VisionServer::new(&app_data);
+            let vision_http = app_lifecycle.scope(TaskStage::Service, "vision-http");
             tauri::async_runtime::block_on(async {
-                vision_server.start().await;
+                if let Err(error) = vision_server.start(&vision_http) {
+                    tracing::error!(target: "vision", %error, "vision file server did not start");
+                }
             });
             app.manage(Arc::new(tokio::sync::Mutex::new(vision_server)));
             tracing::info!(
@@ -806,19 +597,13 @@ pub fn run() {
                 startup_begin.elapsed().as_millis()
             );
             let mut mod_manager = ModManager::new(mods_path);
-            app.manage(mod_manager.init(app.handle().clone()));
+            app.manage(mod_manager.init(app.handle().clone(), &app_lifecycle));
             app.manage(tokio::sync::Mutex::new(mod_manager));
             tracing::info!(
                 target: "startup",
                 "stage=mods.init.done elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-
-            // Heartbeat — proactive behavior background loop
-            let heartbeat_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                crate::ai::heartbeat::heartbeat_loop(heartbeat_handle).await;
-            });
 
             // Vision Watcher
             let vision_config_path = app_data.join("vision_config.json");
@@ -829,8 +614,10 @@ pub fn run() {
                 "stage=vision.watcher.init.start elapsed_ms={}",
                 startup_begin.elapsed().as_millis()
             );
-            let vision_watcher = crate::vision::watcher::VisionWatcher::new(vision_config.clone())
-                .with_llm_service(llm_svc_for_vision);
+            let vision_watcher = crate::vision::watcher::VisionWatcher::new_with_scope(
+                vision_config.clone(),
+                app_lifecycle.scope(TaskStage::Work, "vision"),
+            ).with_llm_service(llm_svc_for_vision);
             app.manage(vision_watcher.clone());
             tracing::info!(
                 target: "startup",
@@ -841,56 +628,64 @@ pub fn run() {
             // Auto-start vision watcher if previously enabled
             if vision_config.vlm_enabled && vision_config.auto_vision_enabled {
                 let watcher_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Small delay to let the app fully initialize
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    vision_watcher.start(watcher_handle);
+                spawn_startup(&startup_scope, "vision-watcher", Duration::from_secs(2), async move {
+                    if let Err(error) = vision_watcher.start(watcher_handle).await {
+                        tracing::warn!(target: "vision", %error, "vision watcher did not start");
+                    }
                 });
             }
 
             // Audio Buffer for Streaming STT
             app.manage(crate::stt::stream::AudioBuffer::new());
-            app.manage(crate::stt::NativeMicState::new());
-            app.manage(crate::stt::NativeWakeWordState::new());
+            app.manage(crate::stt::NativeMicState::new(
+                app_lifecycle.scope(TaskStage::Work, "native-mic-work"),
+                app_lifecycle.scope(TaskStage::Service, "native-mic"),
+            ));
+            app.manage(crate::stt::NativeWakeWordState::new(
+                app_lifecycle.scope(TaskStage::Work, "wake-word-work"),
+                app_lifecycle.scope(TaskStage::Service, "wake-word"),
+            ));
 
-            // Bot integrations (Telegram currently has a runtime service).
-            let bot_config = crate::commands::bot::load_bot_config();
-            let telegram_config = bot_config.telegram.clone();
-            let telegram_enabled = telegram_config.enabled;
-            let bot_runtime_service = crate::commands::bot::BotRuntimeService::new(bot_config);
+            let bot_services = desktop_chat::install_services(app.handle(), &app_data, desktop);
+
+            if let Some(chat) = app.try_state::<crate::chat::application::ChatService>() {
+                let heartbeat_handle = app.handle().clone();
+                let chat = chat.inner().clone();
+                let heartbeat = app_lifecycle.scope(TaskStage::Work, "heartbeat");
+                if let Err(error) = heartbeat.spawn_durable(
+                    "loop",
+                    desktop_heartbeat::heartbeat_loop(heartbeat_handle, chat, heartbeat.clone()),
+                ) {
+                    tracing::warn!(target: "startup", %error, "heartbeat did not start");
+                }
+            }
+
+            let bot_config = crate::bot::load_bot_config();
+            let telegram_enabled = bot_config.telegram.enabled;
+            let bot_runtime_service = crate::bot::BotRuntimeService::new(
+                bot_config,
+                app_lifecycle.scope(TaskStage::Work, "bot-requests"),
+                app_lifecycle.scope(TaskStage::Service, "bot"),
+            );
             app.manage(bot_runtime_service.clone());
-            tracing::info!(
-                target: "startup",
-                "stage=telegram.init.start elapsed_ms={}",
-                startup_begin.elapsed().as_millis()
+            let telegram_service = crate::telegram::TelegramService::new(
+                &bot_runtime_service,
+                app_lifecycle.scope(TaskStage::Work, "telegram-updates"),
+                app_lifecycle.scope(TaskStage::Service, "telegram"),
             );
-            let telegram_service = crate::telegram::TelegramService::new(telegram_config);
             app.manage(telegram_service.clone());
-            tracing::info!(
-                target: "startup",
-                "stage=telegram.init.done elapsed_ms={}",
-                startup_begin.elapsed().as_millis()
-            );
 
-            // Auto-start Telegram bot if enabled
             if telegram_enabled {
-                let tg_app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Delay to let all services initialize
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    if let Err(e) = telegram_service.start(tg_app).await {
-                        tracing::error!(target: "telegram", "[Telegram] Auto-start failed: {}", e);
+                let telegram_services = bot_services.clone();
+                spawn_startup(&startup_scope, "telegram", Duration::from_secs(3), async move {
+                    if let Err(error) = telegram_service.start(telegram_services).await {
+                        tracing::error!(target: "telegram", "[Telegram] Auto-start failed: {error}");
                     }
                 });
             }
-
-            {
-                let bot_app = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    bot_runtime_service.start_enabled(bot_app).await;
-                });
-            }
+            spawn_startup(&startup_scope, "bot", Duration::from_secs(3), async move {
+                bot_runtime_service.start_enabled(bot_services).await;
+            });
 
             // Global shortcut + Pet window auto-start
             {
@@ -905,10 +700,10 @@ pub fn run() {
 
                 if pet_enabled {
                     let pet_app = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
+                    spawn_startup(&startup_scope, "pet", Duration::from_millis(500), async move {
                         auto_start_pet_on_launch(
                             true,
-                            std::time::Duration::from_millis(500),
+                            Duration::ZERO,
                             move || async move { crate::commands::pet::show_pet_window(pet_app).await },
                         )
                         .await;
@@ -924,8 +719,27 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    let on_event = move |app: &tauri::AppHandle, event| match event {
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            app_shutdown::on_exit_requested(app, code, api);
+        }
+        tauri::RunEvent::Exit => {
+            desktop_owner.lock().unwrap().take();
+        }
+        _ => {}
+    };
+    #[cfg(mobile)]
+    application.run(on_event);
+    #[cfg(not(mobile))]
+    {
+        // Wry can finish its event loop with code zero even when a
+        // RequestExit carried a nonzero code. Retain the lifecycle's code
+        // independently of Tauri state until native cleanup returns.
+        let runtime_code = application.run_return(on_event);
+        std::process::exit(exit_completion.code().unwrap_or(runtime_code));
+    }
 }
 
 fn is_usable_dylib(path: &Path) -> bool {
@@ -960,7 +774,6 @@ mod tests {
     use super::auto_start_pet_on_launch;
     use crate::error::KokoroError;
     use crate::utils::logging::format_log_line;
-    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1003,47 +816,5 @@ mod tests {
     fn startup_log_line_uses_level_target_structure() {
         let line = format_log_line("INFO", "ai", "startup", false);
         assert!(line.starts_with("[INFO][ai] "));
-    }
-
-    #[test]
-    fn invoke_handler_has_no_duplicate_command_registrations() {
-        let source = include_str!("lib.rs");
-        let handler_start = source
-            .find(".invoke_handler(tauri::generate_handler![")
-            .expect("invoke_handler block should exist");
-        let block_start = handler_start
-            + source[handler_start..]
-                .find('[')
-                .expect("generate_handler should include `[`")
-            + 1;
-        let block_end = source[block_start..]
-            .find("])")
-            .map(|idx| block_start + idx)
-            .expect("generate_handler should include closing `])`");
-
-        let block = &source[block_start..block_end];
-        let mut seen = HashSet::new();
-        let mut duplicates = Vec::new();
-
-        for line in block.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("//") {
-                continue;
-            }
-            let command = trimmed.trim_end_matches(',');
-            if command.is_empty() {
-                continue;
-            }
-
-            if !seen.insert(command.to_string()) {
-                duplicates.push(command.to_string());
-            }
-        }
-
-        assert!(
-            duplicates.is_empty(),
-            "found duplicate Tauri command registrations: {:?}",
-            duplicates
-        );
     }
 }

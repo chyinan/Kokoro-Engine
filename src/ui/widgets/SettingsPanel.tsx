@@ -1,7 +1,7 @@
 // pattern: Imperative Shell
 
+import { events } from "@/lib/generated/ipc";
 import { useState, useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { X, Key, User, Volume2, Package, Image, PersonStanding, Save, Check, Sparkles, Brain, Mic, Eye, Server, Bot, Shield, HardDrive, Ghost, Info } from "lucide-react";
@@ -25,6 +25,7 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
 import { normalizeTtsVoice } from "./settings/tts-voice";
+import { rebaseBotConfig } from "./settings/bot-config-draft";
 import { useTranslation } from "react-i18next";
 import {
     setUserLanguage,
@@ -44,6 +45,7 @@ import {
     getAutoBackupConfig,
     saveAutoBackupConfig,
     getKokoroErrorMessage,
+    isKokoroErrorCode,
 } from "../../lib/kokoro-bridge";
 import {
     isAutoBackupConfigDirty,
@@ -295,7 +297,6 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const baselineSttConfigRef = useRef<SttConfig | null>(null);
     const baselineVoiceInterruptRef = useRef(false);
     const baselineImageGenConfigRef = useRef<ImageGenSystemConfig | null>(null);
-    const baselineBotConfigRef = useRef<BotConfig | null>(null);
     const baselineLlmConfigRef = useRef<LlmConfig | null>(null);
     const baselineVisionConfigRef = useRef<VisionConfig | null>(null);
     const baselineVisionEnabledRef = useRef(false);
@@ -303,6 +304,12 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const baselineResponseLangRef = useRef("");
     const baselineJailbreakPromptRef = useRef("");
     const baselineAutoBackupConfigRef = useRef<AutoBackupConfig | null>(null);
+    const [botSettings, setBotSettings] = useState<{
+        baseline: BotConfig | null;
+        draft: BotConfig | null;
+        conflict?: "stale" | "overlap";
+    }>({ baseline: null, draft: null });
+    const localBotConfig = botSettings.draft;
 
     // Sync local state only when the panel opens; while editing, keep local form state authoritative.
     useEffect(() => {
@@ -335,7 +342,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             setVoiceInterrupt(voiceInt);
             setResponseLang(respLang);
             setUserLang(uLang);
-            setLocalBotConfig(null);
+            setBotSettings({ baseline: null, draft: null });
             setLocalVisionConfig(visionConfigProp ?? null);
 
             // Record baseline snapshots
@@ -501,41 +508,24 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         readBooleanSetting(APP_SETTING_KEYS.voiceInterrupt, false)
     );
 
-    // Bot config state
-    const [localBotConfig, setLocalBotConfig] = useState<BotConfig | null>(null);
-
     useEffect(() => {
+        if (!isOpen) return;
+        const sessionRevision = openRevisionRef.current;
         let aborted = false;
         let cleanup: (() => void) | null = null;
-        void listen<{
-            approved_user_openid?: string;
-            approved_group_openid?: string;
-            revision: number;
-        }>("qq-authorization-approved", event => {
+        void events.qqAuthorizationApproved.listen(event => {
             if (aborted) return;
-            setLocalBotConfig(current => {
-                if (!current) {
-                    return current;
-                }
-                if (event.payload.revision <= current.revision) {
-                    return current;
-                }
-                const approvedUser = event.payload.approved_user_openid;
-                const approvedGroup = event.payload.approved_group_openid;
-                return {
-                    ...current,
-                    revision: event.payload.revision,
-                    qq: {
-                        ...current.qq,
-                        allowed_user_openids: !approvedUser || current.qq.allowed_user_openids.includes(approvedUser)
-                            ? current.qq.allowed_user_openids
-                            : [...current.qq.allowed_user_openids, approvedUser],
-                        allowed_group_openids: !approvedGroup || current.qq.allowed_group_openids.includes(approvedGroup)
-                            ? current.qq.allowed_group_openids
-                            : [...current.qq.allowed_group_openids, approvedGroup],
-                    },
-                };
-            });
+            // A QQ notification can skip revisions that changed other platforms.
+            void getBotConfig().then(config => {
+                if (aborted || openRevisionRef.current !== sessionRevision || config.revision < event.payload.revision) return;
+                setBotSettings(current => {
+                    if (config.revision <= (current.baseline?.revision ?? -1)
+                        || isBotConfigDirty(current.baseline, current.draft)) {
+                        return current;
+                    }
+                    return { baseline: config, draft: config };
+                });
+            }).catch(e => console.error("[SettingsPanel] Failed to refresh approved Bot config:", e));
         }).then(unlisten => {
             if (aborted) {
                 unlisten();
@@ -547,7 +537,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             aborted = true;
             cleanup?.();
         };
-    }, []);
+    }, [isOpen]);
 
     // Response Language
     const [responseLang, setResponseLang] = useState(() =>
@@ -616,10 +606,60 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         try {
             const botConfig = await getBotConfig();
             if (openRevisionRef.current !== sessionRevision || botRefreshRevisionRef.current !== refreshRevision) return;
-            setLocalBotConfig(botConfig);
-            baselineBotConfigRef.current = botConfig;
+            setBotSettings(current => current.baseline && current.baseline.revision > botConfig.revision
+                ? current
+                : { baseline: botConfig, draft: botConfig });
         } catch (e) {
             console.error("[SettingsPanel] Failed to fetch bot config:", e);
+        }
+    };
+
+    const refreshBotDraft = async (keepSavedOverlaps: boolean) => {
+        const sessionRevision = openRevisionRef.current;
+        const refreshRevision = ++botRefreshRevisionRef.current;
+        try {
+            const latest = await getBotConfig();
+            if (openRevisionRef.current !== sessionRevision || botRefreshRevisionRef.current !== refreshRevision) return;
+            setBotSettings(current => {
+                if (!current.conflict || !current.baseline || !current.draft || latest.revision < current.baseline.revision) {
+                    return current;
+                }
+                const rebased = rebaseBotConfig(current.baseline, current.draft, latest);
+                if (rebased.hasOverlap && !keepSavedOverlaps) {
+                    return { ...current, conflict: "overlap" };
+                }
+                return { baseline: latest, draft: rebased.draft };
+            });
+        } catch (e) {
+            if (openRevisionRef.current === sessionRevision && botRefreshRevisionRef.current === refreshRevision) {
+                setSaveError(getKokoroErrorMessage(e));
+            }
+        }
+    };
+
+    const saveBotDraft = async (submitted: BotConfig, sessionRevision: number) => {
+        setSaved(false);
+        try {
+            const savedBot = await saveBotConfig(submitted);
+            if (openRevisionRef.current !== sessionRevision) return;
+            setBotSettings(current => {
+                if (!current.draft || (current.baseline?.revision ?? -1) > savedBot.revision) return current;
+                const rebased = rebaseBotConfig(submitted, current.draft, savedBot);
+                return rebased.hasOverlap
+                    ? { ...current, conflict: "stale" }
+                    : { baseline: savedBot, draft: rebased.draft };
+            });
+        } catch (e) {
+            if (openRevisionRef.current === sessionRevision) {
+                if (isKokoroErrorCode(e, "BotConfigConflict")) {
+                    setBotSettings(current => current.draft?.revision === submitted.revision
+                        ? { ...current, conflict: current.conflict ?? "stale" }
+                        : current);
+                } else {
+                    setSaveError(getKokoroErrorMessage(e));
+                }
+            }
+            throw e;
         }
     };
 
@@ -649,7 +689,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
     const handleSave = async () => {
         setSaveError(null);
+        setSaved(false);
         const saveErrors: string[] = [];
+        let botSaveFailed = false;
         const saveRevision = openRevisionRef.current;
         const saveCharacterId = activeCharacterIdRef.current;
         const isSaveSessionCurrent = () =>
@@ -904,15 +946,16 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         }
 
         // 11. Commit Bot Config
-        const botDirty = isBotConfigDirty(baselineBotConfigRef.current, localBotConfig);
-        if (botDirty && localBotConfig) {
+        const botDirty = isBotConfigDirty(botSettings.baseline, localBotConfig);
+        if (botDirty && localBotConfig && openRevisionRef.current === saveRevision) {
             try {
-                const savedBot = await saveBotConfig(localBotConfig);
-                setLocalBotConfig(savedBot);
-                baselineBotConfigRef.current = savedBot;
+                await saveBotDraft(localBotConfig, saveRevision);
             } catch (e) {
                 console.error("[SettingsPanel] Failed to save Bot config:", e);
-                saveErrors.push(getKokoroErrorMessage(e));
+                botSaveFailed = true;
+                if (!isKokoroErrorCode(e, "BotConfigConflict")) {
+                    saveErrors.push(getKokoroErrorMessage(e));
+                }
             }
         }
 
@@ -960,8 +1003,9 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
             }
         }
 
-        if (saveErrors.length > 0) {
-            setSaveError(saveErrors.join("; "));
+        if (openRevisionRef.current !== saveRevision) return;
+        if (botSaveFailed || saveErrors.length > 0) {
+            setSaveError(saveErrors.length > 0 ? saveErrors.join("; ") : null);
             return;
         }
 
@@ -993,7 +1037,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         setLocalSttConfig(baselineSttConfigRef.current);
         setVoiceInterrupt(baselineVoiceInterruptRef.current);
         setLocalImageGenConfig(baselineImageGenConfigRef.current);
-        setLocalBotConfig(baselineBotConfigRef.current);
+        setBotSettings(current => ({ baseline: current.baseline, draft: current.baseline }));
         latestLlmConfigRef.current = baselineLlmConfigRef.current;
         setVisionEnabled(baselineVisionEnabledRef.current);
         setLocalVisionConfig(baselineVisionConfigRef.current);
@@ -1247,7 +1291,17 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                         botConfig={localBotConfig}
                                         initialStatus={initialTelegramStatus}
                                         initialCharacters={charactersProp}
-                                        onBotConfigChange={setLocalBotConfig}
+                                        onSaveBotConfig={async () => {
+                                            if (localBotConfig && isBotConfigDirty(botSettings.baseline, localBotConfig)) {
+                                                setSaveError(null);
+                                                await saveBotDraft(localBotConfig, openRevisionRef.current);
+                                            }
+                                        }}
+                                        onBotConfigChange={config => setBotSettings(current => {
+                                            return current.draft?.revision === config.revision
+                                                ? { ...current, draft: config }
+                                                : current;
+                                        })}
                                     />
                                 </div>
                             )}
@@ -1286,6 +1340,19 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                                 </div>
                             )}
                         </div>
+
+                        {botSettings.conflict && (
+                            <div role="alert" className="flex items-center justify-between gap-4 border-t border-[var(--color-border)] px-5 py-3 text-sm">
+                                <span>{t(botSettings.conflict === "overlap" ? "bot.config_conflict.overlap" : "bot.config_conflict.stale")}</span>
+                                <button
+                                    type="button"
+                                    className="shrink-0 rounded-md border border-[var(--color-border)] px-3 py-2 text-[var(--color-accent)]"
+                                    onClick={() => void refreshBotDraft(botSettings.conflict === "overlap")}
+                                >
+                                    {t(botSettings.conflict === "overlap" ? "bot.config_conflict.keep_saved" : "bot.config_conflict.refresh")}
+                                </button>
+                            </div>
+                        )}
 
                         {/* General Settings (Language) & Footer */}
                         <div className="flex items-center justify-between p-5 border-t border-[var(--color-border)]">

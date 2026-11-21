@@ -5,11 +5,14 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// 统一的 Kokoro 错误类型，支持结构化序列化
-#[derive(Debug, Error, Serialize, Deserialize, Clone)]
+#[derive(Debug, Error, Serialize, Deserialize, Clone, PartialEq, Eq, specta::Type)]
 #[serde(tag = "code", content = "message")]
 pub enum KokoroError {
     #[error("配置错误: {0}")]
     Config(String),
+
+    #[error("{0}")]
+    BotConfigConflict(String),
 
     #[error("数据库错误: {0}")]
     Database(String),
@@ -44,6 +47,9 @@ pub enum KokoroError {
     #[error("聊天错误: {0}")]
     Chat(String),
 
+    #[error("聊天保存失败: {0}")]
+    ChatPersistence(String),
+
     #[error("校验错误: {0}")]
     Validation(String),
 }
@@ -51,7 +57,7 @@ pub enum KokoroError {
 /// 便捷类型别名
 pub type KokoroResult<T> = Result<T, KokoroError>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct FailureEvent {
     pub event_id: String,
     pub timestamp: String,
@@ -61,9 +67,14 @@ pub struct FailureEvent {
     pub message: String,
     pub retryable: bool,
     pub trace_id: String,
+    #[serde(default)]
     pub conversation_id: Option<String>,
+    #[serde(default)]
     pub turn_id: Option<String>,
+    #[serde(default)]
     pub character_id: Option<String>,
+    #[specta(type = Option<crate::ipc::wire::JsonValue>)]
+    #[serde(default)]
     pub context: Option<Value>,
 }
 
@@ -148,6 +159,7 @@ impl From<KokoroError> for FailureEvent {
     fn from(error: KokoroError) -> Self {
         let (code, retryable) = match &error {
             KokoroError::Config(_) => ("CONFIG_ERROR", false),
+            KokoroError::BotConfigConflict(_) => ("BOT_CONFIG_CONFLICT", false),
             KokoroError::Database(_) => ("DATABASE_ERROR", true),
             KokoroError::Llm(_) => ("LLM_ERROR", true),
             KokoroError::Tts(_) => ("TTS_ERROR", true),
@@ -159,6 +171,7 @@ impl From<KokoroError> for FailureEvent {
             KokoroError::Unauthorized(_) => ("UNAUTHORIZED", false),
             KokoroError::Internal(_) => ("INTERNAL_ERROR", false),
             KokoroError::Chat(_) => ("CHAT_ERROR", true),
+            KokoroError::ChatPersistence(_) => ("CHAT_PERSISTENCE_ERROR", false),
             KokoroError::Validation(_) => ("VALIDATION_ERROR", false),
         };
 
@@ -174,6 +187,13 @@ impl From<KokoroError> for FailureEvent {
 }
 
 impl KokoroError {
+    pub(crate) const CHAT_PERSISTENCE_CODE: &'static str = "CHAT_PERSISTENCE_ERROR";
+
+    pub(crate) fn chat_persistence(error: impl std::fmt::Display) -> Self {
+        tracing::error!(target: "chat::persistence", "chat database write failed: {error}");
+        Self::ChatPersistence("Could not save chat messages to the database.".into())
+    }
+
     pub fn into_failure_event(
         self,
         stage: impl Into<String>,
@@ -194,7 +214,7 @@ impl KokoroError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 pub struct ChatErrorEvent {
     pub code: String,
     pub stage: String,

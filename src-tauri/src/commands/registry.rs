@@ -10,6 +10,7 @@ use crate::characters::catalog::{CatalogEntry, CharacterCatalog};
 use crate::characters::manifest::CharacterTemplateManifest;
 use crate::commands::characters::activate_character_for_package_removal;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use crate::registry::client::{
     normalize_registry_index, verify_character_archive, verify_registry_entry_archive,
     InstallTrust, RegistryClientError, MAX_ARCHIVE_BYTES,
@@ -32,7 +33,7 @@ const MAX_REGISTRY_INDEX_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const REGISTRY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 pub struct InstalledCharacterPackage {
     pub id: String,
     pub version: String,
@@ -41,10 +42,11 @@ pub struct InstalledCharacterPackage {
     pub package_dir: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 pub struct CharacterPackageRemoval {
     pub id: String,
     pub version: String,
+    #[serde(default)]
     pub active_fallback: Option<String>,
 }
 
@@ -326,20 +328,24 @@ pub(crate) fn removal_activation_target(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_registry_entries(
     registry_url: Option<String>,
-) -> Result<RegistryIndex, KokoroError> {
+) -> Result<Response<RegistryIndex>, KokoroError> {
     let source_url = normalize_registry_url(registry_url)?;
     fetch_index(&source_url).await
+        .map(Response)
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_character_from_registry(
     app: AppHandle,
     character_id: String,
     version: String,
     registry_url: Option<String>,
 ) -> Result<InstalledCharacterPackage, KokoroError> {
+    let _install = crate::ipc::admit_operation(&app, "registry", "character-install")?;
     let source_url = normalize_registry_url(registry_url)?;
     let index = fetch_index(&source_url).await?;
     let entry = index
@@ -367,10 +373,12 @@ pub async fn install_character_from_registry(
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_character_from_url(
     app: AppHandle,
     url: String,
 ) -> Result<InstalledCharacterPackage, KokoroError> {
+    let _install = crate::ipc::admit_operation(&app, "registry", "character-url-install")?;
     let bytes = fetch_bytes(&url).await?;
     let verified =
         verify_character_archive(&bytes, None, &engine_version()).map_err(client_error)?;
@@ -471,6 +479,7 @@ async fn active_character_uses_package(
 }
 
 #[command]
+#[specta::specta]
 pub async fn remove_character_package(
     app: AppHandle,
     character_id: String,
@@ -478,6 +487,7 @@ pub async fn remove_character_package(
     coordinator: State<'_, crate::characters::activation::ActivationCoordinator>,
     orchestrator: State<'_, crate::ai::context::AIOrchestrator>,
 ) -> Result<CharacterPackageRemoval, KokoroError> {
+    let _remove = crate::ipc::admit_operation(&app, "registry", "character-uninstall")?;
     let app_data = app_data_dir(&app)?;
     let catalog = CharacterCatalog::new(app_data.join("characters"), engine_version());
     let active = read_active_character_id(&app_data);

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // pattern: Imperative Shell
 
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -121,6 +122,7 @@ describe("main character catalog actions", () => {
 
   it("renders structured action failures as readable messages", async () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "broken",
       name: "Broken character",
       persona: "A companion",
@@ -170,6 +172,7 @@ describe("main character catalog actions", () => {
 
   it("shows only the newest version of a template", () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "template-instance",
       name: "Template character",
       persona: "A companion",
@@ -205,6 +208,7 @@ describe("main character catalog actions", () => {
 
   it("keeps template actions for every instance of the same template", () => {
     const instance = (id: string): CharacterRecord => ({
+      ...emptyCharacterDetails,
       id,
       name: id,
       persona: "A companion",
@@ -227,6 +231,7 @@ describe("main character catalog actions", () => {
 
   it("does not offer conflict resolution when the instance is already current", () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "template-instance",
       name: "Template instance",
       persona: "A companion",
@@ -248,6 +253,7 @@ describe("main character catalog actions", () => {
 
   it("opens a full character preview without activating it", async () => {
     const character: CharacterRecord = {
+      ...emptyCharacterDetails,
       id: "preview-character",
       name: "Preview character",
       persona: "A detailed persona for preview",
@@ -284,6 +290,7 @@ describe("main character catalog actions", () => {
 
   it("clamps long descriptions and uses the themed scrollbar", () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "long-description",
       name: "Long description",
       persona: "A companion with a long description",
@@ -309,6 +316,7 @@ describe("main character catalog actions", () => {
 
   it("closes the catalog dropdown when clicking outside", async () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "char-outside",
       name: "Outside Test Character",
       persona: "A companion",
@@ -332,6 +340,7 @@ describe("main character catalog actions", () => {
 
   it("does not close the catalog dropdown when clicking inside the dropdown container", async () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "char-inside",
       name: "Inside Test Character",
       persona: "A companion",
@@ -356,6 +365,7 @@ describe("main character catalog actions", () => {
 
   it("does not close the catalog dropdown on Escape key", async () => {
     const { container, root } = renderOpenCatalog({
+      ...emptyCharacterDetails,
       id: "char-esc",
       name: "Escape Test Character",
       persona: "A companion",
@@ -379,6 +389,7 @@ describe("main character catalog actions", () => {
 
   it("renders a non-null avatar through the supplied resolver", () => {
     const character: CharacterRecord = {
+      ...emptyCharacterDetails,
       id: "custom",
       name: "Custom",
       persona: "A custom companion",

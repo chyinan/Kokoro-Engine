@@ -1,14 +1,15 @@
 // @vitest-environment node
 // History ownership moved from Panel closures to captured application commands.
+import { chatReply } from "../../../lib/chat/__tests__/wire-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as bridge from "../../../lib/kokoro-bridge";
 import { harness, deferred, turn } from "../../../lib/chat/__tests__/harness";
 import { projectMessages } from "../../../lib/chat/projection";
 import type { ChatViewSnapshot } from "../../../lib/kokoro-bridge";
 const messages = [
-  { id: 101, role: "user", content: "original A", created_at: "now" },
-  { id: 102, role: "assistant", content: "answer A", created_at: "now" },
-  { id: 103, role: "user", content: "later A", created_at: "now" },
+  { metadata: null, id: 101, role: "user", content: "original A", created_at: "now" },
+  { metadata: null, id: 102, role: "assistant", content: "answer A", created_at: "now" },
+  { metadata: null, id: 103, role: "user", content: "later A", created_at: "now" },
 ];
 const editTarget = { conversationId: "conversation-a", generation: 3, messageId: 101 };
 const answerTarget = { ...editTarget, messageId: 102 };
@@ -20,18 +21,18 @@ const persistedTurnMessages = [
 afterEach(() => vi.restoreAllMocks());
 
 describe("application history command session ownership", () => {
-  it("cancels a true character switch by request id, but not a same-character runtime update", async () => {
+  it("keeps admitted work alive across character selection and runtime updates", async () => {
     const h = harness();
     h.set({ revision: 2, busy: true, turns: [turn("active", 2)] });
     await h.app.prepareCharacterSwitch("character-a"); expect(h.io.cancel).not.toHaveBeenCalled();
-    await h.app.prepareCharacterSwitch("character-b"); expect(h.io.cancel).toHaveBeenCalledWith("active", "character_switched");
+    await h.app.prepareCharacterSwitch("character-b"); expect(h.io.cancel).not.toHaveBeenCalled();
   });
   it("a delayed delete response cannot clear a newly selected conversation", async () => {
     const h = harness(); h.set({ messages }); await h.app.refresh();
     const deletion = deferred<void>(); const remove = vi.spyOn(bridge, "deleteConversation").mockReturnValue(deletion.promise);
     const clear = vi.spyOn(bridge, "clearHistory").mockResolvedValue(undefined);
     const running = h.app.deleteConversation("conversation-a");
-    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "B", created_at: "now" }] });
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ metadata: null, id: 201, role: "user", content: "B", created_at: "now" }] });
     deletion.resolve(); await running;
     expect(remove).toHaveBeenCalledWith("conversation-a"); expect(clear).not.toHaveBeenCalled();
     expect(h.app.getSnapshot().conversation_id).toBe("conversation-b");
@@ -43,7 +44,7 @@ describe("application history command session ownership", () => {
     const invoke = vi.spyOn(bridge, "editConversationMessage").mockReturnValue(edit.promise);
     const running = h.app.edit(editTarget, "edited A");
     expect(invoke).toHaveBeenCalledWith({ conversation_id: "conversation-a", conversation_generation: 3, message_id: 101, new_content: "edited A" });
-    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ id: 201, role: "user", content: "original B", created_at: "now" }] });
+    h.set({ conversation_id: "conversation-b", generation: 4, messages: [{ metadata: null, id: 201, role: "user", content: "original B", created_at: "now" }] });
     await h.app.refresh(); edit.resolve({ message_id: 101, updated_content: "edited A" }); await running;
     expect(projectMessages(h.app.getSnapshot())).toMatchObject([{ id: 201, text: "original B" }]);
   });
@@ -87,7 +88,7 @@ describe("application history command session ownership", () => {
     const poll = h.app.refresh();
     h.set({ conversation_id: "conversation-b", generation: 4, messages: [] });
     load.resolve({ topic: "", pinned_state: "", messages: [] });
-    await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(h.io.read).toHaveBeenCalledTimes(3));
     await switching;
     stale.resolve(before); await poll;
     expect(h.app.getSnapshot()).toMatchObject({ conversation_id: "conversation-b", generation: 4, messages: [], busy: false });
@@ -298,12 +299,12 @@ describe("application history command session ownership", () => {
     // turn is generating. Only the native tool rows record their prompt ID.
     const rows = [
       messages[0],
-      { id: telegramId, role: "user", content: "Telegram question", created_at: "now" },
+      { metadata: null, id: telegramId, role: "user", content: "Telegram question", created_at: "now" },
       { id: callId, role: "assistant", content: "", created_at: "now",
         metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
       { id: 105, role: "tool", content: "desktop tool result", created_at: "now",
         metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
-      { id: telegramAnswerId, role: "assistant", content: "Telegram answer", created_at: "now" },
+      { metadata: null, id: telegramAnswerId, role: "assistant", content: "Telegram answer", created_at: "now" },
     ];
     if (replyId !== undefined) {
       rows.push({ id: replyId, role: "assistant", content: "desktop answer", created_at: "now",
@@ -327,12 +328,12 @@ describe("application history command session ownership", () => {
   }) => {
     const h = harness();
     const desktop = { ...turn("desktop", 2, "completed"), user_message_id: 101, assistant_message_id: replyId };
-    const telegramAnswer = { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" };
+    const telegramAnswer = { metadata: null, id: 106, role: "assistant", content: "Telegram answer", created_at: "now" };
     const rows = [
       messages[0],
-      { id: 102, role: "user", content: "Telegram question", created_at: "now" },
+      { metadata: null, id: 102, role: "user", content: "Telegram question", created_at: "now" },
       { id: replyId, role: "assistant", content: "desktop answer", created_at: "now",
-        metadata: omitTurnId ? undefined : JSON.stringify({ turn_id: desktop.turn_id }) },
+        metadata: omitTurnId ? null : JSON.stringify({ turn_id: desktop.turn_id }) },
       telegramAnswer,
     ];
     if (callId !== undefined && resultId !== undefined) {
@@ -365,9 +366,9 @@ describe("application history command session ownership", () => {
         metadata: '{"type":"assistant_tool_calls","turn_id":"desktop","user_message_id":101}' },
       { id: 104, role: "tool", content: "desktop tool result", created_at: "now",
         metadata: '{"type":"tool_result","turn_id":"desktop","user_message_id":101}' },
-      { id: 105, role: "user", content: "Telegram question", created_at: "now" },
-      { id: 106, role: "assistant", content: "Telegram answer", created_at: "now" },
-      { id: 107, role: "user", content: "later question", created_at: "now" },
+      { metadata: null, id: 105, role: "user", content: "Telegram question", created_at: "now" },
+      { metadata: null, id: 106, role: "assistant", content: "Telegram answer", created_at: "now" },
+      { metadata: null, id: 107, role: "user", content: "later question", created_at: "now" },
     ] });
     await h.app.refresh();
     const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
@@ -404,7 +405,7 @@ describe("application history command session ownership", () => {
       { role: "user", text: "original A", images, clientRequestId: "image-turn" },
     ]);
     h.set({ revision: 2, messages: [{ ...messages[0], metadata: JSON.stringify({ client_request_id: "image-turn" }) }, messages[1]], turns: [{ ...turn("image-turn", 2, "completed"), user_message_id: 101, images }] });
-    completion.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer A" });
+    completion.resolve(chatReply({ status: "completed", conversation_id: "conversation-a", text: "answer A" }));
     await sending;
     const reopened = h.newWindow(); await reopened.refresh();
     const remove = vi.spyOn(bridge, "deleteLastMessages").mockResolvedValue(undefined);
@@ -419,7 +420,7 @@ describe("application history command session ownership", () => {
     }));
     expect(vi.mocked(h.io.send).mock.lastCall?.[0]).not.toHaveProperty("camera_frame");
     expect(projectMessages(reopened.getSnapshot()).map(message => message.id)).toEqual([101, 102]);
-    replacement.resolve({ status: "completed", conversation_id: "conversation-a", text: "answer B" });
+    replacement.resolve(chatReply({ status: "completed", conversation_id: "conversation-a", text: "answer B" }));
     await running;
   });
   it.each([{ conversation_id: "conversation-b" }, { character_id: "character-b" }, { generation: 5 }])("does not regenerate if the selection changes during the history read to %o", async selection => {
@@ -441,7 +442,7 @@ describe("application history command session ownership", () => {
     const running = h.app.continueFrom(answerTarget, true);
     const after = {
       ...before, busy: false, revision: 2, conversation_history_revision: 3,
-      messages: [...messages, { id: 104, role: "assistant", content: "pet reply", created_at: "now" }],
+      messages: [...messages, { metadata: null, id: 104, role: "assistant", content: "pet reply", created_at: "now" }],
     };
     h.set(after);
     read.resolve(after);

@@ -1,5 +1,5 @@
+import { commands } from "@/lib/generated/ipc";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { chatApplication } from "../../lib/chat/application";
 import { isActiveTurn } from "../../lib/chat/projection";
 import { getKokoroErrorMessage } from "../../lib/kokoro-bridge";
@@ -30,7 +30,7 @@ export function usePetChat(): PetChatState {
         clearHideTimer();
         const version = bubbleVersion.current;
         hideTimer.current = setTimeout(() => {
-            if (bubbleVersion.current === version) void invoke("hide_bubble_window").catch(() => {});
+            if (bubbleVersion.current === version) void commands.hideBubbleWindow().catch(() => {});
         }, 5000);
     };
     const scope = useRef(0);
@@ -41,7 +41,7 @@ export function usePetChat(): PetChatState {
         return () => {
             ++scope.current;
             clearHideTimer();
-            void invoke("hide_bubble_window").catch(() => {});
+            void commands.hideBubbleWindow().catch(() => {});
         };
     }, [view.character_id]);
     const turns = view.turns.filter(item => item.character_id === view.character_id);
@@ -68,40 +68,39 @@ export function usePetChat(): PetChatState {
         if (text) {
             // A recreated pet may find its old bubble window hidden.
             if (!requestId && !shown) {
-                void invoke("show_bubble_window", { text }).catch(() => {});
+                void commands.showBubbleWindow(text).catch(() => {});
             } else {
                 const presentingScope = scope.current;
-                void invoke("update_bubble_text", { text }).catch(() => {
+                void commands.updateBubbleText(text).catch(() => {
                     if (scope.current === presentingScope && chatApplication.getSnapshot().character_id === view.character_id) {
-                        return invoke("show_bubble_window", { text });
+                        return commands.showBubbleWindow(text);
                     }
                 }).catch(() => {});
             }
             presentation.current.shown = true;
         } else if (error) {
-            void invoke("show_bubble_window", { text: error }).catch(() => {});
+            void commands.showBubbleWindow(error).catch(() => {});
         }
         if (!active) {
             scheduleHide();
         }
     }, [revision, replyRequestId, requestId, text, error, active, view.character_id]);
     const sendMessage = async (text: string) => {
-        const message = text.trim();
-        if (!message || sending.current) return;
+        if (!text.trim() || sending.current) return;
         sending.current = true;
         const sendingScope = scope.current;
         clearHideTimer();
         const client_request_id = `pet_${crypto.randomUUID()}`;
         setRequest({ id: client_request_id, characterId: view.character_id });
-        void invoke("show_bubble_window", { text: "..." }).catch(() => {});
+        void commands.showBubbleWindow("...").catch(() => {});
         try {
-            await chatApplication.send({ message, client_request_id,
+            await chatApplication.send({ message: text, client_request_id,
                 character_id: view.character_id, conversation_id: view.conversation_id ?? undefined,
                 conversation_generation: view.generation });
         }
         catch (error) {
             if (scope.current === sendingScope && chatApplication.getSnapshot().character_id === view.character_id) {
-                void invoke("show_bubble_window", { text: getKokoroErrorMessage(error) }).catch(() => {});
+                void commands.showBubbleWindow(getKokoroErrorMessage(error)).catch(() => {});
                 scheduleHide();
             }
         } finally { sending.current = false; }

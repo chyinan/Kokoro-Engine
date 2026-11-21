@@ -1,5 +1,38 @@
 use super::helpers::*;
 use crate::vision::server::{detect_image_mime, mime_to_extension, VisionServer};
+
+#[tokio::test]
+async fn vision_http_keeps_serving_until_admitted_work_drains() {
+    use crate::lifecycle::{AppLifecycle, TaskStage};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut server = VisionServer::new(temp.path());
+    let app = AppLifecycle::new();
+    let service = app.scope(TaskStage::Service, "vision-http");
+    let work = app.scope(TaskStage::Work, "chat").lease("delivery").unwrap();
+    server.start(&service).unwrap();
+    let image = [0xff, 0xd8, 0xff, 0xe0];
+    let url = server.upload(&image, "frame.jpg").unwrap();
+
+    let shutdown = app.try_begin_shutdown(Duration::from_secs(5)).unwrap();
+    let report = tokio::spawn(shutdown.finish_with_finalizer(
+        |_| async { Vec::new() },
+        |_| async { Ok(()) },
+    ));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.bytes().await.unwrap().as_ref(), image.as_slice());
+    assert!(!service.token().is_cancelled());
+
+    drop(work);
+    assert!(report.await.unwrap().is_clean());
+    assert!(client.get(url).send().await.is_err());
+}
 use std::collections::HashSet;
 
 // ── Shared HTTP helper ──────────────────────────────────────

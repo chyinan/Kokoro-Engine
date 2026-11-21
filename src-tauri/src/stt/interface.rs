@@ -77,7 +77,7 @@ impl AudioChunk {
 }
 
 /// A single segment of transcribed text with timing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct TranscriptionSegment {
     /// Start time in seconds relative to the beginning of the audio.
     pub start: f32,
@@ -86,11 +86,12 @@ pub struct TranscriptionSegment {
     /// The transcribed text.
     pub text: String,
     /// Confidence score (0.0 - 1.0), if available.
+    #[serde(default)]
     pub confidence: Option<f32>,
 }
 
 /// The full result of a transcription task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct TranscriptionResult {
     /// The full transcribed text (concatenated segments).
     pub text: String,

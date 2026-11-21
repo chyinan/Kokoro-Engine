@@ -16,7 +16,11 @@ import {
     parseLegacyChatError,
     getEngineInfo,
     getKokoroErrorMessage,
+    getTelegramConfig,
     onChatError,
+    playCue,
+    saveTelegramConfig,
+    streamChat,
 } from "./kokoro-bridge";
 
 const mockedInvoke = vi.mocked(invoke);
@@ -164,6 +168,26 @@ describe("chat-error listener normalization", () => {
 });
 
 describe("bridge invoke error normalization", () => {
+    it("sends the Telegram read revision with the edit and preserves a typed conflict", async () => {
+        const config = { enabled: true, allowed_chat_ids: [-1001234567890], send_voice_reply: true };
+        const conflict = { code: "BotConfigConflict", message: "Settings changed" };
+        mockedInvoke.mockResolvedValueOnce({ revision: 12, config }).mockRejectedValueOnce(conflict);
+
+        const snapshot = await getTelegramConfig();
+        const edited = { ...snapshot.config, send_voice_reply: false };
+        await expect(saveTelegramConfig(snapshot.revision, edited)).rejects.toMatchObject(conflict);
+        expect(mockedInvoke).toHaveBeenCalledTimes(2);
+        expect(mockedInvoke).toHaveBeenNthCalledWith(2, "save_telegram_config", { expectedRevision: 12, config: edited }, undefined);
+    });
+
+    it("keeps the business error variant sent by Rust", async () => {
+        const businessError = { code: "Validation", message: "Cue cannot be empty" };
+        mockedInvoke.mockRejectedValueOnce(businessError);
+
+        await expect(playCue("")).rejects.toEqual(businessError);
+        expect(mockedInvoke).toHaveBeenLastCalledWith("play_cue", { cue: "" }, undefined);
+    });
+
     it("throws structured KokoroErrorObject when invoke returns json error", async () => {
         mockedInvoke.mockRejectedValueOnce(
             JSON.stringify({
@@ -185,8 +209,24 @@ describe("bridge invoke error normalization", () => {
     });
 
     it("keeps plain string error unchanged when invoke returns non-json error", async () => {
-        mockedInvoke.mockRejectedValueOnce("network unreachable");
+        mockedInvoke.mockRejectedValueOnce("Command get_engine_info not found");
 
-        await expect(getEngineInfo()).rejects.toBe("network unreachable");
+        await expect(getEngineInfo()).rejects.toBe("Command get_engine_info not found");
+    });
+
+    it("preserves a framework or JavaScript Error rejection", async () => {
+        const frameworkError = new TypeError("IPC transport unavailable");
+        mockedInvoke.mockRejectedValueOnce(frameworkError);
+
+        await expect(getEngineInfo()).rejects.toBe(frameworkError);
+    });
+
+    it("sends the existing chat request shape and returns the reply without an envelope", async () => {
+        const request = { message: "hello", client_request_id: "request-1" };
+        const response = { text: "hi", client_request_id: "request-1", conversation_id: "conversation-1" };
+        mockedInvoke.mockResolvedValueOnce(response);
+
+        await expect(streamChat(request)).resolves.toEqual(response);
+        expect(mockedInvoke).toHaveBeenLastCalledWith("stream_chat", { request }, undefined);
     });
 });

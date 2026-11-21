@@ -3,7 +3,7 @@
 import * as bridge from "../kokoro-bridge";
 import type { ChatRequest, ChatTurnSnapshot, ChatViewSnapshot, ChatViewVersion, StreamChatResponse } from "../kokoro-bridge";
 import { canTruncateRefreshedHistory, getContinueFromCutoffIndex, getContinueFromRowBoundary, getExpectedTailMessageId } from "./history-commands";
-import { findFailurePromptIndex, isActiveTurn, mergeTurnSnapshot, projectSavedMessages } from "./projection";
+import { findFailurePromptIndex, isActiveTurn, mergeTurnSnapshot, projectSavedMessages, turnMatchesView } from "./projection";
 
 export interface ChatTransport {
   read(knownVersion?: ChatViewVersion): Promise<ChatViewSnapshot | null>;
@@ -156,6 +156,7 @@ export class ChatApplication {
         revision: 0, client_request_id: id, turn_id: null,
         character_id: request.character_id ?? this.view.character_id,
         conversation_id: request.conversation_id ?? this.view.conversation_id,
+        conversation_generation: request.conversation_generation ?? this.view.generation,
         message: request.message, images: request.images ?? [], hidden: request.hidden ?? false,
         reusing_saved_prompt: request.retry_failure !== undefined || request.regenerate_reply !== undefined,
         status: "pending", text: "", translation: null, tools: [], error: null,
@@ -173,19 +174,26 @@ export class ChatApplication {
     return promise;
   }
   async cancel(id?: string, reason = "stopped_by_user") {
-    const target = id ?? this.view.turns.find(isActiveTurn)?.client_request_id ?? this.pending.keys().next().value;
+    const target = id ?? this.view.turns.find(turn => isActiveTurn(turn) && turnMatchesView(this.view, turn))?.client_request_id;
     if (target) await this.io.cancel(target, reason);
     await this.refresh();
+  }
+  async retryPersistence(id: string): Promise<StreamChatResponse> {
+    if (this.view.busy || this.mutation) throw new Error("history_mutation_busy");
+    try {
+      return await bridge.retryChatPersistence(id);
+    } finally {
+      void this.refresh().catch(() => {});
+    }
   }
   approveTool(id: string) { return bridge.approveToolApproval(id); }
   rejectTool(id: string) { return bridge.rejectToolApproval(id, null); }
   async prepareCharacterSwitch(characterId: string) {
-    const view = await this.refresh();
-    if (view.character_id !== characterId) await this.cancel(undefined, "character_switched");
+    void characterId;
+    await this.refresh();
   }
   async selectConversation(id: string | null) {
     return this.mutate(async () => {
-      await this.cancel(undefined, "conversation_switched");
       if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
     });
   }
@@ -209,11 +217,10 @@ export class ChatApplication {
     });
   }
   async edit(target: ChatMessageTarget, content: string) {
-    const text = content.trim();
-    if (!text || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
+    if (!content.trim() || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
     return this.mutate(() => bridge.editConversationMessage({
       conversation_id: target.conversationId, conversation_generation: target.generation,
-      message_id: target.messageId, new_content: text,
+      message_id: target.messageId, new_content: content,
     }));
   }
   async deleteConversation(id: string) {

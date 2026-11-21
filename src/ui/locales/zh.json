@@ -1136,7 +1136,11 @@
         }
     },
     "chat": {
+        "tool_only_completion": "工具调用已结束，但未生成文字回复。",
         "speech_failed": "未能朗读这条回复：{{error}}",
+        "persistence_failed": "未能将本轮对话保存到数据库。",
+        "reply_unfinished": "未完成的回复",
+        "retry_save": "重试保存",
         "status": {
             "streaming": "生成中",
             "chat": "对话"
@@ -1300,6 +1304,12 @@
     },
     "bot": {
         "title": "Bot 接入",
+        "config_conflict": {
+            "stale": "编辑期间 Bot 设置发生了变化。请刷新并检查你的修改，再重新保存。",
+            "overlap": "草稿与已保存的设置修改了部分相同字段。你可以保留这些字段的已保存值，再检查其余修改。",
+            "refresh": "刷新 Bot 设置",
+            "keep_saved": "对重叠修改保留已保存值"
+        },
         "status": {
             "enabled": "已启用",
             "disabled": "未启用",
@@ -1388,7 +1398,7 @@
         },
         "whitelist": {
             "label": "允许的聊天 ID",
-            "desc": "只有这些聊天 ID 可以与机器人交互。留空 = 拒绝所有。",
+            "desc": "仅允许列出的聊天 ID（不是发送者 ID）。群聊 ID 授权整个群聊。留空表示尚未授权任何聊天，即使机器人运行中也会拒绝所有消息和命令。",
             "placeholder": "聊天 ID（数字）",
             "add": "添加"
         },

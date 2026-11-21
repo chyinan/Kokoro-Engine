@@ -1,0 +1,2371 @@
+use super::external_memory::{MemoryTicket, MemoryWork};
+use crate::error::KokoroError;
+use sqlx::{Sqlite, SqlitePool, Transaction};
+
+/// Transport limits keep oversized input out of both SQLite and prompt
+/// preparation. The per-message context budget is applied separately.
+pub(crate) const MAX_USER_INPUT_BYTES: usize = 256 * 1024;
+
+/// Original PR2 transport identity, before main's length-prefixed identity was
+/// adopted. Only trusted adapters can derive this alias from a platform message.
+pub(crate) fn legacy_external_identity(platform: &str, peer: &str, message: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{platform}-{:x}",
+        Sha256::digest(serde_json::to_vec(&(peer, message)).expect("serializable identity"))
+    )
+}
+
+// Resolve each identity with its own index. SQLite can otherwise pick a history scan
+// after ANALYZE when an identity is absent or repeated across most rows. UNION removes
+// duplicate row IDs before checking ownership in message order.
+const EXTERNAL_REQUEST_OWNER_SQL: &str = "
+    WITH candidate_ids AS (
+        SELECT id FROM conversation_messages INDEXED BY idx_chat_user_save_id
+        WHERE role = 'user' AND metadata IS NOT NULL
+          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?
+        UNION
+        SELECT id FROM conversation_messages INDEXED BY idx_chat_user_request_id
+        WHERE role = 'user' AND metadata IS NOT NULL
+          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.source') END = ?
+          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.client_request_id') END = ?
+    )
+    SELECT c.character_id,
+           CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END
+    FROM candidate_ids
+    CROSS JOIN conversation_messages m ON m.id = candidate_ids.id
+    CROSS JOIN conversations c ON c.id = m.conversation_id
+    ORDER BY m.id";
+
+/// An accepted platform request cannot be executed again under another owner,
+/// including after a restart or a change to the adapter's configured character.
+/// Old PR2 rows lack the save identity required for safe recovery: fail closed.
+pub(crate) async fn validate_external_request_owner(
+    db: &SqlitePool,
+    character: &str,
+    source: &str,
+    request: &str,
+    previous_ids: &[String],
+) -> Result<(), KokoroError> {
+    let expected_save_id = format!("{request}:user");
+    for id in std::iter::once(request).chain(previous_ids.iter().map(String::as_str)) {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(EXTERNAL_REQUEST_OWNER_SQL)
+            .bind(format!("{id}:user"))
+            .bind(source)
+            .bind(id)
+            .fetch_all(db)
+            .await
+            .map_err(KokoroError::chat_persistence)?;
+        for (owner, save_id) in rows {
+            if owner != character {
+                return Err(KokoroError::Chat("chat_request_conflict: request identity was already accepted by another character".into()));
+            }
+            if save_id.as_deref() != Some(expected_save_id.as_str()) {
+                return Err(KokoroError::Chat("chat_request_conflict: this legacy request was already accepted and cannot be safely replayed".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_user_input(text: &str) -> Result<(), KokoroError> {
+    if text.len() > MAX_USER_INPUT_BYTES {
+        return Err(KokoroError::Validation(format!(
+            "Chat input exceeds the {MAX_USER_INPUT_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConversationTarget {
+    pub require_character: bool,
+    pub character_id: String,
+    pub conversation_id: String,
+    pub create: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MessageWrite {
+    pub role: String,
+    pub content: String,
+    pub metadata: Option<String>,
+    pub save_id: Option<String>,
+    draft: Option<(i64, String)>,
+    replace_draft: bool,
+}
+
+impl MessageWrite {
+    pub(crate) fn new(
+        role: impl Into<String>,
+        content: impl Into<String>,
+        metadata: Option<String>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            metadata,
+            save_id: None,
+            draft: None,
+            replace_draft: false,
+        }
+    }
+
+    pub(crate) fn with_save_id(mut self, save_id: String) -> Self {
+        self.save_id = Some(save_id);
+        self
+    }
+
+    pub(crate) fn finalizing(mut self, row_id: i64, turn_id: String) -> Self {
+        self.draft = Some((row_id, turn_id));
+        self
+    }
+
+    pub(crate) fn replacing_draft(self, row_id: i64, turn_id: String) -> Self {
+        Self {
+            replace_draft: true,
+            ..self.finalizing(row_id, turn_id)
+        }
+    }
+
+    pub(crate) fn stored_metadata(&self) -> Option<String> {
+        let Some(save_id) = &self.save_id else {
+            return self.metadata.clone();
+        };
+        let mut value = self
+            .metadata
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        value["chat_save_id"] = serde_json::Value::String(save_id.clone());
+        Some(value.to_string())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SavedMessage {
+    pub id: i64,
+    pub changed: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SaveError {
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error("The conversation changed before the failed save could be retried.")]
+    HistoryChanged,
+}
+
+fn is_transient_lock(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| matches!(code & 0xff, 5 | 6)) // SQLITE_BUSY, SQLITE_LOCKED
+}
+
+pub(crate) async fn save(
+    db: &SqlitePool,
+    target: &ConversationTarget,
+    messages: &[MessageWrite],
+) -> Result<Vec<SavedMessage>, KokoroError> {
+    save_expected(db, target, messages, None).await
+}
+
+pub(crate) async fn save_expected(
+    db: &SqlitePool,
+    target: &ConversationTarget,
+    messages: &[MessageWrite],
+    expected_revision: Option<i64>,
+) -> Result<Vec<SavedMessage>, KokoroError> {
+    for delay in [Some(25), Some(75), None] {
+        match save_once(db, target, messages, expected_revision).await {
+            Err(SaveError::Database(error)) if delay.is_some() && is_transient_lock(&error) => {
+                tokio::time::sleep(std::time::Duration::from_millis(delay.unwrap_or(0))).await;
+            }
+            result => {
+                return result.map_err(|error| match error {
+                    SaveError::Database(error) => KokoroError::chat_persistence(error),
+                    SaveError::HistoryChanged => KokoroError::Validation(error.to_string()),
+                })
+            }
+        }
+    }
+    unreachable!("the last save attempt returns its result")
+}
+
+async fn save_once(
+    db: &SqlitePool,
+    target: &ConversationTarget,
+    messages: &[MessageWrite],
+    expected_revision: Option<i64>,
+) -> Result<Vec<SavedMessage>, SaveError> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let conversation = &target.conversation_id;
+    let character = &target.character_id;
+    if target.require_character {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM characters WHERE id=?)")
+            .bind(character)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !exists {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
+    }
+    if target.create {
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(conversation)
+        .bind(character)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    match check_owner(&mut tx, target).await {
+        Ok(revision) if expected_revision.is_some_and(|expected| expected != revision) => {
+            return Err(SaveError::HistoryChanged);
+        }
+        Err(sqlx::Error::RowNotFound) if expected_revision.is_some() => {
+            return Err(SaveError::HistoryChanged)
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+
+    let mut saved = Vec::with_capacity(messages.len());
+    for message in messages {
+        saved.push(write_message(&mut tx, conversation, message, &now).await?);
+    }
+    if saved.iter().any(|message| message.changed) {
+        let first_user_title = messages
+            .iter()
+            .zip(&saved)
+            .find(|(message, saved)| message.role == "user" && saved.changed)
+            .map(|(message, _)| {
+                let mut chars = message.content.chars();
+                let mut title: String = chars.by_ref().take(20).collect();
+                if chars.next().is_some() {
+                    title.push_str("...");
+                }
+                title
+            });
+        let updated = sqlx::query(
+            "UPDATE conversations SET title = CASE WHEN title = '新对话' THEN COALESCE(?, title) ELSE title END, updated_at = ? WHERE id = ? AND character_id = ?",
+        )
+        .bind(first_user_title)
+        .bind(&now)
+        .bind(conversation)
+        .bind(character)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
+    }
+    tx.commit().await?;
+    Ok(saved)
+}
+
+async fn check_owner(
+    tx: &mut Transaction<'_, Sqlite>,
+    target: &ConversationTarget,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT message_revision FROM conversations WHERE id = ? AND character_id = ?",
+    )
+    .bind(&target.conversation_id)
+    .bind(&target.character_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+pub(crate) async fn current_revision(
+    db: &SqlitePool,
+    target: &ConversationTarget,
+) -> Result<Option<i64>, KokoroError> {
+    sqlx::query_scalar(
+        "SELECT message_revision FROM conversations WHERE id = ? AND character_id = ?",
+    )
+    .bind(&target.conversation_id)
+    .bind(&target.character_id)
+    .fetch_optional(db)
+    .await
+    .map_err(KokoroError::chat_persistence)
+}
+
+async fn write_message(
+    tx: &mut Transaction<'_, Sqlite>,
+    conversation: &str,
+    message: &MessageWrite,
+    now: &str,
+) -> Result<SavedMessage, sqlx::Error> {
+    let metadata = message.stored_metadata();
+    if let Some(save_id) = &message.save_id {
+        let lookup = if message.role == "user" {
+            sqlx::query_as(SAVED_USER_MESSAGE_IDENTITY_SQL)
+                .bind(conversation)
+                .bind(save_id)
+        } else {
+            sqlx::query_as(SAVED_NON_USER_MESSAGE_IDENTITY_SQL)
+                .bind(conversation)
+                .bind(&message.role)
+                .bind(save_id)
+        };
+        let existing: Option<(i64, String, Option<String>)> =
+            lookup.fetch_optional(&mut **tx).await?;
+        if let Some((id, content, previous_metadata)) = existing {
+            if content != message.content || previous_metadata != metadata {
+                return Err(sqlx::Error::Protocol(
+                    "Chat save identity was reused with different content".into(),
+                ));
+            }
+            return Ok(SavedMessage { id, changed: false });
+        }
+    }
+    if message.replace_draft {
+        let (row_id, turn_id) = message.draft.as_ref().expect("replacement has a draft");
+        let removed = sqlx::query(
+            "DELETE FROM conversation_messages WHERE id = ? AND conversation_id = ? AND role = 'assistant'
+               AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.turn_id') END = ?
+               AND CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.streaming_draft') END = 'true'",
+        )
+        .bind(row_id)
+        .bind(conversation)
+        .bind(turn_id)
+        .execute(&mut **tx)
+        .await?;
+        if removed.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+    }
+    let id = if let Some((row_id, turn_id)) =
+        message.draft.as_ref().filter(|_| !message.replace_draft)
+    {
+        let updated = sqlx::query(
+            "UPDATE conversation_messages SET content = ?, metadata = ?
+             WHERE id = ? AND conversation_id = ? AND role = 'assistant'
+               AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.turn_id') END = ?
+               AND CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.streaming_draft') END = 'true'",
+        )
+        .bind(&message.content)
+        .bind(&metadata)
+        .bind(row_id)
+        .bind(conversation)
+        .bind(turn_id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        *row_id
+    } else {
+        let inserted = sqlx::query(
+            "INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(conversation)
+        .bind(&message.role)
+        .bind(&message.content)
+        .bind(&metadata)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        inserted.last_insert_rowid()
+    };
+    Ok(SavedMessage { id, changed: true })
+}
+
+pub(crate) async fn save_draft(
+    db: &SqlitePool,
+    target: &ConversationTarget,
+    row_id: Option<i64>,
+    turn_id: &str,
+    text: &str,
+) -> Result<i64, KokoroError> {
+    let mut draft = MessageWrite::new(
+        "assistant",
+        text,
+        Some(serde_json::json!({ "turn_id": turn_id, "streaming_draft": true }).to_string()),
+    );
+    if let Some(id) = row_id {
+        draft = draft.finalizing(id, turn_id.to_string());
+    }
+    let mut tx = db
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(KokoroError::chat_persistence)?;
+    check_owner(&mut tx, target)
+        .await
+        .map_err(KokoroError::chat_persistence)?;
+    let saved = write_message(
+        &mut tx,
+        &target.conversation_id,
+        &draft,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .await
+    .map_err(KokoroError::chat_persistence)?;
+    tx.commit().await.map_err(KokoroError::chat_persistence)?;
+    Ok(saved.id)
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingUserSave {
+    pub request: crate::chat::application::ChatRequest,
+    pub target: ConversationTarget,
+    pub messages: Vec<MessageWrite>,
+    pub expected_revision: Option<i64>,
+    pub turn_id: String,
+    pub vision: Option<crate::vision::context::VisionObservation>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingChatSave {
+    pub target: ConversationTarget,
+    pub messages: Vec<MessageWrite>,
+    pub expected_revision: i64,
+    pub turn_id: String,
+    pub user_message_id: Option<i64>,
+    pub creation_generation: Option<u64>,
+    pub text: String,
+    pub has_assistant_text: bool,
+    pub speech: Option<crate::characters::activation::ResolvedTts>,
+    pub speech_snapshot: Option<std::sync::Arc<crate::tts::manager::TtsExecutionSnapshot>>,
+    pub post_commit: super::post_commit::DesktopPostCommit,
+}
+
+impl PendingChatSave {
+    pub(crate) fn byte_len(&self) -> usize {
+        self.text.len()
+            + self
+                .messages
+                .iter()
+                .map(|message| {
+                    message.content.len()
+                        + message.metadata.as_deref().map_or(0, str::len)
+                        + message.save_id.as_deref().map_or(0, str::len)
+                })
+                .sum::<usize>()
+            + self.post_commit.byte_len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub(crate) struct ExternalReplyImage {
+    pub prompt: String,
+    pub mime_type: String,
+    pub file_name: String,
+    pub data_base64: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub(crate) struct ExternalReplyMedia {
+    pub images: Vec<ExternalReplyImage>,
+    pub image_prompts: Vec<String>,
+    #[serde(default)]
+    pub output_warnings: Vec<String>,
+}
+
+impl ExternalReplyMedia {
+    fn byte_len(&self) -> usize {
+        self.images
+            .iter()
+            .map(|image| {
+                image.prompt.len()
+                    + image.mime_type.len()
+                    + image.file_name.len()
+                    + image.data_base64.len()
+            })
+            .sum::<usize>()
+            + self.image_prompts.iter().map(String::len).sum::<usize>()
+            + self.output_warnings.iter().map(String::len).sum::<usize>()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ExternalReplyExecution {
+    pub memory_scope: std::sync::Arc<super::ownership::MemoryWriteScope>,
+    pub speech: Option<std::sync::Arc<crate::tts::manager::TtsExecutionSnapshot>>,
+    pub memory_provider: std::sync::Arc<dyn crate::llm::provider::LlmProvider>,
+    pub memory_language: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalReplyCommit {
+    pub assistant_message_id: i64,
+    pub memory_work: Option<MemoryWork>,
+}
+
+pub(crate) struct PersistedExternalReply {
+    pub commit: ExternalReplyCommit,
+    pub text: String,
+    pub translation: Option<String>,
+    pub media: ExternalReplyMedia,
+    pub newly_committed: bool,
+    pub execution: Option<std::sync::Arc<ExternalReplyExecution>>,
+}
+
+#[derive(Clone)]
+struct PendingExternalReply {
+    execution: Option<std::sync::Arc<ExternalReplyExecution>>,
+    text: String,
+    translation: Option<String>,
+    media: ExternalReplyMedia,
+    messages: Vec<MessageWrite>,
+    expected_revision: i64,
+    database_guard_generation: u64,
+    memory_ticket: Option<MemoryTicket>,
+}
+
+impl PendingExternalReply {
+    fn byte_len(&self) -> usize {
+        self.text.len()
+            + self.translation.as_deref().map_or(0, str::len)
+            + self.media.byte_len()
+            + self
+                .messages
+                .iter()
+                .map(|message| {
+                    message.content.len() + message.metadata.as_deref().map_or(0, str::len)
+                })
+                .sum::<usize>()
+    }
+}
+
+struct ExternalReplyEntry {
+    character_id: String,
+    conversation_id: String,
+    request_id: String,
+    pending: PendingExternalReply,
+}
+
+#[derive(Default)]
+pub(crate) struct ExternalReplies(std::sync::Mutex<std::collections::VecDeque<ExternalReplyEntry>>);
+
+impl ExternalReplies {
+    fn get(&self, conversation: &str, request: &str) -> Option<PendingExternalReply> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.conversation_id == conversation && entry.request_id == request)
+            .map(|entry| entry.pending.clone())
+            .filter(|pending| {
+                pending.database_guard_generation
+                    == crate::ai::context::database_operation_generation()
+            })
+    }
+
+    fn remember(
+        &self,
+        character: &str,
+        conversation: &str,
+        request: &str,
+        pending: PendingExternalReply,
+    ) {
+        const MAX_PENDING_REPLIES: usize = 32;
+        const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+        let mut replies = self.0.lock().unwrap();
+        replies
+            .retain(|entry| entry.conversation_id != conversation || entry.request_id != request);
+        if pending.byte_len() > MAX_PENDING_BYTES {
+            return;
+        }
+        replies.push_back(ExternalReplyEntry {
+            character_id: character.to_owned(),
+            conversation_id: conversation.to_owned(),
+            request_id: request.to_owned(),
+            pending,
+        });
+        while replies.len() > MAX_PENDING_REPLIES
+            || replies
+                .iter()
+                .map(|entry| entry.pending.byte_len())
+                .sum::<usize>()
+                > MAX_PENDING_BYTES
+        {
+            replies.pop_front();
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+    pub(crate) fn forget_conversation(&self, conversation: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.conversation_id != conversation);
+    }
+    pub(crate) fn forget_character(&self, character: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.character_id != character);
+    }
+
+    fn forget(&self, conversation: &str, request: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.conversation_id != conversation || entry.request_id != request);
+    }
+}
+
+// Match the partial index predicate in migration 0015 for these save-ID lookups.
+const SAVED_EXTERNAL_CONVERSATION_SQL: &str = "
+    SELECT m.conversation_id FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.character_id = ? AND m.role = 'user' AND m.metadata IS NOT NULL
+      AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?";
+
+const SAVED_EXTERNAL_INPUT_SQL: &str = "
+    SELECT m.content, m.metadata FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.character_id = ? AND m.role = 'user' AND m.metadata IS NOT NULL
+      AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?";
+
+const SAVED_EXTERNAL_MESSAGE_SQL: &str = "
+    SELECT m.conversation_id, m.content FROM conversation_messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.character_id = ? AND m.role = 'user' AND m.metadata IS NOT NULL
+      AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.chat_save_id') END = ?";
+
+const SAVED_EXTERNAL_METADATA_SQL: &str = "
+    SELECT metadata FROM conversation_messages INDEXED BY idx_chat_user_save_id
+    WHERE conversation_id = ? AND role = 'user' AND metadata IS NOT NULL
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?";
+
+const SAVED_USER_MESSAGE_IDENTITY_SQL: &str = "
+    SELECT id, content, metadata FROM conversation_messages INDEXED BY idx_chat_user_save_id
+    WHERE conversation_id = ? AND role = 'user' AND metadata IS NOT NULL
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?";
+
+// The role predicate matches migration 0016 for every non-user save-ID lookup.
+const SAVED_NON_USER_MESSAGE_IDENTITY_SQL: &str = "
+    SELECT id, content, metadata FROM conversation_messages INDEXED BY idx_chat_non_user_save_id
+    WHERE conversation_id = ? AND role = ? AND role <> 'user' AND metadata IS NOT NULL
+      AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.chat_save_id') END = ?";
+
+pub(crate) async fn saved_external_conversation_id(
+    db: &SqlitePool,
+    character_id: &str,
+    request_id: &str,
+) -> Result<Option<String>, KokoroError> {
+    sqlx::query_scalar(SAVED_EXTERNAL_CONVERSATION_SQL)
+        .bind(character_id)
+        .bind(format!("{request_id}:user"))
+        .fetch_optional(db)
+        .await
+        .map_err(KokoroError::chat_persistence)
+}
+
+pub(crate) async fn saved_external_input(
+    db: &SqlitePool,
+    character_id: &str,
+    request_id: &str,
+) -> Result<Option<(String, Option<String>)>, KokoroError> {
+    sqlx::query_as(SAVED_EXTERNAL_INPUT_SQL)
+        .bind(character_id)
+        .bind(format!("{request_id}:user"))
+        .fetch_optional(db)
+        .await
+        .map_err(KokoroError::chat_persistence)
+}
+
+/// Bind an external turn during its first write, then reuse that target for
+/// context reads and the assistant write even when the desktop selection moves.
+pub(crate) struct ExternalTurn {
+    scope: std::sync::Arc<super::ownership::MemoryWriteScope>,
+    pub target: ConversationTarget,
+    pub history: Vec<crate::ai::context::Message>,
+    pub previous_reply: Option<PersistedExternalReply>,
+    pub(crate) user_message_id: i64,
+    memory_ticket: Option<MemoryTicket>,
+    pub(crate) request_id: String,
+}
+
+impl ExternalTurn {
+    /// Look up the original accepted input before repeating fallible transport
+    /// preparation such as speech recognition. Keep character ownership in the
+    /// lookup even though platform request identities may be shared by characters.
+    pub(crate) async fn saved_user_message(
+        state: &crate::ai::context::AIOrchestrator,
+        character_id: &str,
+        request_id: &str,
+    ) -> Result<Option<(String, String)>, KokoroError> {
+        sqlx::query_as(SAVED_EXTERNAL_MESSAGE_SQL)
+        .bind(character_id)
+        .bind(format!("{request_id}:user"))
+        .fetch_optional(&state.db)
+        .await
+        .map_err(KokoroError::chat_persistence)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn begin(
+        state: &crate::ai::context::AIOrchestrator,
+        character_id: &str,
+        external_conversation_id: String,
+        request_id: String,
+        text: &str,
+        continue_selected: bool,
+    ) -> Result<Self, KokoroError> {
+        Self::begin_with_input_text(
+            state,
+            character_id,
+            external_conversation_id,
+            request_id,
+            text,
+            continue_selected,
+            None,
+        )
+        .await
+    }
+
+    /// Media transports retain the caller's text separately from fallible STT.
+    /// Plain-text callers still compare their complete input at the write boundary.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn begin_with_input_text(
+        state: &crate::ai::context::AIOrchestrator,
+        character_id: &str,
+        external_conversation_id: String,
+        request_id: String,
+        text: &str,
+        continue_selected: bool,
+        input_text: Option<&str>,
+    ) -> Result<Self, KokoroError> {
+        // Test compatibility boundary: old direct-persistence fixtures model
+        // selecting a desktop conversation before entering the explicit owner.
+        let selected = if continue_selected && state.get_character_id().await == character_id {
+            state.selection.current_conversation_id.lock().await.clone()
+        } else {
+            None
+        };
+        let existing = Self::saved_user_message(state, character_id, &request_id)
+            .await?
+            .map(|(id, _)| id);
+        let conversation_id = existing.or(selected).unwrap_or(external_conversation_id);
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?)")
+                .bind(&conversation_id)
+                .fetch_one(&state.db)
+                .await?;
+        let target = ConversationTarget {
+            require_character: false,
+            character_id: character_id.into(),
+            conversation_id,
+            create: !exists,
+        };
+        let result = Self::begin_with_input_metadata(
+            state,
+            target,
+            request_id,
+            text,
+            input_text.map(|text| serde_json::json!({"external_input_text":text})),
+            None,
+        )
+        .await?;
+        if continue_selected
+            && state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .is_none()
+        {
+            *state.selection.current_conversation_id.lock().await =
+                Some(result.target.conversation_id.clone());
+            state.bump_conversation_generation();
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn begin_with_input_metadata(
+        state: &crate::ai::context::AIOrchestrator,
+        target: ConversationTarget,
+        request_id: String,
+        text: &str,
+        metadata: Option<serde_json::Value>,
+        scope: Option<std::sync::Arc<super::ownership::MemoryWriteScope>>,
+    ) -> Result<Self, KokoroError> {
+        validate_user_input(text)?;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let scope = scope.unwrap_or_else(|| {
+            state.memory_write_scope(
+                &target.character_id,
+                &target.conversation_id,
+                &request_id,
+                state.external_memory.epoch(),
+            )
+        });
+        scope.ensure_owner_current()?;
+        let save_id = format!("{request_id}:user");
+        let previous_metadata: Option<Option<String>> =
+            sqlx::query_scalar(SAVED_EXTERNAL_METADATA_SQL)
+                .bind(&target.conversation_id)
+                .bind(&save_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(KokoroError::chat_persistence)?;
+        let tool_effects_pending = previous_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.as_deref())
+            .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+            .is_some_and(|metadata| metadata["external_tool_effects_pending"] == true);
+        let metadata = previous_metadata.unwrap_or_else(|| metadata.map(|value| value.to_string()));
+        let saved = state
+            .save_external_messages_locked(
+                &target,
+                &[MessageWrite::new("user", text, metadata).with_save_id(save_id)],
+                false,
+                None,
+            )
+            .await?;
+        let memory_ticket = if saved[0].changed {
+            state
+                .external_memory
+                .admit(&target, saved[0].id, &state.memory_enabled_flag())
+        } else {
+            None
+        };
+        let previous_reply = if saved[0].changed {
+            None
+        } else {
+            let existing: Option<(i64, String, Option<String>)> =
+                sqlx::query_as(SAVED_NON_USER_MESSAGE_IDENTITY_SQL)
+                    .bind(&target.conversation_id)
+                    .bind("assistant")
+                    .bind(format!("{request_id}:assistant"))
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(KokoroError::chat_persistence)?;
+            if let Some((assistant_message_id, text, metadata)) = existing {
+                let metadata = metadata
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+                let media = metadata
+                    .as_ref()
+                    .and_then(|value| value.get("external_reply_media"))
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(KokoroError::chat_persistence)?
+                    .unwrap_or_default();
+                Some(PersistedExternalReply {
+                    commit: ExternalReplyCommit {
+                        assistant_message_id,
+                        memory_work: None,
+                    },
+                    text,
+                    translation: metadata
+                        .as_ref()
+                        .and_then(|value| value["translation"].as_str().map(str::to_owned)),
+                    media,
+                    newly_committed: false,
+                    execution: None,
+                })
+            } else if let Some(pending) = state
+                .external_replies
+                .get(&target.conversation_id, &request_id)
+            {
+                if let Some(execution) = &pending.execution {
+                    execution.memory_scope.ensure_owner_current()?;
+                }
+                let result = Self::save_reply_locked(
+                    state,
+                    &target,
+                    &request_id,
+                    &pending.text,
+                    pending.translation.as_deref(),
+                    &pending.media,
+                    saved[0].id,
+                    pending.memory_ticket.as_ref(),
+                    Some(pending.expected_revision),
+                    &pending.messages,
+                )
+                .await;
+                if result.is_ok() || matches!(result, Err(KokoroError::Validation(_))) {
+                    state
+                        .external_replies
+                        .forget(&target.conversation_id, &request_id);
+                }
+                Some(PersistedExternalReply {
+                    commit: result?,
+                    text: pending.text,
+                    translation: pending.translation,
+                    media: pending.media,
+                    newly_committed: true,
+                    execution: pending.execution,
+                })
+            } else {
+                if tool_effects_pending {
+                    return Err(KokoroError::Chat(
+                        "chat_external_tool_effect_uncertain: The previous attempt may have produced tool side effects. No reply was saved.".into(),
+                    ));
+                }
+                return Err(KokoroError::Chat(
+                    "This request has already started and has no saved reply.".into(),
+                ));
+            }
+        };
+        let history = if previous_reply.is_some() {
+            Vec::new()
+        } else {
+            state.saved_history_for(&target, Some(saved[0].id)).await?
+        };
+        Ok(Self {
+            scope,
+            target: ConversationTarget {
+                create: false,
+                ..target
+            },
+            history,
+            previous_reply,
+            user_message_id: saved[0].id,
+            memory_ticket,
+            request_id,
+        })
+    }
+
+    /// A replay can recover an exact saved reply, but must expose the ambiguity
+    /// of an interrupted attempt that might already have affected another system.
+    pub(crate) async fn mark_tool_dispatch(&self) -> Result<(), String> {
+        self.scope
+            .ensure_owner_current()
+            .map_err(|error| error.to_string())?;
+        let updated = sqlx::query(
+            "UPDATE conversation_messages SET metadata = json_set(metadata, '$.external_tool_effects_pending', json('true'))
+             WHERE id = ? AND conversation_id = ? AND role = 'user'",
+        )
+        .bind(self.user_message_id)
+        .bind(&self.target.conversation_id)
+        .execute(&self.scope.db)
+        .await
+        .map_err(|error| format!("Could not record the external tool attempt: {error}"))?;
+        if updated.rows_affected() == 0 {
+            return Err("The external tool attempt has no saved request".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) async fn recent_committed_history(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+        work: MemoryWork,
+        count: usize,
+    ) -> Vec<crate::ai::context::Message> {
+        if !state.external_memory.is_current(work) {
+            return Vec::new();
+        }
+        match state
+            .saved_external_memory_history(
+                &self.target,
+                work.first_message_id,
+                work.through_message_id,
+            )
+            .await
+        {
+            Ok(mut history) => {
+                history.retain(|message| {
+                    matches!(message.role.as_str(), "user" | "assistant")
+                        && !matches!(
+                            message
+                                .metadata
+                                .as_ref()
+                                .and_then(|value| value["type"].as_str()),
+                            Some("assistant_tool_calls"),
+                        )
+                });
+                history.drain(..history.len().saturating_sub(count));
+                history
+            }
+            Err(error) => {
+                tracing::warn!(target: "memory", "Failed to load committed external chat history: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn save_reply(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+        text: &str,
+        translation: Option<&str>,
+    ) -> Result<Option<MemoryWork>, KokoroError> {
+        self.save_reply_with_media(state, text, translation, ExternalReplyMedia::default())
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn save_reply_with_media(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+        text: &str,
+        translation: Option<&str>,
+        media: ExternalReplyMedia,
+    ) -> Result<Option<MemoryWork>, KokoroError> {
+        self.save_reply_batch(state, text, translation, media, Vec::new(), None)
+            .await
+            .map(|commit| commit.memory_work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn save_reply_batch(
+        &self,
+        state: &crate::ai::context::AIOrchestrator,
+        text: &str,
+        translation: Option<&str>,
+        media: ExternalReplyMedia,
+        messages: Vec<MessageWrite>,
+        execution: Option<std::sync::Arc<ExternalReplyExecution>>,
+    ) -> Result<ExternalReplyCommit, KokoroError> {
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        self.scope.ensure_owner_current()?;
+        let revision = current_revision(&state.db, &self.target)
+            .await
+            .ok()
+            .flatten();
+        let result = Self::save_reply_locked(
+            state,
+            &self.target,
+            &self.request_id,
+            text,
+            translation,
+            &media,
+            self.user_message_id,
+            self.memory_ticket.as_ref(),
+            None,
+            &messages,
+        )
+        .await;
+        if matches!(result, Err(KokoroError::ChatPersistence(_))) {
+            if let Some(expected_revision) = revision {
+                state.external_replies.remember(
+                    &self.target.character_id,
+                    &self.target.conversation_id,
+                    &self.request_id,
+                    PendingExternalReply {
+                        execution,
+                        text: text.to_owned(),
+                        translation: translation.map(str::to_owned),
+                        media,
+                        messages,
+                        expected_revision,
+                        database_guard_generation:
+                            crate::ai::context::database_operation_generation(),
+                        memory_ticket: self.memory_ticket.clone(),
+                    },
+                );
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn save_reply_locked(
+        state: &crate::ai::context::AIOrchestrator,
+        target: &ConversationTarget,
+        request_id: &str,
+        text: &str,
+        translation: Option<&str>,
+        media: &ExternalReplyMedia,
+        user_message_id: i64,
+        memory_ticket: Option<&MemoryTicket>,
+        expected_revision: Option<i64>,
+        messages: &[MessageWrite],
+    ) -> Result<ExternalReplyCommit, KokoroError> {
+        let input_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE id=? AND conversation_id=? AND role='user' AND json_extract(metadata,'$.chat_save_id')=?)")
+            .bind(user_message_id).bind(&target.conversation_id).bind(format!("{request_id}:user"))
+            .fetch_one(&state.db).await.map_err(KokoroError::chat_persistence)?;
+        if !input_exists {
+            return Err(KokoroError::Validation(
+                "Original external input no longer exists".into(),
+            ));
+        }
+        let final_save_id = format!("{request_id}:assistant");
+        let mut batch = messages.to_vec();
+        let final_message = if batch
+            .last()
+            .is_some_and(|message| message.save_id.as_deref() == Some(&final_save_id))
+        {
+            batch.pop()
+        } else {
+            None
+        };
+        let mut metadata = final_message
+            .and_then(|message| message.metadata)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(translation) = translation {
+            metadata.insert("translation".into(), serde_json::json!(translation));
+        }
+        if !media.images.is_empty()
+            || !media.image_prompts.is_empty()
+            || !media.output_warnings.is_empty()
+        {
+            metadata.insert("external_reply_media".into(), serde_json::json!(media));
+        }
+        let metadata =
+            (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
+        batch.push(MessageWrite::new("assistant", text, metadata).with_save_id(final_save_id));
+        // The whole atomic exchange belongs to this external input, including
+        // native call/result rows whose `source` names a tool provider. Apply on
+        // every save attempt so pending-batch recovery preserves the same origin.
+        for message in &mut batch {
+            let mut metadata = message
+                .metadata
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            metadata.insert("external_user_message_id".into(), user_message_id.into());
+            message.metadata = Some(serde_json::Value::Object(metadata).to_string());
+        }
+        let saved = state
+            .save_external_messages_locked(target, &batch, false, expected_revision)
+            .await?;
+        let assistant = saved.last().expect("assistant write");
+        let memory_work = if assistant.changed {
+            state
+                .external_memory
+                .complete(target, memory_ticket, assistant.id)
+        } else {
+            None
+        };
+        Ok(ExternalReplyCommit {
+            assistant_message_id: assistant.id,
+            memory_work,
+        })
+    }
+}
+
+pub(crate) fn external_identity(platform: &str, parts: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part);
+    }
+    format!("{platform}-{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod external_request_lookup_tests;
+
+#[cfg(test)]
+mod external_request_owner_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::context::AIOrchestrator;
+
+    async fn state() -> AIOrchestrator {
+        AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone()
+    }
+
+    fn target(conversation: &str, create: bool) -> ConversationTarget {
+        ConversationTarget {
+            require_character: false,
+            character_id: "default".into(),
+            conversation_id: conversation.into(),
+            create,
+        }
+    }
+
+    async fn external_turn(
+        state: &AIOrchestrator,
+        conversation: &str,
+        request: &str,
+    ) -> ExternalTurn {
+        ExternalTurn::begin(
+            state,
+            "default",
+            conversation.into(),
+            request.into(),
+            request,
+            false,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_id_collisions_are_scoped_to_conversation_and_role() {
+        let state = state().await;
+        let local = target("write-scope", true);
+        let foreign = target("other-write-scope", true);
+        let write = |role, text, metadata| {
+            MessageWrite::new(role, text, metadata).with_save_id("shared-id".into())
+        };
+        let originals = [
+            write("user", "input", None),
+            write("assistant", "reply", None),
+            write("tool", "result", None),
+        ];
+        let saved = save(&state.db, &local, &originals).await.unwrap();
+        let other = save(
+            &state.db,
+            &foreign,
+            &[write("tool", "foreign result", None)],
+        )
+        .await
+        .unwrap();
+        assert_ne!(saved[2].id, other[0].id);
+        assert!(saved.iter().all(|row| row.changed));
+
+        let replayed = save(&state.db, &local, &originals).await.unwrap();
+        for (original, replay) in saved.iter().zip(replayed) {
+            assert_eq!(original.id, replay.id);
+            assert!(!replay.changed);
+        }
+        for collision in [
+            write("user", "different input", None),
+            write("tool", "result", Some(r#"{"changed":true}"#.into())),
+        ] {
+            let result = save_once(&state.db, &local, &[collision], None).await;
+            assert!(
+                matches!(result, Err(SaveError::Database(sqlx::Error::Protocol(error)))
+                if error == "Chat save identity was reused with different content")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_replay_uses_saved_metadata_and_reply_in_its_own_conversation() {
+        let state = state().await;
+        let local = target("replay-scope", true);
+        let foreign = target("other-replay-scope", true);
+        let metadata = serde_json::json!({
+            "source": "webhook",
+            "client_request_id": "historical-alias",
+            "external_input_text": "original caption",
+        });
+        let turn = ExternalTurn::begin_with_input_metadata(
+            &state,
+            local.clone(),
+            "current".into(),
+            "original input",
+            Some(metadata),
+            None,
+        )
+        .await
+        .unwrap();
+        validate_external_request_owner(
+            &state.db,
+            "default",
+            "webhook",
+            "current",
+            &["historical-alias".into()],
+        )
+        .await
+        .unwrap();
+        save(
+            &state.db,
+            &foreign,
+            &[MessageWrite::new("assistant", "other conversation", None)
+                .with_save_id("current:assistant".into())],
+        )
+        .await
+        .unwrap();
+        save(
+            &state.db,
+            &local,
+            &[
+                MessageWrite::new("tool", "other role", None)
+                    .with_save_id("current:assistant".into()),
+                MessageWrite::new("assistant", "invalid metadata", Some("{".into())),
+                MessageWrite::new("assistant", "empty metadata", Some(String::new())),
+            ],
+        )
+        .await
+        .unwrap();
+        let replay = || {
+            ExternalTurn::begin_with_input_metadata(
+                &state,
+                turn.target.clone(),
+                "current".into(),
+                "original input",
+                Some(serde_json::json!({"external_input_text": "new caption"})),
+                None,
+            )
+        };
+        assert!(matches!(replay().await, Err(KokoroError::Chat(error))
+            if error.contains("has no saved reply")));
+        let commit = turn
+            .save_reply_batch(
+                &state,
+                "original reply",
+                Some("translation"),
+                ExternalReplyMedia::default(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let replayed = replay().await.unwrap();
+        assert_eq!(replayed.user_message_id, turn.user_message_id);
+        assert!(replayed.history.is_empty());
+        let reply = replayed.previous_reply.unwrap();
+        assert_eq!(
+            reply.commit.assistant_message_id,
+            commit.assistant_message_id
+        );
+        assert_eq!(reply.text, "original reply");
+        assert_eq!(reply.translation.as_deref(), Some("translation"));
+        assert!(!reply.newly_committed);
+    }
+
+    #[tokio::test]
+    async fn external_replay_reports_uncertain_tool_effects_until_reply_is_saved() {
+        let state = state().await;
+        let turn = external_turn(&state, "tool-effects", "request").await;
+        turn.mark_tool_dispatch().await.unwrap();
+
+        let replay = ExternalTurn::begin(
+            &state,
+            "default",
+            "tool-effects".into(),
+            "request".into(),
+            "request",
+            false,
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(KokoroError::Chat(message)) if message.contains("chat_external_tool_effect_uncertain"))
+        );
+
+        turn.save_reply(&state, "saved reply", None).await.unwrap();
+        let replay = external_turn(&state, "tool-effects", "request").await;
+        let reply = replay.previous_reply.unwrap();
+        assert_eq!(reply.text, "saved reply");
+        assert_eq!(reply.translation, None);
+    }
+
+    async fn desktop_turn(state: &AIOrchestrator, label: &str) -> u64 {
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let selected = state.selection.current_conversation_id.lock().await.clone();
+        let target = target(selected.as_deref().unwrap_or("desktop"), selected.is_none());
+        state
+            .save_messages_locked(
+                &target,
+                &[MessageWrite::new(
+                    "user",
+                    label,
+                    Some(
+                        serde_json::json!({
+                            "client_request_id": label,
+                        })
+                        .to_string(),
+                    ),
+                )
+                .with_save_id(format!("{label}:user"))],
+                target.create,
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .save_messages_locked(
+                &ConversationTarget {
+                    require_character: false,
+                    create: false,
+                    ..target
+                },
+                &[
+                    MessageWrite::new("assistant", format!("answer-{label}"), None)
+                        .with_save_id(format!("{label}:assistant")),
+                ],
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        state.get_memory_trigger_count().await
+    }
+
+    fn assert_memory_transcript(history: Vec<crate::ai::context::Message>, expected: &[String]) {
+        let expected = &expected[expected.len().saturating_sub(10)..];
+        assert_eq!(
+            history
+                .into_iter()
+                .map(|message| message.content)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn late_external_reply_cannot_recreate_its_deleted_new_conversation() {
+        let state = state().await;
+        sqlx::query("INSERT INTO characters(id,name) VALUES ('owner','Owner')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let target = ConversationTarget {
+            require_character: true,
+            character_id: "owner".into(),
+            conversation_id: "deleted-new".into(),
+            create: true,
+        };
+        let turn = ExternalTurn::begin_with_input_metadata(
+            &state,
+            target,
+            "request".into(),
+            "question",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(turn.target.require_character);
+        sqlx::query("DELETE FROM conversations WHERE id='deleted-new'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(turn.save_reply(&state, "late reply", None).await.is_err());
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id='deleted-new'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(rows, 0);
+        state.forget_conversation("deleted-new").await;
+        let fresh = ExternalTurn::begin_with_input_metadata(
+            &state,
+            ConversationTarget {
+                require_character: true,
+                character_id: "owner".into(),
+                conversation_id: "deleted-new".into(),
+                create: true,
+            },
+            "new-request".into(),
+            "new input",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(turn
+            .save_reply(&state, "old reply after recreation", None)
+            .await
+            .is_err());
+        fresh.save_reply(&state, "new reply", None).await.unwrap();
+        let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM conversation_messages WHERE conversation_id='deleted-new' AND role='assistant'").fetch_all(&state.db).await.unwrap();
+        assert_eq!(replies, vec!["new reply"]);
+    }
+
+    #[tokio::test]
+    async fn managed_external_turns_preserve_desktop_and_external_memory_cadence_and_transcripts() {
+        for (platform, continue_selected) in
+            [("telegram", true), ("line", false), ("discord", false)]
+        {
+            // One orchestrator handles both producers, as in the managed same-character
+            // paths. The fixture only disables disk selection persistence; requests do
+            // not fork, so an external write would corrupt the desktop counter here.
+            let state = state().await;
+            let mut desktop_history = Vec::new();
+            let mut external_history = Vec::new();
+            let mut desktop_count = 0;
+            let mut desktop_extractions = 0;
+            let mut desktop_consolidations = 0;
+            let mut external_extractions = 0;
+            let mut external_consolidations = 0;
+            for index in 1..=4 {
+                let label = format!("desktop-{index}");
+                desktop_count = desktop_turn(&state, &label).await;
+                desktop_history.extend([label.clone(), format!("answer-{label}")]);
+            }
+            assert_eq!(desktop_count, 4);
+            let desktop_id = state
+                .selection
+                .current_conversation_id
+                .lock()
+                .await
+                .clone()
+                .unwrap();
+            let external_id = external_identity(platform, &["default", "chat"]);
+
+            for index in 1..=20 {
+                let request = format!("{platform}-{index}");
+                let label = format!("external-{request}");
+                if index == 1 {
+                    sqlx::query("CREATE TRIGGER reject_managed_user BEFORE INSERT ON conversation_messages WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'user fault'); END")
+                        .execute(&state.db).await.unwrap();
+                    assert!(matches!(
+                        ExternalTurn::begin(
+                            &state,
+                            "default",
+                            external_id.clone(),
+                            request.clone(),
+                            &label,
+                            continue_selected
+                        )
+                        .await,
+                        Err(KokoroError::ChatPersistence(_))
+                    ));
+                    assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                    sqlx::query("DROP TRIGGER reject_managed_user")
+                        .execute(&state.db)
+                        .await
+                        .unwrap();
+                }
+                let turn = ExternalTurn::begin(
+                    &state,
+                    "default",
+                    external_id.clone(),
+                    request.clone(),
+                    &label,
+                    continue_selected,
+                )
+                .await
+                .unwrap();
+                assert_eq!(turn.target.conversation_id == desktop_id, continue_selected);
+                assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                assert_eq!(state.get_message_count().await, desktop_count);
+                let answer = format!("answer-{label}");
+                let work = if matches!(index, 1 | 5 | 20) {
+                    sqlx::query("CREATE TRIGGER reject_managed_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply fault'); END")
+                        .execute(&state.db).await.unwrap();
+                    assert!(matches!(
+                        turn.save_reply(&state, &answer, None).await,
+                        Err(KokoroError::ChatPersistence(_))
+                    ));
+                    assert!(matches!(
+                        ExternalTurn::begin(
+                            &state,
+                            "default",
+                            external_id.clone(),
+                            request.clone(),
+                            &label,
+                            continue_selected
+                        )
+                        .await,
+                        Err(KokoroError::ChatPersistence(_))
+                    ));
+                    assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                    sqlx::query("DROP TRIGGER reject_managed_reply")
+                        .execute(&state.db)
+                        .await
+                        .unwrap();
+                    let recovered = ExternalTurn::begin(
+                        &state,
+                        "default",
+                        external_id.clone(),
+                        request.clone(),
+                        &label,
+                        continue_selected,
+                    )
+                    .await
+                    .unwrap();
+                    let reply = recovered.previous_reply.unwrap();
+                    assert_eq!(reply.text, answer);
+                    assert_eq!(reply.translation, None);
+                    reply.commit.memory_work.unwrap()
+                } else {
+                    turn.save_reply(&state, &answer, None)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                };
+                assert_eq!(work.count, index);
+                external_extractions += usize::from(work.extract());
+                external_consolidations += usize::from(work.consolidate());
+                external_history.extend([label.clone(), answer]);
+                assert_memory_transcript(
+                    turn.recent_committed_history(&state, work, 10).await,
+                    &external_history,
+                );
+                assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+                let duplicate = ExternalTurn::begin(
+                    &state,
+                    "default",
+                    external_id.clone(),
+                    request,
+                    &label,
+                    continue_selected,
+                )
+                .await
+                .unwrap();
+                assert!(duplicate
+                    .previous_reply
+                    .unwrap()
+                    .commit
+                    .memory_work
+                    .is_none());
+                assert_eq!(state.get_memory_trigger_count().await, desktop_count);
+
+                if desktop_count < 20 {
+                    let label = format!("desktop-{}", desktop_count + 1);
+                    desktop_count = desktop_turn(&state, &label).await;
+                    desktop_history.extend([label.clone(), format!("answer-{label}")]);
+                    desktop_extractions += usize::from(desktop_count.is_multiple_of(5));
+                    desktop_consolidations += usize::from(desktop_count.is_multiple_of(20));
+                    assert_memory_transcript(
+                        state.get_recent_memory_history(10).await,
+                        &desktop_history,
+                    );
+                    if index == 1 {
+                        assert_eq!(
+                            desktop_count, 5,
+                            "four desktop turns, one external turn, then the fifth desktop turn"
+                        );
+                        assert_eq!(desktop_extractions, 1);
+                    }
+                }
+                assert_eq!(
+                    *state.selection.current_conversation_id.lock().await,
+                    Some(desktop_id.clone())
+                );
+            }
+            assert_eq!((desktop_extractions, desktop_consolidations), (4, 1));
+            assert_eq!((external_extractions, external_consolidations), (4, 1));
+            let context = state
+                .saved_history_for(&target(&desktop_id, false), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                context
+                    .iter()
+                    .any(|message| message.content.starts_with("external-")),
+                continue_selected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_telegram_memory_switch_keeps_both_transcripts_inside_their_own_boundary() {
+        let state = state().await;
+        desktop_turn(&state, "desktop-before-toggle").await;
+        let old = ExternalTurn::begin(
+            &state,
+            "default",
+            "unused".into(),
+            "old".into(),
+            "external-before-toggle",
+            true,
+        )
+        .await
+        .unwrap();
+        state.set_memory_enabled(false).await;
+        assert_eq!(desktop_turn(&state, "desktop-disabled").await, 0);
+        let disabled = ExternalTurn::begin(
+            &state,
+            "default",
+            "unused".into(),
+            "disabled".into(),
+            "external-disabled",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(disabled
+            .save_reply(&state, "answer-disabled", None)
+            .await
+            .unwrap()
+            .is_none());
+        state.set_memory_enabled(true).await;
+        let mut desktop_history = Vec::new();
+        let mut external_history = Vec::new();
+        for index in 1..=5 {
+            let label = format!("desktop-after-{index}");
+            assert_eq!(desktop_turn(&state, &label).await, index);
+            desktop_history.extend([label.clone(), format!("answer-{label}")]);
+            let label = format!("external-after-{index}");
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                "unused".into(),
+                label.clone(),
+                &label,
+                true,
+            )
+            .await
+            .unwrap();
+            if index == 1 {
+                assert!(old
+                    .save_reply(&state, "late-before-toggle", None)
+                    .await
+                    .unwrap()
+                    .is_none());
+            }
+            let answer = format!("answer-{label}");
+            let work = turn
+                .save_reply(&state, &answer, None)
+                .await
+                .unwrap()
+                .unwrap();
+            external_history.extend([label, answer]);
+            assert_eq!(work.count, index);
+            assert_eq!(work.extract(), index == 5);
+            assert_memory_transcript(
+                turn.recent_committed_history(&state, work, 10).await,
+                &external_history,
+            );
+            assert_memory_transcript(state.get_recent_memory_history(10).await, &desktop_history);
+            assert_eq!(state.get_memory_trigger_count().await, index);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_memory_transcripts_filter_before_window_limits_in_both_directions() {
+        let state = state().await;
+        let mut desktop_history = Vec::new();
+        let mut external_history = Vec::new();
+        for index in 1..=30 {
+            // The first external pair must survive 24 desktop pairs. Later the
+            // desktop window must survive 25 external pairs without a new fork.
+            if index == 1 {
+                let label = "desktop-1";
+                desktop_turn(&state, label).await;
+                desktop_history.extend([label.to_owned(), format!("answer-{label}")]);
+            }
+            let label = format!("external-{index}");
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                "unused".into(),
+                label.clone(),
+                &label,
+                true,
+            )
+            .await
+            .unwrap();
+            let answer = format!("answer-{label}");
+            let work = turn
+                .save_reply(&state, &answer, None)
+                .await
+                .unwrap()
+                .unwrap();
+            external_history.extend([label, answer]);
+            assert_eq!(work.count, index);
+            assert_memory_transcript(
+                turn.recent_committed_history(&state, work, 10).await,
+                &external_history,
+            );
+            if index == 1 {
+                for desktop_index in 2..=25 {
+                    let label = format!("desktop-{desktop_index}");
+                    assert_eq!(desktop_turn(&state, &label).await, desktop_index);
+                    desktop_history.extend([label.clone(), format!("answer-{label}")]);
+                }
+            }
+            assert_memory_transcript(state.get_recent_memory_history(10).await, &desktop_history);
+        }
+        assert_eq!(state.get_memory_trigger_count().await, 25);
+    }
+
+    #[tokio::test]
+    async fn external_memory_cadence_survives_twenty_fresh_forks_per_platform_and_chat() {
+        let state = state().await;
+        let mut extraction_counts = std::collections::HashMap::new();
+        let mut consolidation_counts = std::collections::HashMap::new();
+        for index in 1..=20 {
+            for conversation in [
+                "telegram-text-photo-voice",
+                "telegram-other-chat",
+                "line",
+                "discord",
+                "webhook",
+                "qq",
+            ] {
+                let fork = state.clone();
+                let request = format!("{conversation}-{index}");
+                let turn = external_turn(&fork, conversation, &request).await;
+                let work = turn
+                    .save_reply(&fork, &format!("answer-{request}"), None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(work.count, index);
+                // External turns never advance the desktop-owned counter.
+                assert_eq!(fork.get_memory_trigger_count().await, 0);
+                *extraction_counts.entry(conversation).or_insert(0) += usize::from(work.extract());
+                *consolidation_counts.entry(conversation).or_insert(0) +=
+                    usize::from(work.consolidate());
+                let history = turn.recent_committed_history(&fork, work, 10).await;
+                assert_eq!(history.len(), (index as usize * 2).min(10));
+                assert_eq!(history.last().unwrap().content, format!("answer-{request}"));
+                assert!(history
+                    .iter()
+                    .all(|message| message.content.contains(conversation)));
+                assert!(turn
+                    .save_reply(&fork, &format!("answer-{request}"), None)
+                    .await
+                    .unwrap()
+                    .is_none());
+                let replay_fork = state.clone();
+                let replay = external_turn(&replay_fork, conversation, &request).await;
+                assert!(replay.previous_reply.unwrap().commit.memory_work.is_none());
+            }
+        }
+        assert!(extraction_counts.values().all(|count| *count == 4));
+        assert!(consolidation_counts.values().all(|count| *count == 1));
+        assert_eq!(state.get_memory_trigger_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn external_memory_counts_only_committed_replies_and_retries_the_fifth_once() {
+        let state = state().await;
+        for index in 1..=4 {
+            let fork = state.clone();
+            let turn = external_turn(&fork, "faults", &format!("request-{index}")).await;
+            assert_eq!(
+                turn.save_reply(&fork, "answer", None)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .count,
+                index
+            );
+        }
+        sqlx::query("CREATE TRIGGER reject_memory_user BEFORE INSERT ON conversation_messages WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'user fault'); END")
+            .execute(&state.db).await.unwrap();
+        let fork = state.clone();
+        assert!(matches!(
+            ExternalTurn::begin(
+                &fork,
+                "default",
+                "faults".into(),
+                "fifth".into(),
+                "fifth",
+                false
+            )
+            .await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_memory_user")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let turn = external_turn(&fork, "faults", "fifth").await;
+        sqlx::query("CREATE TRIGGER reject_memory_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply fault'); END")
+            .execute(&state.db).await.unwrap();
+        assert!(matches!(
+            turn.save_reply(&fork, "fifth answer", None).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        assert!(matches!(
+            ExternalTurn::begin(
+                &fork,
+                "default",
+                "faults".into(),
+                "fifth".into(),
+                "fifth",
+                false
+            )
+            .await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_memory_reply")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let retry_fork = state.clone();
+        let replay = external_turn(&retry_fork, "faults", "fifth").await;
+        let work = replay
+            .previous_reply
+            .as_ref()
+            .unwrap()
+            .commit
+            .memory_work
+            .unwrap();
+        assert_eq!(work.count, 5);
+        assert!(work.extract());
+        assert_eq!(
+            replay
+                .recent_committed_history(&retry_fork, work, 10)
+                .await
+                .last()
+                .unwrap()
+                .content,
+            "fifth answer"
+        );
+        assert!(external_turn(&retry_fork, "faults", "fifth")
+            .await
+            .previous_reply
+            .unwrap()
+            .commit
+            .memory_work
+            .is_none());
+        let sixth = external_turn(&retry_fork, "faults", "sixth").await;
+        assert_eq!(
+            sixth
+                .save_reply(&retry_fork, "answer", None)
+                .await
+                .unwrap()
+                .unwrap()
+                .count,
+            6
+        );
+    }
+
+    #[tokio::test]
+    async fn external_memory_switch_and_new_conversation_reset_counts_and_history_boundaries() {
+        let state = state().await;
+        let fork = state.clone();
+        let old = external_turn(&fork, "switch", "old").await;
+        let old_work = old
+            .save_reply(&fork, "old answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let in_flight = external_turn(&fork, "switch", "old in-flight").await;
+        state.set_memory_enabled(false).await;
+        assert!(!state.external_memory.is_current(old_work));
+        assert!(old
+            .recent_committed_history(&fork, old_work, 10)
+            .await
+            .is_empty());
+        let disabled = external_turn(&fork, "switch", "disabled").await;
+        assert!(disabled
+            .save_reply(&fork, "disabled answer", None)
+            .await
+            .unwrap()
+            .is_none());
+        state.set_memory_enabled(true).await;
+        let fresh = state.clone();
+        let current = external_turn(&fresh, "switch", "current").await;
+        // A pre-toggle generation can finish later but must not enter the new
+        // cadence or memory transcript, even though its assistant row is newer.
+        assert!(in_flight
+            .save_reply(&fork, "old in-flight answer", None)
+            .await
+            .unwrap()
+            .is_none());
+        let work = current
+            .save_reply(&fresh, "current answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(work.count, 1);
+        let history = current.recent_committed_history(&fresh, work, 10).await;
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["current", "current answer"]
+        );
+        let next = external_turn(&fresh, "new-session", "new-session").await;
+        let next_work = next
+            .save_reply(&fresh, "new answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_work.count, 1);
+        assert_eq!(
+            next.recent_committed_history(&fresh, next_work, 10)
+                .await
+                .len(),
+            2
+        );
+        assert_eq!(
+            current
+                .recent_committed_history(&fresh, work, 10)
+                .await
+                .len(),
+            2
+        );
+        let disabled_replay = external_turn(&fresh, "switch", "disabled").await;
+        assert!(disabled_replay
+            .previous_reply
+            .unwrap()
+            .commit
+            .memory_work
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn external_save_retry_preserves_image_only_and_prompt_only_replies() {
+        let state = state().await;
+        let image = ExternalReplyImage {
+            prompt: "a forest".into(),
+            mime_type: "image/png".into(),
+            file_name: "forest.png".into(),
+            data_base64: "aW1hZ2U=".into(),
+        };
+        for (index, media) in [
+            ExternalReplyMedia {
+                images: vec![image.clone()],
+                image_prompts: vec![],
+                output_warnings: vec![],
+            },
+            ExternalReplyMedia {
+                images: vec![],
+                image_prompts: vec!["a lake".into()],
+                output_warnings: vec![],
+            },
+            ExternalReplyMedia {
+                images: vec![image],
+                image_prompts: vec!["a lake".into()],
+                output_warnings: vec![],
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let conversation = format!("media-{index}");
+            let request = format!("request-{index}");
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                conversation.clone(),
+                request.clone(),
+                "draw",
+                false,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TRIGGER reject_media_reply BEFORE INSERT ON conversation_messages
+                WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'media reply fault'); END",
+            )
+            .execute(&state.db)
+            .await
+            .unwrap();
+            assert!(matches!(
+                turn.save_reply_with_media(&state, "", Some("translation"), media.clone())
+                    .await,
+                Err(KokoroError::ChatPersistence(_))
+            ));
+            assert!(matches!(
+                ExternalTurn::begin(
+                    &state,
+                    "default",
+                    conversation.clone(),
+                    request.clone(),
+                    "draw",
+                    false
+                )
+                .await,
+                Err(KokoroError::ChatPersistence(_))
+            ));
+            sqlx::query("DROP TRIGGER reject_media_reply")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            // The first retry uses the pending save. The second reads SQLite
+            // after that pending entry has been removed.
+            for _ in 0..2 {
+                let replay = ExternalTurn::begin(
+                    &state,
+                    "default",
+                    conversation.clone(),
+                    request.clone(),
+                    "draw",
+                    false,
+                )
+                .await
+                .unwrap();
+                let reply = replay.previous_reply.unwrap();
+                assert_eq!(reply.text, "");
+                assert_eq!(reply.translation.as_deref(), Some("translation"));
+                assert_eq!(reply.media, media);
+                assert!(replay.history.is_empty());
+            }
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?",
+            )
+            .bind(&conversation)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(count, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn external_pending_execution_snapshots_are_released_by_owner_cleanup() {
+        for cleanup in ["conversation", "character", "restore"] {
+            let state = state().await;
+            let turn = ExternalTurn::begin(
+                &state,
+                "default",
+                "cleanup-session".into(),
+                "cleanup-request".into(),
+                "neutral cleanup",
+                false,
+            )
+            .await
+            .unwrap();
+            sqlx::query("CREATE TRIGGER reject_cleanup_reply BEFORE INSERT ON conversation_messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'cleanup failure'); END").execute(&state.db).await.unwrap();
+            let execution =
+                std::sync::Arc::new(ExternalReplyExecution {
+                    memory_scope: turn.scope.clone(),
+                    speech: None,
+                    memory_provider: std::sync::Arc::new(
+                        crate::llm::provider::OpenAIProvider::new(String::new(), None, None),
+                    ),
+                    memory_language: "Japanese".into(),
+                });
+            let retained = std::sync::Arc::downgrade(&execution);
+            assert!(turn
+                .save_reply_batch(
+                    &state,
+                    "saved output",
+                    None,
+                    ExternalReplyMedia::default(),
+                    Vec::new(),
+                    Some(execution)
+                )
+                .await
+                .is_err());
+            assert!(retained.upgrade().is_some());
+            match cleanup {
+                "conversation" => state.forget_conversation("cleanup-session").await,
+                "character" => state.forget_character("default").await,
+                _ => state.reset_runtime_owners().await,
+            }
+            assert!(
+                retained.upgrade().is_none(),
+                "{cleanup} retained a provider snapshot"
+            );
+            assert!(state
+                .external_replies
+                .get("cleanup-session", "cleanup-request")
+                .is_none());
+            sqlx::query("DROP TRIGGER reject_cleanup_reply")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            assert!(ExternalTurn::begin(
+                &state,
+                "default",
+                "cleanup-session".into(),
+                "cleanup-request".into(),
+                "neutral cleanup",
+                false
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM conversation_messages WHERE role='assistant'"
+                )
+                .fetch_one(&state.db)
+                .await
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn external_reply_cache_counts_media_toward_its_byte_limit() {
+        let replies = ExternalReplies::default();
+        let pending = PendingExternalReply {
+            execution: None,
+            messages: Vec::new(),
+            text: String::new(),
+            translation: None,
+            media: ExternalReplyMedia {
+                images: vec![],
+                image_prompts: vec!["x".repeat(9 * 1024 * 1024)],
+                output_warnings: vec![],
+            },
+            expected_revision: 1,
+            database_guard_generation: crate::ai::context::database_operation_generation(),
+            memory_ticket: None,
+        };
+        replies.remember("character", "conversation", "first", pending.clone());
+        replies.remember("character", "conversation", "second", pending);
+        assert!(replies.get("conversation", "first").is_none());
+        assert!(replies.get("conversation", "second").is_some());
+    }
+
+    #[tokio::test]
+    async fn failing_initial_save_rolls_back_the_conversation_and_context_without_publishing_history(
+    ) {
+        let state = state().await;
+        sqlx::query(
+            "CREATE TRIGGER reject_user BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'injected user fault'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let messages = [
+            MessageWrite::new("context", "observation", None),
+            MessageWrite::new("user", "question", None).with_save_id("request:user".into()),
+        ];
+        let error = {
+            let _selection = state.selection.conversation_switch_lock.lock().await;
+            state
+                .save_messages_locked(&target("new", true), &messages, true, None)
+                .await
+                .unwrap_err()
+        };
+        assert!(matches!(error, KokoroError::ChatPersistence(_)));
+        assert_eq!(state.get_message_count().await, 0);
+        assert_eq!(state.get_memory_trigger_count().await, 0);
+        assert!(state.selection.history.lock().await.is_empty());
+        assert!(state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .is_none());
+        let count: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM conversations) +
+            (SELECT COUNT(*) FROM conversation_messages)",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn commit_failure_rolls_back_message_and_metadata_that_statements_would_accept() {
+        let state = state().await;
+        sqlx::raw_sql(
+            "CREATE TABLE commit_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE commit_child (id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_commit AFTER INSERT ON conversation_messages
+             BEGIN INSERT INTO commit_child VALUES (99); END;",
+        ).execute(&state.db).await.unwrap();
+        let target = target("new", true);
+        let messages =
+            [MessageWrite::new("user", "question", None).with_save_id("request:user".into())];
+        assert!(matches!(
+            save(&state.db, &target, &messages).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        let count: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM conversations) +
+            (SELECT COUNT(*) FROM conversation_messages) + (SELECT COUNT(*) FROM commit_child)",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER reject_commit")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let first = save(&state.db, &target, &messages).await.unwrap();
+        let repeat = save(&state.db, &target, &messages).await.unwrap();
+        assert_eq!(first[0].id, repeat[0].id);
+        assert!(first[0].changed);
+        assert!(!repeat[0].changed);
+    }
+
+    #[tokio::test]
+    async fn rejected_finalization_leaves_draft_and_metadata_unchanged_then_reuses_row_id() {
+        let state = state().await;
+        let target = target("visible", true);
+        let user = MessageWrite::new("user", "question", None).with_save_id("request:user".into());
+        save(&state.db, &target, &[user]).await.unwrap();
+        let draft = save_draft(&state.db, &target, None, "turn", "working")
+            .await
+            .unwrap();
+        let expected_revision = current_revision(&state.db, &target).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_draft_finalization BEFORE UPDATE OF metadata ON conversation_messages
+            WHEN OLD.id = NEW.id AND json_type(OLD.metadata, '$.streaming_draft') = 'true'
+            BEGIN SELECT RAISE(ABORT, 'injected draft promotion fault'); END")
+            .execute(&state.db).await.unwrap();
+        let final_write = MessageWrite::new(
+            "assistant",
+            "**answer**\n\nfull reply",
+            Some(r#"{"turn_id":"turn"}"#.into()),
+        )
+        .with_save_id("turn:assistant".into())
+        .finalizing(draft, "turn".into());
+        let writes = [
+            MessageWrite::new("tool", "technical result", None).with_save_id("turn:tool".into()),
+            final_write,
+        ];
+        assert!(matches!(
+            save_expected(&state.db, &target, &writes, expected_revision).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        let (content, draft_flag): (String, i64) = sqlx::query_as(
+            "SELECT content, json_extract(metadata, '$.streaming_draft') FROM conversation_messages WHERE id = ?",
+        ).bind(draft).fetch_one(&state.db).await.unwrap();
+        assert_eq!((content.as_str(), draft_flag), ("working", 1));
+        assert_eq!(
+            current_revision(&state.db, &target).await.unwrap(),
+            expected_revision
+        );
+        let tools: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE role = 'tool'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(tools, 0);
+        assert!(state
+            .saved_history_for(&target, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|message| message.role != "assistant"));
+        sqlx::query("DROP TRIGGER reject_draft_finalization")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let saved = save_expected(&state.db, &target, &writes, expected_revision)
+            .await
+            .unwrap();
+        assert_eq!(saved[1].id, draft);
+        let repeated = save(&state.db, &target, &writes).await.unwrap();
+        assert_eq!(repeated[1].id, draft);
+        assert!(repeated.iter().all(|row| !row.changed));
+    }
+
+    #[tokio::test]
+    async fn manual_save_retry_rejects_history_mutation_and_wrong_character() {
+        let state = state().await;
+        let mut target = target("visible", true);
+        save(
+            &state.db,
+            &target,
+            &[MessageWrite::new("user", "first", None)],
+        )
+        .await
+        .unwrap();
+        let expected_revision = current_revision(&state.db, &target).await.unwrap();
+        save(
+            &state.db,
+            &target,
+            &[MessageWrite::new("user", "second", None)],
+        )
+        .await
+        .unwrap();
+        let assistant = [MessageWrite::new("assistant", "outdated", None)];
+        assert!(matches!(
+            save_expected(&state.db, &target, &assistant, expected_revision).await,
+            Err(KokoroError::Validation(_))
+        ));
+        target.character_id = "wrong".into();
+        assert!(matches!(
+            save(&state.db, &target, &assistant).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        let assistants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversation_messages WHERE role = 'assistant'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(assistants, 0);
+    }
+}

@@ -1,75 +1,59 @@
 import fs from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 
-const root = process.cwd();
-const rustLibPath = path.join(root, "src-tauri", "src", "lib.rs");
-const srcDir = path.join(root, "src");
+const generated = "src/lib/generated/ipc.ts";
+const errors = [];
 
-function read(filePath) {
-  return fs.readFileSync(filePath, "utf8");
-}
+for (const filename of ts.sys.readDirectory("src", [".ts", ".tsx"])) {
+  const relative = path.relative(".", filename).replaceAll("\\", "/");
+  if (relative === generated || /\.test\.[cm]?[jt]sx?$/.test(relative)) continue;
 
-function walkFiles(dir, result = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      walkFiles(fullPath, result);
-      continue;
-    }
-    if (/\.(ts|tsx)$/.test(entry.name)) {
-      result.push(fullPath);
-    }
-  }
-  return result;
-}
+  const source = ts.createSourceFile(filename, fs.readFileSync(filename, "utf8"), ts.ScriptTarget.Latest, true);
+  const report = (node, message) => {
+    const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
+    errors.push(`${relative}:${line + 1} ${message}`);
+  };
 
-function registeredCommands() {
-  const rust = read(rustLibPath);
-  const match = rust.match(/generate_handler!\s*\[\s*([\s\S]*?)\s*\]\)/);
-  if (!match) {
-    throw new Error("Could not find tauri::generate_handler! block in src-tauri/src/lib.rs");
-  }
-
-  const block = match[1];
-  const commands = new Set();
-  const commandPattern = /(?:commands::[a-zA-Z0-9_]+::|stt::stream::)([a-zA-Z0-9_]+)/g;
-  for (const item of block.matchAll(commandPattern)) {
-    commands.add(item[1]);
-  }
-  return commands;
-}
-
-function invokedCommands() {
-  const commands = new Map();
-  const invokePattern = /\binvoke(?:<[^>]+>)?\(\s*["'`]([a-zA-Z0-9_]+)["'`]/g;
-  const safeInvokePattern = /\bsafeInvoke(?:<[^>]+>)?\(\s*["'`]([a-zA-Z0-9_]+)["'`]/g;
-
-  for (const filePath of walkFiles(srcDir)) {
-    const text = read(filePath);
-    const relative = path.relative(root, filePath).replaceAll("\\", "/");
-    for (const pattern of [invokePattern, safeInvokePattern]) {
-      for (const item of text.matchAll(pattern)) {
-        const command = item[1];
-        if (!commands.has(command)) {
-          commands.set(command, []);
+  function visit(node) {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const moduleName = node.moduleSpecifier.text;
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings;
+      if (clause && !clause.isTypeOnly) {
+        if (moduleName === "@tauri-apps/api/event" && (
+          clause.name || (bindings && ts.isNamespaceImport(bindings))
+          || bindings?.elements.some(entry => !entry.isTypeOnly)
+        )) {
+          report(node, "Use generated project event bindings.");
         }
-        commands.get(command).push(relative);
+        if (moduleName === "@tauri-apps/api/core" && (
+          clause.name || (bindings && ts.isNamespaceImport(bindings))
+          || bindings?.elements.some(entry => !entry.isTypeOnly && (entry.propertyName ?? entry.name).text === "invoke")
+        )) {
+          report(node, "Use generated project command bindings.");
+        }
       }
     }
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const specifier = node.arguments[0];
+      if (specifier && ts.isStringLiteral(specifier)
+        && ["@tauri-apps/api/core", "@tauri-apps/api/event"].includes(specifier.text)) {
+        report(node, "Use generated IPC bindings for project commands and events.");
+      }
+    }
+    if (ts.isPropertyAccessExpression(node) && node.name.text === "invoke"
+      && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "__TAURI_INTERNALS__") {
+      report(node, "Use generated project command bindings.");
+    }
+    ts.forEachChild(node, visit);
   }
-  return commands;
+  visit(source);
 }
 
-const registered = registeredCommands();
-const invoked = invokedCommands();
-const missing = [...invoked.keys()].filter((command) => !registered.has(command)).sort();
-
-if (missing.length > 0) {
-  console.error("TypeScript invokes commands that are not registered in src-tauri/src/lib.rs:");
-  for (const command of missing) {
-    console.error(`- ${command}: ${invoked.get(command).join(", ")}`);
-  }
-  process.exit(1);
+if (errors.length) {
+  console.error(errors.join("\n"));
+  process.exitCode = 1;
+} else {
+  console.log("Frontend IPC transport usage check passed.");
 }
-
-console.log(`IPC contract check passed: ${invoked.size} invoked command names are registered.`);

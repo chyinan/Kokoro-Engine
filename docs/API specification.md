@@ -624,16 +624,30 @@ interface TelegramConfig {
   enabled: boolean;
   bot_token?: string;
   bot_token_env?: string;
-  allowed_chat_ids: number[];
+  allowed_chat_ids: number[]; // exact signed chat IDs; empty denies all
   send_voice_reply: boolean;
   character_id?: string;
 }
 ```
 
+The Bot Token connects the application to Telegram; it does not authorize chats.
+`allowed_chat_ids` authorizes whole chats, including all members who can send
+messages in a listed group. It does not match sender IDs or usernames. Preserve
+the sign of group IDs. An empty or missing list authorizes no chats, even when
+the bot is running; there is no wildcard ID.
+
+Text, commands (`/start`, `/new`, `/continue`, `/status`, and unknown commands),
+voice, and photos all pass the same whitelist check before session changes,
+media downloads, transcription, model/tool calls, or persistence. Saved config
+changes replace a complete in-memory snapshot: each new message uses the config
+at authorization time. Clearing the list rejects subsequent messages; work
+already accepted is not revoked by this update.
+
 ### `WebhookMessageRequest`
 
 ```ts
 interface WebhookMessageRequest {
+  request_id?: string;             // up to 256 UTF-8 bytes
   text?: string;
   message?: string;                 // legacy alias for text
   image?: string;                   // URL or base64 payload
@@ -655,12 +669,30 @@ media, audio, or any combination. Audio is transcribed by the configured STT
 service before the request is sent to the LLM. An image-only request uses the
 placeholder `The user sent an image:` when no caption is supplied.
 
+Use the same `request_id` when retrying delivery of the same message. Kokoro
+scopes it to the webhook conversation identity. Once the final reply is
+committed, duplicate delivery can reload it from SQLite, including after a
+process restart, without rerunning the model or tools. If only the user message
+is committed and no saved reply or recoverable pending batch remains, the
+request is rejected instead of generating again. Pending save recovery is
+limited to the current process and its bounded cache. Reusing an ID with
+different input returns HTTP 409. Omit `request_id` to submit each HTTP request
+as a new chat turn.
+
+Audio identity uses the submitted bytes and format, together with the text,
+images, and conversation scope. Concurrent duplicates share the in-flight
+transcription and chat outcome. Once the input is committed, later redelivery
+reuses it without transcribing again. If initial STT or media preparation fails
+before the user message is committed, the same ID and input can be retried
+after correcting the service configuration.
+
 ### `WebhookReply`
 
 ```ts
 interface WebhookReply {
   reply: string;
   translation?: string;
+  output_warnings?: string[];       // optional image or voice output failures
   images?: Array<{
     prompt: string;
     mime_type: string;
@@ -674,6 +706,12 @@ interface WebhookReply {
   };
 }
 ```
+
+An HTTP 200 response reports the saved chat result. Optional image and voice
+output failures appear in `output_warnings`. A media-only reply may have an
+empty `reply` string and nonempty `images`.
+If tool calls finish without producing text or media, the saved reply contains
+a completion notice. Internal tool results are not copied into that notice.
 
 ### `TelegramStatus`
 
@@ -1021,8 +1059,8 @@ The tables below list the current IPC commands. The `Bridge` column shows whethe
 
 | Command | Bridge | Request | Response | Notes |
 |---|---|---|---|---|
-| `get_telegram_config` | `getTelegramConfig` | none | `TelegramConfig` | Returns Telegram config. |
-| `save_telegram_config` | `saveTelegramConfig` | `config: TelegramConfig` | `void` | Saves Telegram config. |
+| `get_telegram_config` | `getTelegramConfig` | none | `{ revision: number, config: TelegramConfig }` | Reads the Telegram settings and shared Bot configuration revision together. |
+| `save_telegram_config` | `saveTelegramConfig` | `expectedRevision: number, config: TelegramConfig` | `BotConfig` | Saves Telegram settings with the revision from the read. A stale revision returns `BotConfigConflict`. |
 | `start_telegram_bot` | `startTelegramBot` | none | `void` | Starts the bot. |
 | `stop_telegram_bot` | `stopTelegramBot` | none | `void` | Stops the bot. |
 | `get_telegram_status` | `getTelegramStatus` | none | `TelegramStatus` | Returns runtime bot status. |

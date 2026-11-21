@@ -1,33 +1,35 @@
 // pattern: Imperative Shell
 
-use crate::ai::context::AIOrchestrator;
-use crate::commands::bot::BotConfig;
+use crate::bot::lifecycle::BotIngress;
+use crate::bot::{
+    generate_bot_text_reply, BotChatServices, BotConfig, BotEvent, BotEvents, QqAuthorizationPrompt,
+};
 use crate::qqbot::protocol::{
     build_text_reply_body, conversation_key, gateway_dispatch_transition, heartbeat_tick_action,
     invalid_session_action, is_message_allowed, parse_access_token_response, parse_dispatch,
     GatewayDispatchTransition, HeartbeatTickAction, InvalidSessionAction, QQConversationKind,
     QQInboundMessage,
 };
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Emitter, Manager};
 use tokio::sync::{oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
 const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 const API_BASE: &str = "https://api.sgroup.qq.com";
 const GROUP_AND_C2C_INTENT: u32 = 1 << 25;
 const TOKEN_REFRESH_AHEAD: Duration = Duration::from_secs(300);
 const MAX_DEDUPLICATED_MESSAGES: usize = 512;
-const MAX_CONVERSATION_SESSIONS: usize = 256;
 const MAX_CONCURRENT_REPLIES: usize = 4;
 const MAX_QUEUED_REPLY_TASKS: usize = 32;
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -111,27 +113,6 @@ struct MessageDeduplicator {
     message_ids: VecDeque<String>,
 }
 
-struct ConversationSession {
-    orchestrator: AIOrchestrator,
-    turn_lock: Mutex<()>,
-}
-
-#[derive(Default)]
-struct ConversationSessionStore {
-    sessions: HashMap<String, Arc<ConversationSession>>,
-    insertion_order: VecDeque<String>,
-}
-
-type ConversationSessions = Arc<Mutex<ConversationSessionStore>>;
-
-#[derive(Debug, Clone, Serialize)]
-struct QQAuthorizationRequest {
-    request_id: String,
-    user_openid: String,
-    conversation_kind: String,
-    group_openid: Option<String>,
-}
-
 struct PendingAuthorization {
     request_id: String,
     user_openid: String,
@@ -147,7 +128,18 @@ pub struct QQAuthorizationBroker {
 }
 
 impl QQAuthorizationBroker {
-    async fn request(&self, app: &tauri::AppHandle, message: &QQInboundMessage) -> bool {
+    #[cfg(test)]
+    pub(crate) async fn request_for_test(&self, message: &QQInboundMessage) -> bool {
+        self.request(&|_: BotEvent| Ok(()), message, &CancellationToken::new())
+            .await
+    }
+
+    async fn request(
+        &self,
+        events: &dyn BotEvents,
+        message: &QQInboundMessage,
+        stop: &CancellationToken,
+    ) -> bool {
         let authorization_key = authorization_key(message);
         if self
             .rejected_openids
@@ -183,7 +175,7 @@ impl QQAuthorizationBroker {
             );
         }
 
-        let payload = QQAuthorizationRequest {
+        let payload = QqAuthorizationPrompt {
             request_id: request_id.clone(),
             user_openid: message.user_openid.clone(),
             conversation_kind: match &message.kind {
@@ -193,15 +185,18 @@ impl QQAuthorizationBroker {
             .to_string(),
             group_openid: message.group_openid.clone(),
         };
-        if let Err(error) = app.emit("qq-authorization-request", payload.clone()) {
+        if let Err(error) = events.emit(BotEvent::QqAuthorizationRequested(payload.clone())) {
             tracing::error!(target: "bot::qq", "failed to show QQ authorization request: {}", error);
         }
-        let _ = app.emit("show-main-window", ());
 
-        match tokio::time::timeout(AUTHORIZATION_TIMEOUT, &mut decision_rx).await {
-            Ok(Ok(decision)) => decision,
-            Ok(Err(_)) => false,
-            Err(_) => {
+        let decision = tokio::select! {
+            _ = stop.cancelled() => None,
+            result = tokio::time::timeout(AUTHORIZATION_TIMEOUT, &mut decision_rx) => result.ok(),
+        };
+        match decision {
+            Some(Ok(decision)) => decision,
+            Some(Err(_)) => false,
+            None => {
                 let expired = {
                     let mut pending = self.pending_by_openid.lock().await;
                     if pending
@@ -215,10 +210,13 @@ impl QQAuthorizationBroker {
                     }
                 };
                 if expired {
-                    let _ = app.emit("qq-authorization-expired", payload);
+                    let _ = events.emit(BotEvent::QqAuthorizationExpired(payload));
                     false
                 } else {
-                    matches!(decision_rx.await, Ok(true))
+                    tokio::select! {
+                        _ = stop.cancelled() => false,
+                        decision = decision_rx => matches!(decision, Ok(true)),
+                    }
                 }
             }
         }
@@ -293,58 +291,53 @@ struct GatewaySessionState {
     sequence: Option<i64>,
 }
 
-pub async fn run_qq_gateway(
+pub(crate) async fn run_qq_gateway(
     config: Arc<RwLock<BotConfig>>,
     authorization_broker: QQAuthorizationBroker,
-    app: tauri::AppHandle,
-    runtime_id: u64,
-    connected_generation: Arc<AtomicU64>,
-    mut shutdown_rx: oneshot::Receiver<()>,
-) {
-    let client = match Client::builder().timeout(Duration::from_secs(30)).build() {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(target: "bot::qq", "failed to create QQ HTTP client: {}", error);
-            return;
-        }
-    };
+    services: BotChatServices,
+    connected: Arc<AtomicBool>,
+    ingress: BotIngress,
+) -> Result<(), String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("Could not create QQ HTTP client: {error}"))?;
     let token_provider = TokenProvider::new(client.clone());
     let deduplicator = Arc::new(Mutex::new(MessageDeduplicator::default()));
-    let conversation_sessions = Arc::new(Mutex::new(ConversationSessionStore::default()));
     let reply_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_REPLIES));
     let task_limit = Arc::new(Semaphore::new(MAX_QUEUED_REPLY_TASKS));
     let reconnect_delays = [1_u64, 2, 5, 10, 30, 60];
     let mut reconnect_attempt = 0_usize;
     let mut session_state = GatewaySessionState::default();
+    // A reconnect replaces the socket, while admitted replies use the HTTP API.
+    let mut reply_tasks = JoinSet::new();
+    let stop = ingress.token();
 
     tracing::info!(target: "bot::qq", "QQ bot started");
-    loop {
-        let exit = run_session(
+    let result = loop {
+        let exit = AssertUnwindSafe(run_session(
             &client,
             &token_provider,
             config.clone(),
-            app.clone(),
+            services.clone(),
             deduplicator.clone(),
-            conversation_sessions.clone(),
             reply_limit.clone(),
             task_limit.clone(),
             authorization_broker.clone(),
             &mut session_state,
-            runtime_id,
-            connected_generation.clone(),
-            &mut shutdown_rx,
-        )
+            &connected,
+            &ingress,
+            &mut reply_tasks,
+        ))
+        .catch_unwind()
         .await;
-
-        let _ = connected_generation.compare_exchange(
-            runtime_id,
-            0,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        );
+        connected.store(false, Ordering::SeqCst);
+        let Ok(exit) = exit else {
+            break Err("QQ gateway panicked".into());
+        };
 
         match exit {
-            SessionExit::Shutdown => break,
+            SessionExit::Shutdown => break Ok(()),
             SessionExit::RefreshToken => {
                 token_provider.clear().await;
                 session_state = GatewaySessionState::default();
@@ -360,11 +353,21 @@ pub async fn run_qq_gateway(
         reconnect_attempt = reconnect_attempt.saturating_add(1);
         tracing::warn!(target: "bot::qq", "QQ gateway disconnected; reconnecting in {}s", delay);
         tokio::select! {
-            _ = &mut shutdown_rx => break,
+            _ = stop.cancelled() => break Ok(()),
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+        }
+    };
+    // Even a failed gateway must join every admitted reply before it exits.
+    if result.is_err() {
+        stop.cancel();
+    }
+    while let Some(completed) = reply_tasks.join_next().await {
+        if let Err(error) = completed {
+            tracing::warn!(target: "bot::qq", "QQ reply task ended unexpectedly: {error}");
         }
     }
     tracing::info!(target: "bot::qq", "QQ bot stopped");
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -372,16 +375,15 @@ async fn run_session(
     client: &Client,
     token_provider: &TokenProvider,
     config: Arc<RwLock<BotConfig>>,
-    app: tauri::AppHandle,
+    services: BotChatServices,
     deduplicator: Arc<Mutex<MessageDeduplicator>>,
-    conversation_sessions: ConversationSessions,
     reply_limit: Arc<Semaphore>,
     task_limit: Arc<Semaphore>,
     authorization_broker: QQAuthorizationBroker,
     session_state: &mut GatewaySessionState,
-    runtime_id: u64,
-    connected_generation: Arc<AtomicU64>,
-    shutdown_rx: &mut oneshot::Receiver<()>,
+    connected: &AtomicBool,
+    ingress: &BotIngress,
+    reply_tasks: &mut JoinSet<()>,
 ) -> SessionExit {
     let qq_config = config.read().await.qq.clone();
     if !qq_config.enabled {
@@ -396,14 +398,21 @@ async fn run_session(
         tracing::error!(target: "bot::qq", "QQ AppSecret is not configured");
         return SessionExit::Shutdown;
     };
-    let access_token = match token_provider.access_token(&app_id, &app_secret).await {
+    let stop = ingress.token();
+    let access_token = match tokio::select! {
+        _ = stop.cancelled() => return SessionExit::Shutdown,
+        token = token_provider.access_token(&app_id, &app_secret) => token,
+    } {
         Ok(token) => token,
         Err(error) => {
             tracing::error!(target: "bot::qq", "{}", error);
             return SessionExit::RefreshToken;
         }
     };
-    let gateway_url = match fetch_gateway_url(client, &access_token).await {
+    let gateway_url = match tokio::select! {
+        _ = stop.cancelled() => return SessionExit::Shutdown,
+        gateway = fetch_gateway_url(client, &access_token) => gateway,
+    } {
         Ok(url) => url,
         Err(error) => {
             tracing::error!(target: "bot::qq", "{}", error);
@@ -411,7 +420,10 @@ async fn run_session(
         }
     };
 
-    let (socket, _) = match tokio_tungstenite::connect_async(&gateway_url).await {
+    let (socket, _) = match tokio::select! {
+        _ = stop.cancelled() => return SessionExit::Shutdown,
+        socket = tokio_tungstenite::connect_async(&gateway_url) => socket,
+    } {
         Ok(socket) => socket,
         Err(error) => {
             tracing::error!(target: "bot::qq", "failed to connect QQ gateway: {}", error);
@@ -423,7 +435,7 @@ async fn run_session(
 
     let heartbeat_interval_ms = loop {
         tokio::select! {
-            _ = &mut *shutdown_rx => return SessionExit::Shutdown,
+            _ = stop.cancelled() => return SessionExit::Shutdown,
             message = read.next() => {
                 let Some(Ok(WsMessage::Text(text))) = message else {
                     return SessionExit::Reconnect;
@@ -460,25 +472,24 @@ async fn run_session(
             }
         }),
     };
-    if write
-        .send(WsMessage::Text(identify.to_string().into()))
-        .await
-        .is_err()
-    {
+    let sent = tokio::select! {
+        _ = stop.cancelled() => return SessionExit::Shutdown,
+        sent = write.send(WsMessage::Text(identify.to_string().into())) => sent,
+    };
+    if sent.is_err() {
         return SessionExit::Reconnect;
     }
 
     tracing::info!(target: "bot::qq", "QQ gateway connected");
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms.max(1)));
     heartbeat.tick().await;
     let mut awaiting_heartbeat_ack = false;
-    let mut reply_tasks = JoinSet::new();
 
     loop {
         tokio::select! {
             biased;
-            _ = &mut *shutdown_rx => {
-                let _ = write.close().await;
+            _ = stop.cancelled() => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), write.close()).await;
                 return SessionExit::Shutdown;
             }
             message = read.next() => {
@@ -501,11 +512,11 @@ async fn run_session(
                         match gateway_dispatch_transition(event_type, &data) {
                             Ok(GatewayDispatchTransition::Ready(session_id)) => {
                                 session_state.session_id = Some(session_id);
-                                connected_generation.store(runtime_id, Ordering::SeqCst);
+                                connected.store(true, Ordering::SeqCst);
                                 continue;
                             }
                             Ok(GatewayDispatchTransition::Resumed) => {
-                                connected_generation.store(runtime_id, Ordering::SeqCst);
+                                connected.store(true, Ordering::SeqCst);
                                 continue;
                             }
                             Ok(GatewayDispatchTransition::Other) => {}
@@ -532,6 +543,9 @@ async fn run_session(
                             message.user_openid,
                             message.group_openid.as_deref().unwrap_or("-")
                         );
+                        let Some(work) = ingress.admit("QQ message") else {
+                            continue;
+                        };
                         if !deduplicator.lock().await.insert_if_new(&message.message_id) {
                             tracing::debug!(target: "bot::qq", "ignored duplicate QQ message {}", message.message_id);
                             continue;
@@ -543,25 +557,26 @@ async fn run_session(
                         let task_client = client.clone();
                         let task_token_provider = token_provider.clone();
                         let task_config = config.clone();
-                        let task_app = app.clone();
+                        let task_services = services.clone();
                         let task_app_id = app_id.clone();
                         let task_app_secret = app_secret.clone();
                         let task_reply_limit = reply_limit.clone();
-                        let task_conversation_sessions = conversation_sessions.clone();
                         let task_authorization_broker = authorization_broker.clone();
+                        let stop = stop.clone();
                         reply_tasks.spawn(async move {
                             let _task_admission = task_admission;
+                            let _work = work;
                             if let Err(error) = handle_inbound_message(
                                 &task_client,
                                 &task_token_provider,
                                 &task_app_id,
                                 &task_app_secret,
                                 &task_config,
-                                &task_app,
-                                &task_conversation_sessions,
+                                &task_services,
                                 &task_authorization_broker,
                                 &task_reply_limit,
                                 message,
+                                &stop,
                             )
                             .await
                             {
@@ -592,11 +607,11 @@ async fn run_session(
                     tracing::warn!(target: "bot::qq", "QQ heartbeat acknowledgement timed out");
                     return SessionExit::Reconnect;
                 }
-                if write
-                    .send(WsMessage::Text(json!({ "op": 1, "d": sequence }).to_string().into()))
-                    .await
-                    .is_err()
-                {
+                let sent = tokio::select! {
+                    _ = stop.cancelled() => return SessionExit::Shutdown,
+                    sent = write.send(WsMessage::Text(json!({ "op": 1, "d": sequence }).to_string().into())) => sent,
+                };
+                if sent.is_err() {
                     return SessionExit::Reconnect;
                 }
                 awaiting_heartbeat_ack = true;
@@ -612,11 +627,11 @@ async fn handle_inbound_message(
     app_id: &str,
     app_secret: &str,
     config: &Arc<RwLock<BotConfig>>,
-    app: &tauri::AppHandle,
-    conversation_sessions: &ConversationSessions,
+    services: &BotChatServices,
     authorization_broker: &QQAuthorizationBroker,
     reply_limit: &Arc<Semaphore>,
     message: QQInboundMessage,
+    stop: &CancellationToken,
 ) -> Result<(), String> {
     let mut qq_config = config.read().await.qq.clone();
     if !qq_config.enabled {
@@ -632,7 +647,12 @@ async fn handle_inbound_message(
         QQConversationKind::C2c => qq_config.allow_c2c,
         QQConversationKind::Group => message.group_openid.is_some(),
     };
-    if !allowed && can_request_authorization && authorization_broker.request(app, &message).await {
+    if !allowed
+        && can_request_authorization
+        && authorization_broker
+            .request(services.events.as_ref(), &message, stop)
+            .await
+    {
         qq_config = config.read().await.qq.clone();
         allowed = is_message_allowed(
             &message,
@@ -666,21 +686,13 @@ async fn handle_inbound_message(
         .map_err(|_| "QQ reply service is shutting down".to_string())?;
 
     let key = conversation_key(&message);
-    let session = get_conversation_session(
-        app,
-        conversation_sessions,
-        &key,
-        qq_config.character_id.as_deref(),
-    )
-    .await?;
-    let _turn = session.turn_lock.lock().await;
-    let reply = crate::commands::bot::generate_bot_text_reply(
-        app,
+    let reply = generate_bot_text_reply(
+        services,
         "qq",
         &message.content,
         qq_config.character_id.as_deref(),
-        Some(&key),
-        Some(&session.orchestrator),
+        &key,
+        &message.message_id,
     )
     .await?;
     if reply.trim().is_empty() {
@@ -689,57 +701,6 @@ async fn handle_inbound_message(
 
     let access_token = token_provider.access_token(app_id, app_secret).await?;
     send_text_reply(client, &access_token, &message, &reply).await
-}
-
-async fn get_conversation_session(
-    app: &tauri::AppHandle,
-    conversation_sessions: &ConversationSessions,
-    conversation_key: &str,
-    character_id: Option<&str>,
-) -> Result<Arc<ConversationSession>, String> {
-    let session_key = format!(
-        "{}|{}",
-        conversation_key,
-        character_id
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("auto")
-    );
-    {
-        let sessions = conversation_sessions.lock().await;
-        if let Some(session) = sessions.sessions.get(&session_key) {
-            return Ok(session.clone());
-        }
-    }
-    let managed_orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let orchestrator = managed_orchestrator.fork_with_isolated_history().await;
-    if let Some(character_id) = character_id.filter(|value| !value.trim().is_empty()) {
-        if !orchestrator
-            .apply_character_profile(character_id)
-            .await
-            .map_err(|error| format!("failed to load QQ character profile: {}", error))?
-        {
-            return Err(format!("QQ character profile not found: {}", character_id));
-        }
-    }
-    let session = Arc::new(ConversationSession {
-        orchestrator,
-        turn_lock: Mutex::new(()),
-    });
-    let mut sessions = conversation_sessions.lock().await;
-    if let Some(existing) = sessions.sessions.get(&session_key) {
-        return Ok(existing.clone());
-    }
-    while sessions.sessions.len() >= MAX_CONVERSATION_SESSIONS {
-        let Some(oldest) = sessions.insertion_order.pop_front() else {
-            break;
-        };
-        sessions.sessions.remove(&oldest);
-    }
-    sessions.insertion_order.push_back(session_key.clone());
-    sessions.sessions.insert(session_key, session.clone());
-    Ok(session)
 }
 
 async fn fetch_gateway_url(client: &Client, access_token: &str) -> Result<String, String> {
@@ -784,7 +745,7 @@ async fn send_text_reply(
         .json(&build_text_reply_body(content, &message.message_id, 1))
         .send()
         .await
-        .map_err(|error| format!("failed to send QQ reply: {}", error))?;
+        .map_err(|error| format!("QQ reply delivery is uncertain: {}", error.without_url()))?;
     if !response.status().is_success() {
         return Err(format!(
             "QQ message endpoint returned {}",

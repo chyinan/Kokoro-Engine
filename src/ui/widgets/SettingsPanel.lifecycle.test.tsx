@@ -4,14 +4,19 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type { CharacterRecord, VisionConfig, SttConfig, TtsSystemConfig, BotConfig } from "@/lib/kokoro-bridge";
+import { emptyCharacterDetails } from "@/features/characters/character-record";
+import { DEFAULT_BACKGROUND_CONFIG } from "../hooks/useBackgroundSlideshow";
 import {
   saveVisionConfig,
   saveSttConfig,
   getSttConfig,
   getTtsConfig,
   getBotConfig,
+  saveBotConfig,
   getJailbreakPrompt,
   getAutoBackupConfig,
   updateCharacter,
@@ -47,6 +52,7 @@ const char1: CharacterRecord = {
   user_nickname: "User",
   persona: "Persona of Character One",
   source_format: "manual",
+  ...emptyCharacterDetails,
   created_at: 100,
   updated_at: 100,
 };
@@ -57,6 +63,7 @@ const char2: CharacterRecord = {
   user_nickname: "User",
   persona: "Persona of Character Two",
   source_format: "manual",
+  ...emptyCharacterDetails,
   created_at: 200,
   updated_at: 200,
 };
@@ -91,6 +98,7 @@ vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
     saveSttConfig: vi.fn(async () => undefined),
     getTtsConfig: vi.fn(async () => null),
     getBotConfig: vi.fn(async () => null),
+    saveBotConfig: vi.fn(async (config: BotConfig) => ({ ...config, revision: config.revision + 1 })),
   };
 });
 
@@ -155,6 +163,168 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
     act(() => root.unmount());
     document.body.replaceChildren();
     vi.clearAllMocks();
+  });
+
+  const botSnapshot: BotConfig = {
+    revision: 1,
+    selected_platform: "telegram",
+    telegram: { enabled: true, bot_token: "old-token", allowed_chat_ids: [123456789], send_voice_reply: false },
+    qq: { enabled: false, allow_c2c: false, allowed_user_openids: [], allowed_group_openids: [] },
+    discord: { enabled: false, allowed_channel_ids: [], allow_direct_messages: true, send_voice_reply: false },
+    line: { enabled: false, webhook_path: "/line", allowed_user_ids: [] },
+    webhook: { enabled: false, bind_host: "127.0.0.1", port: 8787, endpoint_path: "/webhook", send_voice_reply: false },
+  };
+  const approvedSnapshot: BotConfig = {
+    ...botSnapshot,
+    revision: 3,
+    telegram: { ...botSnapshot.telegram, allowed_chat_ids: [] },
+    qq: { ...botSnapshot.qq, allowed_user_openids: ["approved-user"] },
+  };
+
+  async function openBotSettings() {
+    const onClose = vi.fn();
+    vi.mocked(getBotConfig).mockResolvedValueOnce(botSnapshot);
+    await act(async () => root.render(createElement(SettingsPanel, {
+      isOpen: true, onClose, activeTab: "bot",
+      backgroundControls: { ...dummyBackgroundControls(), config: DEFAULT_BACKGROUND_CONFIG },
+      displayMode: "full", onDisplayModeChange: vi.fn(), customModelPath: null,
+      onCustomModelChange: vi.fn(), renderFps: 60, onRenderFpsChange: vi.fn(),
+      onActivateCharacter: vi.fn(), onCharacterRuntimeChange: vi.fn(),
+    })));
+    const eventName = "qq-authorization-approved";
+    const callback = vi.mocked(listen).mock.calls.find(([name]) => name === eventName)?.[1];
+    expect(callback).toBeDefined();
+    const notify = (revision: number, user: string) => callback!({
+      event: eventName,
+      id: revision,
+      payload: {
+        revision, approved_user_openid: user, user_openid: user,
+        group_openid: null, approved_group_openid: null,
+      },
+    });
+    return { onClose, notify };
+  }
+
+  async function editTelegramToken(value: string) {
+    const input = container.querySelector<HTMLInputElement>('input[placeholder="telegram.bot_token.placeholder"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    return input;
+  }
+
+  function saveSettings() {
+    return act(async () => container.querySelector<HTMLButtonElement>('[data-onboarding-id="settings-save-button"]')!.click());
+  }
+
+  async function clickBotButton(label: string) {
+    const button = Array.from(container.querySelectorAll("button"))
+      .find(candidate => candidate.textContent?.trim() === label);
+    expect(button).toBeDefined();
+    await act(async () => button!.click());
+  }
+
+  it("refreshes a clean bot draft from the full snapshot and ignores an older response", async () => {
+    const { notify } = await openBotSettings();
+    expect(container.textContent).toContain("123456789");
+    let resolveOlder!: (config: BotConfig) => void;
+    vi.mocked(getBotConfig)
+      .mockReturnValueOnce(new Promise(resolve => { resolveOlder = resolve; }))
+      .mockResolvedValueOnce(approvedSnapshot);
+    await act(async () => notify(2, "prior-user"));
+    await act(async () => notify(3, "approved-user"));
+    expect(container.textContent).not.toContain("123456789");
+    await act(async () => resolveOlder({ ...botSnapshot, revision: 2 }));
+    expect(container.textContent).not.toContain("123456789");
+
+    await editTelegramToken("new-token");
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenCalledWith({
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
+    });
+  });
+
+  it("refreshes and retries a dirty bot draft without undoing the intervening Telegram revocation or QQ approval", async () => {
+    const { onClose, notify } = await openBotSettings();
+    const token = await editTelegramToken("new-token");
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    vi.mocked(saveBotConfig).mockRejectedValueOnce({ code: "BotConfigConflict", message: "Settings changed" });
+    await act(async () => notify(3, "approved-user"));
+    await saveSettings();
+
+    expect(token.value).toBe("new-token");
+    expect(saveBotConfig).toHaveBeenCalledWith({
+      ...botSnapshot,
+      telegram: { ...botSnapshot.telegram, bot_token: "new-token" },
+    });
+    expect(container.textContent).toContain("bot.config_conflict.stale");
+    expect(container.textContent).not.toContain("common.actions.saved");
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    await clickBotButton("bot.config_conflict.refresh");
+    expect(token.value).toBe("new-token");
+    expect(container.textContent).not.toContain("123456789");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
+    });
+    expect(container.textContent).toContain("common.actions.saved");
+  });
+
+  it("holds an overlapping allowlist edit for review and preserves unrelated edits after choosing the saved allowlist", async () => {
+    await openBotSettings();
+    const token = await editTelegramToken("new-token");
+    const id = container.querySelector<HTMLInputElement>('input[placeholder="telegram.whitelist.placeholder"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(id, "987654321");
+      id.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickBotButton("telegram.whitelist.add");
+
+    vi.mocked(saveBotConfig).mockRejectedValueOnce({ code: "BotConfigConflict", message: "Settings changed" });
+    await saveSettings();
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    await clickBotButton("bot.config_conflict.refresh");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
+    expect(container.textContent).toContain("987654321");
+    expect(token.value).toBe("new-token");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    await clickBotButton("bot.config_conflict.keep_saved");
+    expect(container.textContent).not.toContain("987654321");
+    expect(container.textContent).not.toContain("123456789");
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
+    });
+  });
+
+  it("keeps an unsaved Telegram edit and stops before starting the bot when the write fails", async () => {
+    await openBotSettings();
+    const token = await editTelegramToken("new-token");
+    vi.mocked(saveBotConfig).mockRejectedValueOnce(new Error("Cannot persist Bot settings"));
+    await clickBotButton("telegram.start");
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "start_telegram_bot")).toBe(false);
+    expect(container.textContent).toContain("Cannot persist Bot settings");
+    expect(container.textContent).not.toContain("common.actions.saved");
+    expect(token.value).toBe("new-token");
+
+    vi.mocked(saveBotConfig).mockRejectedValueOnce(new Error("Cannot persist Bot settings"));
+    await saveSettings();
+    expect(container.textContent).not.toContain("common.actions.saved");
+    expect(token.value).toBe("new-token");
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...botSnapshot,
+      telegram: { ...botSnapshot.telegram, bot_token: "new-token" },
+    });
   });
 
   it("does not forward character A runtime changes after switching to B while saving A", async () => {

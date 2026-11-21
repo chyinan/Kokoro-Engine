@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // pattern: Imperative Shell
 
+import { chatReply } from "../../../lib/chat/__tests__/wire-fixtures";
 import { act, createElement, forwardRef } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -153,7 +154,7 @@ describe("ChatPanel draft preservation", () => {
         await loadImageDraft();
         chat.send.mockRejectedValueOnce({ code: "Chat", message: "chat_turn_busy: A chat turn is already in progress" });
         await send();
-        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: draftText.trim(), images: [draftImage] }));
+        expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({ message: draftText, images: [draftImage] }));
         expect(container.querySelector("textarea")?.value).toBe(draftText);
         expect(container.querySelector('img[alt="pending"]')?.getAttribute("src")).toBe(draftImage);
         expect(loadSavedCharacterDraft("draft-character")).toBe(draftText);
@@ -174,7 +175,7 @@ describe("ChatPanel draft preservation", () => {
         await send();
 
         expect(chat.send).toHaveBeenCalledWith(expect.objectContaining({
-            message: draftText.trim(), images: undefined, camera_frame: undefined,
+            message: draftText, images: undefined, camera_frame: undefined,
         }));
     });
     it("clears a submitted draft at persistence, before the generation finishes", async () => {
@@ -190,7 +191,7 @@ describe("ChatPanel draft preservation", () => {
         await act(async () => chat.set({ revision: 3, turns: [{ ...accepted, revision: 3, user_message_id: 10 }] }));
         expect(container.querySelector("textarea")?.value).toBe("");
         expect(loadSavedCharacterDraftImages("draft-character")).toEqual([]);
-        await act(async () => response.resolve({ conversation_id: "conv-1", status: "completed", text: "reply" }));
+        await act(async () => response.resolve(chatReply({ conversation_id: "conv-1", status: "completed", text: "reply" })));
     });
     async function closeWhileSending() {
         await loadImageDraft();
@@ -205,7 +206,7 @@ describe("ChatPanel draft preservation", () => {
     it("does not restore a sent draft when a new window starts with only the saved user row", async () => {
         const requestId = await closeWhileSending();
         sessionStorage.clear();
-        chat.set({ turns: [], messages: [{ id: 10, role: "user", content: draftText.trim(), created_at: "now" }] });
+        chat.set({ turns: [], messages: [{ metadata: null, id: 10, role: "user", content: draftText.trim(), created_at: "now" }] });
         const recovery = deferred<ChatDraftSubmissionStatus>();
         vi.mocked(recoverChatDraftSubmission).mockReturnValueOnce(recovery.promise);
 

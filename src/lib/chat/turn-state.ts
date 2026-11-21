@@ -16,13 +16,18 @@ export interface ChatPanelMessage {
     id?: number;
     role: "user" | "kokoro" | "tool" | "context";
     text: string;
+    /** Raw saved body when the display text was cleaned for an assistant bubble. */
+    editText?: string;
     images?: string[];
     translation?: string;
     translationPending?: boolean;
     isError?: boolean;
     announceError?: boolean;
+    unfinished?: boolean;
     failureScope?: ChatFailureScope;
     canRetryFailure?: boolean;
+    persistenceFailure?: boolean;
+    canRetryPersistence?: boolean;
     speechError?: string;
     tools?: ToolTraceItem[];
     capturedAt?: string;
@@ -396,20 +401,21 @@ export function mergeToolTraceItems(existing: ReadonlyArray<ToolTraceItem>, inco
 }
 
 type ToolEvent = Omit<ChatTurnToolEvent, "turn_id">;
+type ApprovalEvent = Pick<ToolEvent, "approval_status" | "approval_request_id" | "result" | "error">;
 
 export function buildToolTraceItem(event: ToolEvent): ToolTraceItem {
     const baseTool = {
         tool: event.tool,
         toolName: event.tool_name ?? event.tool,
-        toolId: event.tool_id,
-        toolTraceId: event.tool_trace_id,
-        source: event.source,
-        serverName: event.server_name,
-        needsFeedback: event.needs_feedback,
-        permissionLevel: event.permission_level,
-        riskTags: event.risk_tags,
-        approvalRequestId: event.approval_request_id,
-        approvalStatus: event.approval_status,
+        toolId: event.tool_id ?? undefined,
+        toolTraceId: event.tool_trace_id ?? undefined,
+        source: event.source ?? undefined,
+        serverName: event.server_name ?? undefined,
+        needsFeedback: event.needs_feedback ?? undefined,
+        permissionLevel: event.permission_level ?? undefined,
+        riskTags: event.risk_tags ?? undefined,
+        approvalRequestId: event.approval_request_id ?? undefined,
+        approvalStatus: event.approval_status ?? undefined,
     } satisfies Omit<ToolTraceItem, "text">;
 
     return event.result
@@ -422,7 +428,7 @@ export function buildToolTraceItem(event: ToolEvent): ToolTraceItem {
             ...baseTool,
             text: event.error || "",
             isError: true,
-            denyKind: event.deny_kind,
+            denyKind: event.deny_kind ?? undefined,
         };
 }
 
@@ -491,11 +497,11 @@ function getResolvedToolText(tool: ToolTraceItem, fallback: string): string {
     return fallback || removePendingApprovalHint(tool.text);
 }
 
-function isApprovalRequested(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
+function isApprovalRequested(event: Pick<ApprovalEvent, "approval_status">): boolean {
     return event.approval_status === "requested";
 }
 
-function isApprovalResolved(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
+function isApprovalResolved(event: Pick<ApprovalEvent, "approval_status">): boolean {
     return event.approval_status === "approved" || event.approval_status === "rejected";
 }
 
@@ -620,7 +626,7 @@ function isToolResolvedStatus(status: ToolTraceItem["approvalStatus"] | undefine
     return status === "approved" || status === "rejected";
 }
 
-function getResolvedToolReplacement(event: { result?: { message: string }; error?: string; approval_status?: ToolTraceItem["approvalStatus"] }, current: ToolTraceItem): ToolTraceItem {
+function getResolvedToolReplacement(event: ApprovalEvent, current: ToolTraceItem): ToolTraceItem {
     if (event.approval_status === "approved") {
         if (event.error) {
             return {
@@ -642,12 +648,7 @@ function getResolvedToolReplacement(event: { result?: { message: string }; error
     };
 }
 
-function updateLatestPendingApproval(messages: Array<ChatPanelMessage>, event: {
-    approval_request_id?: string;
-    approval_status?: ToolTraceItem["approvalStatus"];
-    result?: { message: string };
-    error?: string;
-}): Array<ChatPanelMessage> {
+function updateLatestPendingApproval(messages: Array<ChatPanelMessage>, event: ApprovalEvent): Array<ChatPanelMessage> {
     const approvalRequestId = typeof event.approval_request_id === "string" ? event.approval_request_id : null;
     if (!approvalRequestId) {
         return messages;
@@ -673,12 +674,7 @@ function updateLatestPendingApproval(messages: Array<ChatPanelMessage>, event: {
     return updatePendingToolStatus(messages, targetMessageIndex, approvalRequestId, replacement);
 }
 
-function resolveApprovalEvent(messages: Array<ChatPanelMessage>, toolEntry: ToolTraceItem, event: {
-    approval_status?: ToolTraceItem["approvalStatus"];
-    approval_request_id?: string;
-    result?: { message: string };
-    error?: string;
-}): Array<ChatPanelMessage> {
+function resolveApprovalEvent(messages: Array<ChatPanelMessage>, toolEntry: ToolTraceItem, event: ApprovalEvent): Array<ChatPanelMessage> {
     if (isApprovalRequested(event)) {
         return setPendingApprovalOnLatestMessage(messages, toolEntry);
     }
@@ -692,7 +688,7 @@ function isLiveTurn(turn: PendingTurnState | null, turnId: string): turn is Pend
     return Boolean(turn && turn.turnId === turnId);
 }
 
-function shouldHandleAsApprovalEvent(event: { approval_status?: ToolTraceItem["approvalStatus"] }): boolean {
+function shouldHandleAsApprovalEvent(event: Pick<ApprovalEvent, "approval_status">): boolean {
     return event.approval_status === "requested" || event.approval_status === "approved" || event.approval_status === "rejected";
 }
 

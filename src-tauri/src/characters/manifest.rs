@@ -39,7 +39,7 @@ pub enum ManifestError {
     InvalidRuntime(&'static str),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterTemplateManifest {
     pub schema_version: u32,
@@ -66,7 +66,7 @@ pub struct CharacterTemplateManifest {
     pub recommendations: Option<CharacterRecommendations>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterAssets {
     #[serde(default)]
@@ -77,7 +77,7 @@ pub struct CharacterAssets {
     pub cue_profile: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterRuntimeProfile {
     #[serde(default)]
@@ -94,7 +94,7 @@ pub struct CharacterRuntimeProfile {
     pub proactive_enabled: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterTtsProfile {
     #[serde(default)]
@@ -113,7 +113,7 @@ pub struct CharacterTtsProfile {
     pub pitch: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CharacterRecommendations {
     #[serde(default)]

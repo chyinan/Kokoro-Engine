@@ -1,10 +1,11 @@
 // pattern: Imperative Shell
 
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
+use crate::ipc::wire::JsonPayload;
 use crate::mods::{ModManager, ModManifest, ModThemeJson};
 use crate::registry::manifest::RegistryEntry;
 use semver::{Version, VersionReq};
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
@@ -563,6 +564,7 @@ fn reject_case_folded_sibling(path: &Path, label: &str) -> Result<(), KokoroErro
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_mods(
     mod_manager: State<'_, Mutex<ModManager>>,
 ) -> Result<Vec<ModManifest>, KokoroError> {
@@ -571,6 +573,7 @@ pub async fn list_mods(
 }
 
 #[command]
+#[specta::specta]
 pub async fn load_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     app_handle: AppHandle,
@@ -584,26 +587,31 @@ pub async fn load_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_mod_theme(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Option<ModThemeJson>, KokoroError> {
+) -> Result<Response<Option<ModThemeJson>>, KokoroError> {
     let manager = mod_manager.lock().await;
-    Ok(manager.get_active_theme().cloned())
+    Ok(Response(manager.get_active_theme().cloned()))
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_mod_layout(
     mod_manager: State<'_, Mutex<ModManager>>,
-) -> Result<Option<JsonValue>, KokoroError> {
+) -> Result<Response<Option<JsonPayload>>, KokoroError> {
     let manager = mod_manager.lock().await;
-    Ok(manager.get_active_layout().cloned())
+    Ok(Response(manager.get_active_layout().cloned().map(JsonPayload)))
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     file_path: String,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "install package")?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
@@ -625,12 +633,15 @@ pub async fn install_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn update_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     mod_id: String,
     file_path: String,
     permission_confirmed: bool,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "update package")?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
@@ -656,12 +667,15 @@ pub async fn update_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_mod_from_registry(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     entry: RegistryEntry,
     registry_url: Option<String>,
     permission_confirmed: bool,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "install registry package")?;
     if entry.content_type != "mod" {
         return Err(KokoroError::Validation(
             "registry entry is not a MOD package".to_string(),
@@ -709,10 +723,13 @@ pub async fn install_mod_from_registry(
 }
 
 #[command]
+#[specta::specta]
 pub async fn remove_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     mod_id: String,
 ) -> Result<(), KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "remove package")?;
     let mods_dir = {
         let manager = mod_manager.lock().await;
         manager.mods_path.clone()
@@ -721,11 +738,14 @@ pub async fn remove_mod(
 }
 
 #[command]
+#[specta::specta]
 pub async fn install_mod_from_url(
     mod_manager: State<'_, Mutex<ModManager>>,
+    app: AppHandle,
     url: String,
     confirm_untrusted_code: bool,
 ) -> Result<ModManifest, KokoroError> {
+    let _admission = crate::ipc::admit_operation(&app, "mods", "install URL package")?;
     let parsed = reqwest::Url::parse(&url)
         .map_err(|error| KokoroError::Validation(format!("invalid MOD URL: {error}")))?;
     if parsed.scheme() != "https" || parsed.username() != "" || parsed.password().is_some() {
@@ -752,26 +772,30 @@ pub async fn install_mod_from_url(
 }
 
 #[command]
+#[specta::specta]
 pub async fn dispatch_mod_event(
     mod_manager: State<'_, Mutex<ModManager>>,
     event: String,
-    payload: JsonValue,
+    payload: JsonPayload,
 ) -> Result<(), KokoroError> {
     let manager = mod_manager.lock().await;
     manager
-        .dispatch_event(&event, payload)
+        .dispatch_event(&event, payload.0)
         .await
         .map_err(KokoroError::Mod)
 }
 
 #[command]
+#[specta::specta]
 pub async fn unload_mod(
     mod_manager: State<'_, Mutex<ModManager>>,
     app_handle: AppHandle,
 ) -> Result<(), KokoroError> {
     let mut manager = mod_manager.lock().await;
-    manager.unload_mod(&app_handle).await;
-    Ok(())
+    manager
+        .unload_mod(&app_handle)
+        .await
+        .map_err(KokoroError::Mod)
 }
 
 #[cfg(test)]

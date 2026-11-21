@@ -148,6 +148,12 @@ where
         let level = meta.level().as_str();
         let target = meta.target();
 
+        // The SDK emits raw MCP session identifiers and HTTP errors that may
+        // carry URL credentials. Kokoro reports sanitized errors under "mcp".
+        if target == "rmcp" || target.starts_with("rmcp::") {
+            return Ok(());
+        }
+
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
         let message = visitor.into_message();
@@ -231,5 +237,39 @@ mod tests {
     fn format_line_no_ansi_when_color_disabled() {
         let line = format_log_line("ERROR", "mcp", "connection failed", false);
         assert!(!line.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn formatter_hides_sdk_diagnostics_and_keeps_kokoro_status() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || Buffer(writer.clone()))
+            .event_format(LogLineFormatter { with_color: false })
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "rmcp::transport::streamable_http_client", session_id = "fixture-session", "HTTP fixture error");
+            tracing::warn!(target: "mcp", "MCP connection lost");
+        });
+        let output = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("[WARN][mcp] MCP connection lost"));
+        assert!(!output.contains("fixture-session"));
+        assert!(!output.contains("HTTP fixture error"));
     }
 }

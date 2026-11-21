@@ -1,5 +1,6 @@
 // pattern: Functional Core
 
+import { emptyCharacterDetails } from "@/features/characters/character-record";
 import { describe, expect, it } from "vitest";
 
 import type { CharacterRecord } from "@/lib/kokoro-bridge";
@@ -12,6 +13,7 @@ import { createCharacterRuntimeOverrideService } from "./character-runtime-overr
 
 function character(id: string, runtimeProfileJson = "{}"): CharacterRecord {
   return {
+    ...emptyCharacterDetails,
     id,
     name: id,
     persona: `persona-${id}`,

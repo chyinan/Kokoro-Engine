@@ -43,7 +43,7 @@ const mod: RegistryEntry = {
   name: "Night Theme",
   trust: "community",
   trust_source: "https://community.example/registry.json",
-  registry_identity: undefined,
+  registry_identity: null,
   permissions: ["theme", "components"],
   recommendations: { vision: false, memory: false, mcp_servers: [], bot_platforms: [] },
 };
@@ -57,7 +57,7 @@ describe("content library state", () => {
   it("only calls an entry official when source is the canonical registry", () => {
     expect(getContentTrustLabel(character)).toBe("official");
     expect(getContentTrustLabel({ ...character, trust_source: "https://evil.example/index.json" })).toBe("community");
-    expect(getContentTrustLabel({ ...character, trust: "unverified", registry_identity: undefined })).toBe("unverified");
+    expect(getContentTrustLabel({ ...character, trust: "unverified", registry_identity: null })).toBe("unverified");
     expect(getContentTrustLabel(character, "https://dev.example/registry.json")).toBe("community");
   });
 

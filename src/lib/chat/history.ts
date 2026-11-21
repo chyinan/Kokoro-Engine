@@ -5,6 +5,7 @@ export interface ChatHistoryMessage {
     id?: number;
     role: "user" | "kokoro" | "context";
     text: string;
+    editText?: string;
     images?: string[];
     translation?: string;
     tools?: ToolTraceItem[];
@@ -12,6 +13,7 @@ export interface ChatHistoryMessage {
     source?: string;
     turnId?: string;
     failureScope?: ChatFailureScope;
+    unfinished?: boolean;
 }
 
 function getStringMetadataValue(meta: Record<string, unknown> | null, key: string): string | undefined {
@@ -150,8 +152,10 @@ export function buildChatMessagesFromConversation(msgs: ConversationMessage[]): 
                 id: m.id,
                 role: "kokoro",
                 text,
+                ...(text === m.content ? {} : { editText: m.content }),
                 translation,
                 turnId,
+                ...(meta?.streaming_draft === true ? { unfinished: true } : {}),
                 tools: pendingTools && pendingTools.length > 0 ? pendingTools : undefined,
             });
 

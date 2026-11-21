@@ -2,7 +2,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { CharacterProfile } from "./db";
-import type { CharacterRecord } from "./kokoro-bridge";
+import type { createCharacter } from "./kokoro-bridge";
 import {
     migrateLegacyCharactersToSqlite,
     type LegacyCharacterMigrationDependencies,
@@ -49,7 +49,7 @@ describe("migrateLegacyCharactersToSqlite", () => {
             source_format: "manual",
             created_at: 10,
             updated_at: 20,
-        } satisfies CharacterRecord);
+        } satisfies Parameters<typeof createCharacter>[0]);
         expect(dependencies.remove).toHaveBeenCalledWith(7);
     });
 

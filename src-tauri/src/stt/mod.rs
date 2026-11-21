@@ -1,6 +1,7 @@
 pub mod config;
 pub mod interface;
 pub mod mic;
+mod native_worker;
 pub mod openai;
 pub mod sensevoice;
 pub mod sensevoice_local;
