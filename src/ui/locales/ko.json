@@ -1014,6 +1014,9 @@
                 }
             },
             "refresh_tooltip": "모든 서버의 도구 새로 고침",
+            "refresh_failed": "MCP 도구를 새로 고칠 수 없습니다.",
+            "server_status_unavailable": "서버 상태를 불러올 수 없습니다.",
+            "tool_list_unavailable": "도구 목록을 불러올 수 없습니다.",
             "add_button": "추가",
             "add_modal": {
                 "title": "MCP 서버 추가",

@@ -1023,6 +1023,9 @@
                 }
             },
             "refresh_tooltip": "Refresh tools from all servers",
+            "refresh_failed": "Could not refresh MCP tools.",
+            "server_status_unavailable": "Could not load server status.",
+            "tool_list_unavailable": "Could not load the tool list.",
             "add_button": "ADD",
             "add_modal": {
                 "title": "Add MCP Server",

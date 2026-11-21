@@ -1023,6 +1023,9 @@
                 }
             },
             "refresh_tooltip": "刷新所有服务器的工具",
+            "refresh_failed": "无法刷新 MCP 工具。",
+            "server_status_unavailable": "无法读取服务器状态。",
+            "tool_list_unavailable": "无法读取工具列表。",
             "add_button": "添加",
             "add_modal": {
                 "title": "添加 MCP 服务器",

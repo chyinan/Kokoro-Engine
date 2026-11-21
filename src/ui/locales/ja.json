@@ -1014,6 +1014,9 @@
                 }
             },
             "refresh_tooltip": "全サーバーのツールを更新",
+            "refresh_failed": "MCP ツールを更新できませんでした。",
+            "server_status_unavailable": "サーバーの状態を取得できませんでした。",
+            "tool_list_unavailable": "ツール一覧を取得できませんでした。",
             "add_button": "追加",
             "add_modal": {
                 "title": "MCP サーバーを追加",

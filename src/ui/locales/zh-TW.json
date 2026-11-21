@@ -1014,6 +1014,9 @@
                 }
             },
             "refresh_tooltip": "重新整理所有伺服器的工具",
+            "refresh_failed": "無法重新整理 MCP 工具。",
+            "server_status_unavailable": "無法讀取伺服器狀態。",
+            "tool_list_unavailable": "無法讀取工具清單。",
             "add_button": "新增",
             "add_modal": {
                 "title": "新增 MCP 伺服器",
