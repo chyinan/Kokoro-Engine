@@ -9,6 +9,7 @@ import type { ChatPanelMessage } from "../../lib/chat/turn-state";
 import { EditMessageDraft, type TextareaEdit } from "./chat/edit-message-draft";
 
 export type ChatMessageEditResult = EditMessageResult | { status: "failed"; message: string };
+type EditRefreshState = { scope: string; revision: number | null; status: "pending" | "failed" | "retrying" };
 
 interface ChatMessageProps {
     message: ChatPanelMessage;
@@ -19,7 +20,7 @@ interface ChatMessageProps {
     editScope?: string;
     historyRevision?: number | null;
     onEdit?: (newText: string) => Promise<ChatMessageEditResult>;
-    onRetryEditRefresh?: () => Promise<unknown>;
+    onRetryEditRefresh?: () => Promise<boolean>;
     onRegenerate?: () => void;
     onRetryPersistence?: () => Promise<void>;
     onContinueFrom?: () => void;
@@ -182,17 +183,19 @@ export const ChatMessage = memo(function ChatMessage({
     const { t } = useTranslation();
     const [editingScope, setEditingScope] = useState<string>();
     const [editingText, setEditingText] = useState("");
-    const [savingEdit, setSavingEdit] = useState(false);
+    const [savingDraft, setSavingDraft] = useState<EditMessageDraft>();
     const [editError, setEditError] = useState<string>();
-    const [editRefreshFailure, setEditRefreshFailure] = useState<{ scope: string; revision: number | null }>();
-    const [refreshingEdit, setRefreshingEdit] = useState(false);
+    const [editRefresh, setEditRefresh] = useState<EditRefreshState>();
     const editDraft = useRef<EditMessageDraft | undefined>(undefined);
+    const pendingSave = useRef<EditMessageDraft | undefined>(undefined);
     const beforeEdit = useRef<TextareaEdit | undefined>(undefined);
     const [toolsExpanded, setToolsExpanded] = useState(false);
     const [retryingSave, setRetryingSave] = useState(false);
     const isEditing = editScope !== undefined && editingScope === editScope;
-    const needsEditRefresh = editRefreshFailure !== undefined
-        && editRefreshFailure.scope === editScope && editRefreshFailure.revision === historyRevision;
+    const savingEdit = savingDraft !== undefined && savingDraft === editDraft.current;
+    const activeEditRefresh = editRefresh && editRefresh.scope === editScope && editRefresh.revision === historyRevision
+        ? editRefresh
+        : undefined;
     const announceError = msg.announceError ?? msg.isError;
 
     const attachEditor = useCallback((input: HTMLTextAreaElement | null) => {
@@ -230,16 +233,28 @@ export const ChatMessage = memo(function ChatMessage({
     const handleStartEdit = () => {
         setEditingScope(editScope);
         setEditError(undefined);
+        setEditRefresh(undefined);
         const draft = new EditMessageDraft(msg.editText ?? msg.text);
         editDraft.current = draft;
         beforeEdit.current = undefined;
         setEditingText(draft.value);
     };
 
+    const trackEditRefresh = (attempt: EditRefreshState, result: Promise<boolean>) => {
+        setEditRefresh(attempt);
+        void result.then(refreshed => {
+            setEditRefresh(current => {
+                if (current !== attempt) return current;
+                return refreshed ? undefined : { ...attempt, status: "failed" };
+            });
+        });
+    };
+
     const handleSaveEdit = async () => {
         const draft = editDraft.current;
-        if (!editScope || !isEditing || savingEdit || !draft?.value.trim() || !onEdit) return;
-        setSavingEdit(true);
+        if (!editScope || !isEditing || pendingSave.current === draft || !draft?.value.trim() || !onEdit) return;
+        pendingSave.current = draft;
+        setSavingDraft(draft);
         setEditError(undefined);
         try {
             const result = await onEdit(draft.serialize());
@@ -248,27 +263,23 @@ export const ChatMessage = memo(function ChatMessage({
                 setEditError(result.message);
                 return;
             }
-            if (result.status === "refresh_failed") {
-                setEditRefreshFailure({ scope: editScope, revision: result.historyRevision });
+            if (result.refresh) {
+                trackEditRefresh({ scope: editScope, revision: result.refresh.historyRevision, status: "pending" }, result.refresh.result);
             }
             editDraft.current = undefined;
             setEditingText("");
             setEditingScope(undefined);
         } finally {
-            setSavingEdit(false);
+            if (pendingSave.current === draft) {
+                pendingSave.current = undefined;
+                setSavingDraft(undefined);
+            }
         }
     };
 
-    const handleRetryEditRefresh = async () => {
-        if (!needsEditRefresh || refreshingEdit || !onRetryEditRefresh) return;
-        setRefreshingEdit(true);
-        try {
-            await onRetryEditRefresh();
-        } catch {
-            // The edit is saved. Keep the refresh warning available for another read.
-        } finally {
-            setRefreshingEdit(false);
-        }
+    const handleRetryEditRefresh = () => {
+        if (activeEditRefresh?.status !== "failed" || !onRetryEditRefresh) return;
+        trackEditRefresh({ ...activeEditRefresh, status: "retrying" }, onRetryEditRefresh());
     };
 
     const handleCancelEdit = () => {
@@ -421,7 +432,7 @@ export const ChatMessage = memo(function ChatMessage({
                     )}
 
                     {/* 悬停显示的操作按钮 */}
-                    {!isStreaming && !needsEditRefresh && !msg.isError && msg.role !== "tool" && onContinueFrom && (
+                    {!isStreaming && !activeEditRefresh && !msg.isError && msg.role !== "tool" && onContinueFrom && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             {/* 从这里继续按钮 */}
                             <button
@@ -456,12 +467,12 @@ export const ChatMessage = memo(function ChatMessage({
                 </>
             )}
 
-            {needsEditRefresh && (
+            {activeEditRefresh && activeEditRefresh.status !== "pending" && (
                 <div className="mt-2 text-xs text-amber-300">
                     <p role="alert">{t("chat.errors.edit_refresh_failed")}</p>
                     <button
                         type="button"
-                        disabled={refreshingEdit}
+                        disabled={activeEditRefresh.status === "retrying"}
                         onClick={handleRetryEditRefresh}
                         className="mt-1 rounded-md border border-[var(--color-border)] px-2 py-1 hover:bg-slate-700/90 disabled:opacity-50"
                         title={t("chat.actions.retry_refresh")}

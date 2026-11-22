@@ -182,7 +182,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             editScope={editableTarget ? JSON.stringify([characterId, conversationId, generation, message.id]) : undefined}
             historyRevision={historyRevision}
             onEdit={editableTarget ? text => onEdit({ ...editableTarget, characterId }, text) : undefined}
-            onRetryEditRefresh={editableTarget ? () => chatApplication.refresh() : undefined}
+            onRetryEditRefresh={editableTarget ? () => chatApplication.refreshEditedHistory() : undefined}
             onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
             onRetryPersistence={persistenceRequestId ? () => onRetryPersistence(persistenceRequestId) : undefined}
             onContinueFrom={editableTarget ? () => onContinueFrom({ ...editableTarget, historyRevision }) : undefined}
@@ -231,12 +231,14 @@ export default function ChatPanel({
     const [showClearConfirm, setShowClearConfirm] = useState(false);
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
     const messageList = useMemo(() => ({
-        messages, conversationId: activeConversationId, generation: view.generation, historyRevision: view.conversation_history_revision,
-    }), [messages, activeConversationId, view.generation, view.conversation_history_revision]);
+        messages, savedRows: view.messages, characterId: activeCharacterId, conversationId: activeConversationId,
+        generation: view.generation, historyRevision: view.conversation_history_revision,
+    }), [messages, view.messages, activeCharacterId, activeConversationId, view.generation, view.conversation_history_revision]);
     const deferredList = useDeferredValue(messageList);
-    // Defer updates within a conversation, but never show old rows under a new selection.
+    // Stream updates can lag. A saved edit and its history version must render together with the editor state.
     const { messages: deferredMessages, historyRevision: displayedHistoryRevision } =
-        deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
+        deferredList.savedRows === view.messages && deferredList.characterId === activeCharacterId
+            && deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
             ? deferredList : messageList;
     const [visibleCount, setVisibleCount] = useState(20);
     const visibleMessages = deferredMessages.slice(-visibleCount);

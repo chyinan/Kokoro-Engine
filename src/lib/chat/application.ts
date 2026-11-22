@@ -19,8 +19,8 @@ export interface ChatMessageTarget {
   historyRevision?: number | null;
 }
 export type EditMessageResult =
-  | { status: "saved" | "skipped" }
-  | { status: "refresh_failed"; historyRevision: number | null };
+  | { status: "skipped" }
+  | { status: "saved"; refresh?: { historyRevision: number | null; result: Promise<boolean> } };
 const transport: ChatTransport = {
   read: known => known ? bridge.getChatView(known) : bridge.getChatView(),
   listen: callback => bridge.onChatRuntimeChanged(callback),
@@ -114,9 +114,9 @@ export class ChatApplication {
   refresh(): Promise<ChatViewSnapshot> {
     return this.startRead();
   }
-  private startRead(known?: ChatViewVersion): Promise<ChatViewSnapshot> {
+  private startRead(known?: ChatViewVersion, fresh = false): Promise<ChatViewSnapshot> {
     const conditional = known !== undefined;
-    if (this.readInFlight?.connection === this.connection && (conditional || !this.readInFlight.conditional)) {
+    if (!fresh && this.readInFlight?.connection === this.connection && (conditional || !this.readInFlight.conditional)) {
       return this.readInFlight.promise;
     }
     const connection = this.connection;
@@ -125,6 +125,19 @@ export class ChatApplication {
     });
     this.readInFlight = { connection, conditional, promise };
     return promise;
+  }
+  async refreshEditedHistory(): Promise<boolean> {
+    const connection = this.connection;
+    const version = this.readVersion;
+    let read = this.startRead(undefined, true);
+    for (;;) {
+      await read.catch(() => {});
+      if (connection !== this.connection || version !== this.readVersion) return true;
+      // A newer read can supersede this one before it publishes its rows.
+      const newer = this.readInFlight;
+      if (newer?.connection !== connection || newer.promise === read) return false;
+      read = newer.promise;
+    }
   }
   private async readView(connection: number, known?: ChatViewVersion): Promise<ChatViewSnapshot> {
     const sequence = ++this.readSequence;
@@ -204,20 +217,20 @@ export class ChatApplication {
       if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
     });
   }
-  private async mutate<T>(operation: () => Promise<T>, onRefreshFailure?: () => void): Promise<T> {
+  private beginMutation<T>(operation: () => Promise<T>): Promise<T> {
     if (this.mutation) throw new Error("history_mutation_busy");
     const result = operation();
     this.mutation = result;
     this.publish({ ...this.view, busy: true });
+    return result;
+  }
+  private async mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.beginMutation(operation);
     try { return await result; } finally {
       this.mutation = null;
       // History and selection changes do not advance the journal revision.
       // Start a new read so an older response cannot publish after the mutation.
-      this.readInFlight = undefined;
-      try { await this.refresh(); } catch (error) {
-        if (!onRefreshFailure) throw error;
-        onRefreshFailure();
-      }
+      await this.startRead(undefined, true);
     }
   }
   async clear() {
@@ -231,32 +244,36 @@ export class ChatApplication {
     if (!content.trim() || (target.characterId !== undefined && target.characterId !== before.character_id)
       || target.conversationId !== before.conversation_id || target.generation !== before.generation) return { status: "skipped" };
 
+    const write = this.beginMutation(() => bridge.editConversationMessage({
+      conversation_id: target.conversationId, conversation_generation: target.generation,
+      message_id: target.messageId, new_content: content,
+    }));
     let committed: bridge.EditConversationMessageResponse | undefined;
-    let refreshFailure: EditMessageResult | undefined;
-    await this.mutate(async () => {
-      committed = await bridge.editConversationMessage({
-        conversation_id: target.conversationId, conversation_generation: target.generation,
-        message_id: target.messageId, new_content: content,
-      });
-    }, () => {
+    let outcome: EditMessageResult = { status: "saved" };
+    try {
+      committed = await write;
+    } finally {
+      this.mutation = null;
       const current = this.view;
       const saved = committed;
+      const original = before.messages.find(row => row.id === target.messageId);
+      const currentRow = current.messages.find(row => row.id === target.messageId);
       const hasEditedRow = saved?.message_id === target.messageId
         && current.character_id === before.character_id
         && current.conversation_id === before.conversation_id && current.generation === before.generation
-        && current.messages.some(row => row.id === target.messageId);
-      let messages = current.messages;
-      if (hasEditedRow) {
-        refreshFailure = { status: "refresh_failed", historyRevision: current.conversation_history_revision };
-        // Patch only the confirmed content in the existing snapshot. Reads own the history revision.
-        if (current.conversation_history_revision === before.conversation_history_revision) {
-          messages = messages.map(row => row.id === target.messageId ? { ...row, content: saved.updated_content } : row);
-        }
-      }
-      const busy = this.readVersion?.busy || current.turns.some(isActiveTurn) || this.pending.size > 0 || this.mutation !== null;
+        && currentRow !== undefined;
+      // An unrelated history update can advance the revision while the same row still needs its confirmed edit.
+      const messages = hasEditedRow && currentRow.content === original?.content && currentRow.content !== saved.updated_content
+        ? current.messages.map(row => row === currentRow ? { ...row, content: saved.updated_content } : row)
+        : current.messages;
+      const busy = this.readVersion?.busy === true || current.turns.some(isActiveTurn) || this.pending.size > 0;
       this.publish({ ...current, messages, busy });
-    });
-    return refreshFailure ?? { status: "saved" };
+      const result = this.refreshEditedHistory();
+      if (hasEditedRow) {
+        outcome = { status: "saved", refresh: { historyRevision: current.conversation_history_revision, result } };
+      }
+    }
+    return outcome;
   }
   async deleteConversation(id: string) {
     // Rust resets selection only if the deleted conversation is still current.

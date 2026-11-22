@@ -75,6 +75,33 @@ describe("application history command session ownership", () => {
     stale.resolve(before); await poll;
     expect(projectMessages(h.app.getSnapshot())[0]?.text).toBe("edited A");
   });
+  it.each([false, true])("applies a confirmed edit only to an unchanged row while history is pending (target changed: %s)", async targetChanged => {
+    const h = harness();
+    h.set({ messages });
+    await h.app.refresh();
+    const write = deferred<bridge.EditConversationMessageResponse>();
+    vi.spyOn(bridge, "editConversationMessage").mockReturnValue(write.promise);
+    const editing = h.app.edit(editTarget, "edited A");
+
+    const firstRow = targetChanged ? { ...messages[0], content: "A from newer history" } : messages[0];
+    const secondRow = { ...messages[1], content: "B from newer history" };
+    h.set({ history_revision: 2, conversation_history_revision: 2, messages: [firstRow, secondRow, messages[2]] });
+    const latest = await h.app.refresh();
+    const read = deferred<ChatViewSnapshot>();
+    vi.mocked(h.io.read).mockReturnValueOnce(read.promise);
+    try {
+      write.resolve({ message_id: 101, updated_content: "edited A" });
+      await expect(editing).resolves.toMatchObject({ status: "saved" });
+      expect(h.app.getSnapshot()).toMatchObject({
+        busy: false, conversation_history_revision: 2,
+        messages: [{ ...firstRow, content: targetChanged ? firstRow.content : "edited A" }, secondRow, messages[2]],
+      });
+      expect(h.io.read).toHaveBeenCalledTimes(3);
+    } finally {
+      read.resolve(latest);
+      await h.app.refresh();
+    }
+  });
   it("restores the new selection before returning when a pre-switch poll is still in flight", async () => {
     const h = harness(); h.set({ messages });
     const before = await h.app.refresh();

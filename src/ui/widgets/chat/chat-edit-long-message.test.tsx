@@ -181,8 +181,8 @@ it.each([
         conversation_id: archive.id, conversation_generation: 3, message_id: saved.id, new_content: edited,
       } }, undefined],
     ]);
-    expect(editor().value).toBe(textareaText(edited));
-    expect(editor().readOnly).toBe(true);
+    expect(row()?.querySelector("textarea")).toBeNull();
+    expect(bubble()).toBe(displayed(edited));
     await act(async () => { holdEditedRead = false; editedRead.resolve(); });
     expect(bubble()).toBe(displayed(edited));
 
