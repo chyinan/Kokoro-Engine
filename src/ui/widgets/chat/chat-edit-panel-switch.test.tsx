@@ -229,7 +229,7 @@ it("shows the legacy Mod failure once across the journal and history, scoped to 
     }
 });
 
-it.each([false, true])("announces a composer failure once when history arrives first: %s", async historyFirst => {
+it.each([false, true])("shows and announces a single composer failure when history arrives first: %s", async historyFirst => {
     chat.reset();
     const sending = deferred<StreamChatResponse>();
     chat.send.mockReturnValueOnce(sending.promise);
@@ -260,7 +260,8 @@ it.each([false, true])("announces a composer failure once when history arrives f
         const [firstAlert] = alertNodes();
         expect(firstAlert?.textContent).toBe(historyFirst ? diagnostic.content : failed.error);
         await act(async () => { (historyFirst ? reject : save)(); });
-        expect(alertNodes()).toEqual([firstAlert]);
+        expect(alertNodes()).toEqual(historyFirst ? [firstAlert] : []);
+        expect(container.textContent).not.toContain(failed.error);
         expect(container.textContent).toContain(diagnostic.content);
     } finally {
         await act(async () => root.unmount());
@@ -320,7 +321,7 @@ it("dismisses the old editor when another conversation replaces a message at the
 
         await act(async () => button("edit")!.click());
         await act(async () => button("save")!.click());
-        expect(chat.edit).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-2", generation: 2, messageId: 201 }, "Message B");
+        expect(chat.edit).toHaveBeenCalledExactlyOnceWith({ characterId: "char-1", conversationId: "conv-2", generation: 2, messageId: 201 }, "Message B");
     } finally {
         await act(async () => root.unmount());
         container.remove();
@@ -343,7 +344,7 @@ it("dismisses an assistant editor when the same row is reloaded under a new gene
         expect(button("save")).toBeNull();
         await act(async () => button("edit")!.click());
         await act(async () => button("save")!.click());
-        expect(chat.edit).toHaveBeenCalledExactlyOnceWith({ conversationId: "conv-1", generation: 2, messageId: 101 }, "Original answer");
+        expect(chat.edit).toHaveBeenCalledExactlyOnceWith({ characterId: "char-1", conversationId: "conv-1", generation: 2, messageId: 101 }, "Original answer");
     } finally {
         await act(async () => root.unmount());
         container.remove();

@@ -1154,6 +1154,7 @@
             "edit": "編輯",
             "regenerate": "重新生成",
             "save": "儲存 (Ctrl+Enter)",
+            "retry_refresh": "重試重新整理",
             "cancel": "取消 (Esc)",
             "clear": "清空對話",
             "confirm_clear_title": "清空當前對話",
@@ -1177,6 +1178,7 @@
             "memory_model_required": "本機記憶模型還沒準備好。聊天仍可繼續，但暫時不會使用語意記憶。",
             "memory_model_check_failed": "暫時無法確認本機記憶模型狀態。聊天仍可繼續，方便時再檢查下載視窗。",
             "edit_failed": "儲存編輯訊息失敗",
+            "edit_refresh_failed": "訊息已儲存，無法重新整理會話。",
             "delete_failed": "刪除訊息失敗",
             "new_conversation_failed": "新建會話失敗，已保留目前會話",
             "new_conversation_slow": "新建會話回應較慢，請稍候..."

@@ -1163,6 +1163,7 @@
             "edit": "编辑",
             "regenerate": "重新生成",
             "save": "保存 (Ctrl+Enter)",
+            "retry_refresh": "重试刷新",
             "cancel": "取消 (Esc)",
             "clear": "清空对话",
             "confirm_clear_title": "清空当前对话",
@@ -1186,6 +1187,7 @@
             "memory_model_required": "本地记忆模型还没准备好。聊天仍可继续，但暂时不会使用语义记忆。",
             "memory_model_check_failed": "暂时无法确认本地记忆模型状态。聊天仍可继续，方便时再检查下载弹窗。",
             "edit_failed": "保存编辑消息失败",
+            "edit_refresh_failed": "消息已保存，刷新会话失败。",
             "delete_failed": "删除消息失败",
             "new_conversation_failed": "新建会话失败，已保留当前会话",
             "new_conversation_slow": "新建会话响应较慢，请稍候..."

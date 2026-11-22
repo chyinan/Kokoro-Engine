@@ -85,7 +85,8 @@ function isSelectedFailure(view: ChatViewSnapshot, scope: ChatFailureScope): boo
 }
 
 function findFailureTurn(view: ChatViewSnapshot, scope: ChatFailureScope): ChatTurnSnapshot | undefined {
-  return view.turns.find(turn => turn.status === "error" && turn.turn_id === scope.turn_id
+  // History can contain the diagnostic before the journal reports the error.
+  return view.turns.find(turn => turn.turn_id === scope.turn_id
     && turn.character_id === scope.character_id && turn.conversation_id === scope.conversation_id);
 }
 
@@ -96,7 +97,7 @@ export function findFailurePromptIndex(view: ChatViewSnapshot, messages: readonl
   let userId = scope.user_message_id;
   if (userId === undefined) {
     const legacyTurn = findFailureTurn(view, scope);
-    if (!legacyTurn || legacyTurn.hidden) return -1;
+    if (legacyTurn?.status !== "error" || legacyTurn.hidden) return -1;
     userId = legacyTurn.user_message_id;
   }
   if (userId == null) return -1;

@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "@/lib/chat/__tests__/harness";
 import { emptyChatView } from "@/lib/chat/application";
 import { editConversationMessage, type ChatViewSnapshot, type Conversation, type EditConversationMessageRequest } from "@/lib/kokoro-bridge";
-import { ChatMessage } from "../ChatMessage";
+import { ChatMessage, type ChatMessageEditResult } from "../ChatMessage";
 import ChatPanel from "../ChatPanel";
 
 vi.mock("@tauri-apps/api/core", async original => ({ ...await original<typeof import("@tauri-apps/api/core")>(), invoke: vi.fn() }));
@@ -29,7 +29,9 @@ it("keeps the saved CRLF after two native-style edits and retries a failed save 
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  const save = vi.fn<(text: string) => Promise<boolean>>().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  const save = vi.fn<(text: string) => Promise<ChatMessageEditResult>>()
+    .mockResolvedValueOnce({ status: "failed", message: "Save failed" })
+    .mockResolvedValueOnce({ status: "saved" });
   const action = (name: string) => container.querySelector<HTMLButtonElement>(`button[title="chat.actions.${name}"]`)!;
   try {
     await act(async () => root.render(<ChatMessage message={{ role: "kokoro", text: "A\nB", editText: "A\r\nB" }}

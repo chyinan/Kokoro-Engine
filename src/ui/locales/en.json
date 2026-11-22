@@ -1163,6 +1163,7 @@
             "edit": "Edit",
             "regenerate": "Regenerate",
             "save": "Save (Ctrl+Enter)",
+            "retry_refresh": "Retry refreshing",
             "cancel": "Cancel (Esc)",
             "clear": "Clear conversation",
             "confirm_clear_title": "Clear Conversation",
@@ -1186,6 +1187,7 @@
             "memory_model_required": "The local memory model is not ready yet. Chat can continue without semantic memory.",
             "memory_model_check_failed": "Could not confirm the local memory model status. Chat remains available; check the download dialog when convenient.",
             "edit_failed": "Failed to save edited message",
+            "edit_refresh_failed": "Message saved. The conversation could not be refreshed.",
             "delete_failed": "Failed to delete messages",
             "new_conversation_failed": "Failed to start new conversation. Current conversation preserved.",
             "new_conversation_slow": "Creating new conversation is taking longer than expected..."

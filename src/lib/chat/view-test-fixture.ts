@@ -18,7 +18,7 @@ export const chatViewFixture = {
   set: (patch: Partial<ChatViewSnapshot>) => { snapshot = { ...snapshot, ...patch }; listeners.forEach(callback => callback()); },
   send: vi.fn<(request: ChatRequest) => Promise<StreamChatResponse>>(async () => (chatReply({ conversation_id: "conv-1", status: "completed", text: "reply" }))),
   cancel: vi.fn(async () => {}), selectConversation: vi.fn(async () => {}),
-  clear: vi.fn(async () => {}), edit: vi.fn(async () => {}), continueFrom: vi.fn(async () => {}),
+  clear: vi.fn(async () => {}), edit: vi.fn(async () => ({ status: "saved" as const })), continueFrom: vi.fn(async () => {}),
   retryPersistence: vi.fn(async (_id: string) => {}),
   reset: () => { snapshot = initial(); announcedFailures.clear(); for (const fn of [chatViewFixture.send, chatViewFixture.cancel, chatViewFixture.selectConversation, chatViewFixture.clear, chatViewFixture.edit, chatViewFixture.continueFrom, chatViewFixture.retryPersistence]) fn.mockClear(); },
 };

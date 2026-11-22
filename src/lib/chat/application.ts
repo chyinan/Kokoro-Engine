@@ -12,11 +12,15 @@ export interface ChatTransport {
   cancel(id: string, reason?: string): Promise<void>;
 }
 export interface ChatMessageTarget {
+  characterId?: string;
   conversationId: string;
   generation: number;
   messageId: number;
   historyRevision?: number | null;
 }
+export type EditMessageResult =
+  | { status: "saved" | "skipped" }
+  | { status: "refresh_failed"; historyRevision: number | null };
 const transport: ChatTransport = {
   read: known => known ? bridge.getChatView(known) : bridge.getChatView(),
   listen: callback => bridge.onChatRuntimeChanged(callback),
@@ -27,6 +31,7 @@ export const emptyChatView: ChatViewSnapshot = {
   conversation_history_revision: null, generation: 0, busy: false, messages: [], turns: [],
 };
 const changedHistory = () => new Error("Conversation history changed before retry");
+const MAX_ANNOUNCED_FAILURES = 256;
 
 export class ChatApplication {
   private view = emptyChatView;
@@ -49,6 +54,11 @@ export class ChatApplication {
   claimFailureAnnouncement(requestId: string): boolean {
     if (this.announcedFailures.has(requestId)) return false;
     this.announcedFailures.add(requestId);
+    // A stale read can omit a request whose command already reported an error.
+    if (this.announcedFailures.size > MAX_ANNOUNCED_FAILURES) {
+      const oldest = this.announcedFailures.values().next();
+      if (!oldest.done) this.announcedFailures.delete(oldest.value);
+    }
     return true;
   }
   subscribe = (callback: () => void) => {
@@ -134,9 +144,6 @@ export class ChatApplication {
       if (!ids.has(id) && !awaitingRegistration && turn.revision <= view.revision) this.turns.delete(id);
     }
     for (const turn of view.turns) this.turns = mergeTurnSnapshot(this.turns, turn);
-    for (const id of this.announcedFailures) {
-      if (!this.turns.has(id) && !this.pending.has(id)) this.announcedFailures.delete(id);
-    }
     this.restoredRevision = Math.max(this.restoredRevision, view.revision);
     const { revision, history_revision, generation } = view;
     this.readVersion = { revision, history_revision, generation, busy: view.busy };
@@ -197,7 +204,7 @@ export class ChatApplication {
       if (id) await bridge.loadConversation(id); else await bridge.clearHistory();
     });
   }
-  private async mutate<T>(operation: () => Promise<T>): Promise<T> {
+  private async mutate<T>(operation: () => Promise<T>, onRefreshFailure?: () => void): Promise<T> {
     if (this.mutation) throw new Error("history_mutation_busy");
     const result = operation();
     this.mutation = result;
@@ -207,7 +214,10 @@ export class ChatApplication {
       // History and selection changes do not advance the journal revision.
       // Start a new read so an older response cannot publish after the mutation.
       this.readInFlight = undefined;
-      await this.refresh();
+      try { await this.refresh(); } catch (error) {
+        if (!onRefreshFailure) throw error;
+        onRefreshFailure();
+      }
     }
   }
   async clear() {
@@ -216,12 +226,37 @@ export class ChatApplication {
       await bridge.clearHistory();
     });
   }
-  async edit(target: ChatMessageTarget, content: string) {
-    if (!content.trim() || target.conversationId !== this.view.conversation_id || target.generation !== this.view.generation) return;
-    return this.mutate(() => bridge.editConversationMessage({
-      conversation_id: target.conversationId, conversation_generation: target.generation,
-      message_id: target.messageId, new_content: content,
-    }));
+  async edit(target: ChatMessageTarget, content: string): Promise<EditMessageResult> {
+    const before = this.view;
+    if (!content.trim() || (target.characterId !== undefined && target.characterId !== before.character_id)
+      || target.conversationId !== before.conversation_id || target.generation !== before.generation) return { status: "skipped" };
+
+    let committed: bridge.EditConversationMessageResponse | undefined;
+    let refreshFailure: EditMessageResult | undefined;
+    await this.mutate(async () => {
+      committed = await bridge.editConversationMessage({
+        conversation_id: target.conversationId, conversation_generation: target.generation,
+        message_id: target.messageId, new_content: content,
+      });
+    }, () => {
+      const current = this.view;
+      const saved = committed;
+      const hasEditedRow = saved?.message_id === target.messageId
+        && current.character_id === before.character_id
+        && current.conversation_id === before.conversation_id && current.generation === before.generation
+        && current.messages.some(row => row.id === target.messageId);
+      let messages = current.messages;
+      if (hasEditedRow) {
+        refreshFailure = { status: "refresh_failed", historyRevision: current.conversation_history_revision };
+        // Patch only the confirmed content in the existing snapshot. Reads own the history revision.
+        if (current.conversation_history_revision === before.conversation_history_revision) {
+          messages = messages.map(row => row.id === target.messageId ? { ...row, content: saved.updated_content } : row);
+        }
+      }
+      const busy = this.readVersion?.busy || current.turns.some(isActiveTurn) || this.pending.size > 0 || this.mutation !== null;
+      this.publish({ ...current, messages, busy });
+    });
+    return refreshFailure ?? { status: "saved" };
   }
   async deleteConversation(id: string) {
     // Rust resets selection only if the deleted conversation is still current.

@@ -6,7 +6,7 @@ import { motion, AnimatePresence, useIsPresent } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { onChatWarning, uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
-import type { ToolTraceItem } from "../../lib/kokoro-bridge";
+import type { ChatTurnSnapshot, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { chatApplication, type ChatMessageTarget } from "../../lib/chat/application";
 import { projectMessages, isActiveTurn, chatEventMatchesView } from "../../lib/chat/projection";
 import { canSubmitApproval, getApprovalRequestId, type ChatPanelMessage } from "../../lib/chat/turn-state";
@@ -15,7 +15,7 @@ import { useVoiceInput, VoiceState, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
 import { ImageLightbox } from "../components/ImageLightbox";
 import ConversationSidebar from "./ConversationSidebar";
-import { ChatMessage } from "./ChatMessage";
+import { ChatMessage, type ChatMessageEditResult } from "./ChatMessage";
 import { shouldRenderTypingIndicator } from "./chat-streaming-state";
 import { computeTargetScrollTop, isScrollAtBottom, computeAnchoredScrollTop, type ChatScrollSnapshot } from "./chat/chat-scroll-state";
 import { computeResizedInputHeight, loadSavedChatInputHeight, saveChatInputHeight, toggleChatInputResetHeight } from "./chat/chat-input-layout";
@@ -58,8 +58,14 @@ function getAsyncErrorMessage(error: unknown): string {
 type ChatErrorSelection = { characterId: string; conversationId: string | null; generation: number };
 type ChatRequestError = ChatErrorSelection & { message: string; requestId: string };
 
-function sameChatSelection(left: ChatErrorSelection, right: ChatErrorSelection): boolean {
-    return left.characterId === right.characterId && left.conversationId === right.conversationId && left.generation === right.generation;
+function chatErrorMatchesSelection(origin: ChatErrorSelection, selected: ChatErrorSelection, turn?: ChatTurnSnapshot): boolean {
+    if (origin.characterId !== selected.characterId) return false;
+    if (origin.conversationId === selected.conversationId && origin.generation === selected.generation) return true;
+    // A first send owns the selection change only if the backend bound its request to the new conversation.
+    return origin.conversationId === null && selected.conversationId !== null
+        && selected.generation === origin.generation + 1
+        && turn?.character_id === selected.characterId && turn.conversation_id === selected.conversationId
+        && turn.conversation_generation === selected.generation;
 }
 
 function TypingIndicator() {
@@ -121,6 +127,7 @@ function ErrorToast({ message, requestId, onDismiss }: { message: string; reques
 // ── MemoizedChatMessage wrapper ───────────────────────────
 interface MemoizedChatMessageProps {
     message: ChatMessage;
+    characterId: string;
     conversationId: string | null;
     generation: number;
     historyRevision: number | null;
@@ -128,7 +135,7 @@ interface MemoizedChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: (index: number) => void;
-    onEdit: (target: ChatMessageTarget, newText: string) => Promise<boolean>;
+    onEdit: (target: ChatMessageTarget, newText: string) => Promise<ChatMessageEditResult>;
     onRegenerate: (target: ChatMessageTarget) => Promise<void>;
     onRetryPersistence: (requestId: string) => Promise<void>;
     onContinueFrom: (target: ChatMessageTarget) => Promise<void>;
@@ -145,7 +152,7 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 }
 
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
-    message, conversationId, generation, historyRevision, globalIndex, isStreaming, isTranslationExpanded,
+    message, characterId, conversationId, generation, historyRevision, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
     onPreviewImage, onRetryPersistence,
 }: MemoizedChatMessageProps) {
@@ -153,12 +160,12 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
     const target = conversationId !== null && message.id !== undefined
         ? { conversationId, generation, messageId: message.id }
         : undefined;
-    const editableTarget = message.failureScope || message.unfinished ? undefined : target;
+    const isPresent = useIsPresent();
+    const editableTarget = !isPresent || message.failureScope || message.unfinished ? undefined : target;
     const retryTarget = target && !message.unfinished && (!message.failureScope || message.canRetryFailure)
         ? { ...target, historyRevision }
         : undefined;
     const persistenceRequestId = message.canRetryPersistence ? message.clientRequestId : undefined;
-    const isPresent = useIsPresent();
     const announceFailure = useFailureAnnouncement(isPresent && message.failureScope ? message.clientRequestId : undefined);
     if (message.failureScope && !isPresent) return null;
     return (
@@ -172,8 +179,10 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
-            editScope={editableTarget ? JSON.stringify([editableTarget.conversationId, editableTarget.generation, editableTarget.messageId]) : undefined}
-            onEdit={editableTarget ? text => onEdit(editableTarget, text) : undefined}
+            editScope={editableTarget ? JSON.stringify([characterId, conversationId, generation, message.id]) : undefined}
+            historyRevision={historyRevision}
+            onEdit={editableTarget ? text => onEdit({ ...editableTarget, characterId }, text) : undefined}
+            onRetryEditRefresh={editableTarget ? () => chatApplication.refresh() : undefined}
             onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
             onRetryPersistence={persistenceRequestId ? () => onRetryPersistence(persistenceRequestId) : undefined}
             onContinueFrom={editableTarget ? () => onContinueFrom({ ...editableTarget, historyRevision }) : undefined}
@@ -230,6 +239,7 @@ export default function ChatPanel({
         deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
             ? deferredList : messageList;
     const [visibleCount, setVisibleCount] = useState(20);
+    const visibleMessages = deferredMessages.slice(-visibleCount);
     const [showScrollBottom, setShowScrollBottom] = useState(false);
     const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
     const isPrependingRef = useRef(false);
@@ -297,10 +307,22 @@ export default function ChatPanel({
     const dragCounterRef = useRef(0);
     const [error, setError] = useState<string | ChatRequestError | null>(null);
     const currentSelection = { characterId: activeCharacterId, conversationId: activeConversationId, generation: view.generation };
+    const errorTurn = error && typeof error !== "string"
+        ? view.turns.find(turn => turn.client_request_id === error.requestId) : undefined;
     const requestError = error && typeof error !== "string" && !isSwitchingConversation
-        && sameChatSelection(error, currentSelection)
-        && !projectedMessages.some(message => message.clientRequestId === error.requestId && message.persistenceFailure)
+        && chatErrorMatchesSelection(error, currentSelection, errorTurn)
         ? error : null;
+    // The history row takes over once it is visible in the deferred list.
+    const requestErrorSettled = requestError !== null && (
+        visibleMessages.some(message => message.clientRequestId === requestError.requestId && message.failureScope)
+        || errorTurn?.status === "completed" || errorTurn?.status === "cancelled"
+    );
+    const dismissRequestError = useCallback(() => {
+        setError(current => current === requestError ? null : current);
+    }, [requestError]);
+    useLayoutEffect(() => {
+        if (requestErrorSettled) dismissRequestError();
+    }, [requestErrorSettled, dismissRequestError]);
     const [unreadCount, setUnreadCount] = useState(0);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -354,20 +376,11 @@ export default function ChatPanel({
     }, []);
 
     const reportError = useCallback((error: unknown) => setError(getAsyncErrorMessage(error)), []);
-    const reportRequestError = useCallback(async (error: unknown, requestId: string, origin: ChatErrorSelection) => {
-        // A terminal backend result can arrive just before its diagnostic row
-        // reaches this panel. Let the inline error take the announcement first.
-        await chatApplication.refresh().catch(() => {});
+    const reportRequestError = useCallback((error: unknown, requestId: string, origin: ChatErrorSelection) => {
         const current = chatApplication.getSnapshot();
-        if (projectMessages(current).some(message => message.clientRequestId === requestId && message.failureScope)) return;
         const selected = { characterId: current.character_id, conversationId: current.conversation_id, generation: current.generation };
         const turn = current.turns.find(turn => turn.client_request_id === requestId);
-        // A first send may create the selected conversation while it is in flight.
-        const createdHere = origin.conversationId === null && selected.conversationId !== null
-            && origin.characterId === selected.characterId && selected.generation === origin.generation + 1
-            && turn?.character_id === selected.characterId && turn.conversation_id === selected.conversationId
-            && turn.conversation_generation === selected.generation;
-        if (!switchingConversation.current && turn?.status !== "cancelled" && (sameChatSelection(origin, selected) || createdHere)) {
+        if (!switchingConversation.current && turn?.status !== "cancelled" && chatErrorMatchesSelection(origin, selected, turn)) {
             setError({ ...selected, message: getAsyncErrorMessage(error), requestId });
         }
     }, []);
@@ -420,7 +433,7 @@ export default function ChatPanel({
         } catch (error) {
             const failed = chatApplication.getSnapshot().turns.find(turn => turn.client_request_id === clientRequestId);
             if (failed?.user_save_failed) finishSubmission(character, clientRequestId, false);
-            void reportRequestError(error, clientRequestId, origin);
+            reportRequestError(error, clientRequestId, origin);
         } finally {
             reconcileSubmission(character, clientRequestId);
             submittingRef.current = false;
@@ -918,14 +931,13 @@ export default function ChatPanel({
     const onToggleTranslation = useCallback((index: number) => {
         setExpandedTranslations(previous => { const next = new Set(previous); if (next.has(index)) next.delete(index); else next.add(index); return next; });
     }, []);
-    const onEdit = useCallback(async (target: ChatMessageTarget, text: string) => {
+    const onEdit = useCallback(async (target: ChatMessageTarget, text: string): Promise<ChatMessageEditResult> => {
         try {
-            return Boolean(await chatApplication.edit(target, text));
+            return await chatApplication.edit(target, text);
         } catch (error) {
-            reportError(error);
-            return false;
+            return { status: "failed", message: getAsyncErrorMessage(error) };
         }
-    }, [reportError]);
+    }, []);
     const onRegenerate = useCallback(async (target: ChatMessageTarget) => {
         const requestId = `req_${crypto.randomUUID()}`;
         const origin = { characterId: activeCharacterIdRef.current, conversationId: target.conversationId, generation: target.generation };
@@ -934,7 +946,7 @@ export default function ChatPanel({
                 client_request_id: requestId,
                 allow_image_gen: readJsonSetting<{ mode?: string }>(APP_SETTING_KEYS.bgConfig, {}).mode === "generated",
             });
-        } catch (error) { void reportRequestError(error, requestId, origin); }
+        } catch (error) { reportRequestError(error, requestId, origin); }
     }, [reportRequestError]);
     const onRetryPersistence = useCallback(async (requestId: string) => {
         try { await chatApplication.retryPersistence(requestId); }
@@ -1195,8 +1207,8 @@ export default function ChatPanel({
             <AnimatePresence>
                 {typeof error === "string" && <ErrorToast message={error} onDismiss={() => setError(null)} />}
             </AnimatePresence>
-            {requestError && <ErrorToast key={requestError.requestId} message={requestError.message}
-                requestId={requestError.requestId} onDismiss={() => setError(null)} />}
+            {requestError && !requestErrorSettled && <ErrorToast key={requestError.requestId} message={requestError.message}
+                requestId={requestError.requestId} onDismiss={dismissRequestError} />}
 
             {/* 对话历史侧边栏 */}
             <ConversationSidebar
@@ -1328,8 +1340,8 @@ export default function ChatPanel({
                 className="flex-1 overflow-y-auto p-4 space-y-3 scrollable"
             >
                 <AnimatePresence initial={false}>
-                    {deferredMessages.slice(-visibleCount).map((msg, i) => {
-                        const globalIndex = Math.max(0, deferredMessages.length - visibleCount) + i;
+                    {visibleMessages.map((msg, i) => {
+                        const globalIndex = deferredMessages.length - visibleMessages.length + i;
                         return (
                             <MemoizedChatMessage
                                 key={msg.failureScope
@@ -1338,6 +1350,7 @@ export default function ChatPanel({
                                     ? JSON.stringify([activeCharacterId, msg.turnId])
                                     : JSON.stringify([activeConversationId, view.generation, msg.id ?? `${globalIndex}-${msg.role}`])}
                                 message={msg}
+                                characterId={activeCharacterId}
                                 conversationId={activeConversationId}
                                 generation={view.generation}
                                 historyRevision={displayedHistoryRevision}
