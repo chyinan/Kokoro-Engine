@@ -1,21 +1,22 @@
-use crate::ai::context::{sync_history_window, AIOrchestrator, Message};
+use crate::ai::context::{sync_history_window, truncate_message_content, AIOrchestrator, Message};
+use crate::chat::application::TURN_CANCELLED_BY_USER_MESSAGE;
 use crate::chat::runtime::ChatRuntimeState;
-use crate::commands::chat::TURN_CANCELLED_BY_USER_MESSAGE;
-use crate::commands::context::is_visible_message_raw;
+use crate::chat::tags::is_visible_message_raw;
 use crate::error::KokoroError;
 use serde_json::Value;
 use sqlx::SqliteConnection;
 use std::collections::VecDeque;
 use tokio::sync::watch;
 
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize, specta::Type)]
 pub struct FailureRetry {
     pub diagnostic_message_id: i64,
     pub expected_tail_message_id: i64,
+    #[serde(default)]
     pub expected_history_revision: Option<i64>,
 }
 
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize, specta::Type)]
 pub struct ReplyRegeneration {
     pub assistant_message_id: i64,
     pub expected_tail_message_id: i64,
@@ -31,6 +32,7 @@ pub(crate) struct RegenerationPlan {
     pub user_message_id: i64,
     pub keep_through_message_id: i64,
     history: VecDeque<Message>,
+    max_message_chars: usize,
     revision: i64,
 }
 
@@ -136,6 +138,7 @@ impl RegenerationPlan {
             user_message_id,
             keep_through_message_id,
             history,
+            max_message_chars: max_chars,
             revision,
         })
     }
@@ -175,7 +178,8 @@ impl RegenerationPlan {
             return Ok((prompt, prompt));
         };
         let keep = boundary.as_i64().ok_or_else(changed_history)?;
-        if keep < prompt || keep >= retry.diagnostic_message_id
+        if keep < prompt
+            || keep >= retry.diagnostic_message_id
             || !rows.iter().any(|(id, role, _, metadata)| {
                 *id == keep && is_visible_message_raw(role, metadata.as_deref())
             })
@@ -192,7 +196,7 @@ impl RegenerationPlan {
             // prompt and selected answer. Replay the prompt for the model.
             history.push(Message {
                 role: "user".into(),
-                content: message.into(),
+                content: truncate_message_content(message.into(), self.max_message_chars),
                 metadata: None,
             });
         }
@@ -204,17 +208,19 @@ impl RegenerationPlan {
         self,
         state: &AIOrchestrator,
         conversation_id: &str,
-        generation: u64,
+        _generation: u64,
         cancellation: Option<&watch::Receiver<bool>>,
     ) -> Result<(), KokoroError> {
-        let _selection = state.conversation_switch_lock.lock().await;
-        if state.current_conversation_generation() != generation
-            || state.current_conversation_id.lock().await.as_deref() != Some(conversation_id)
-        {
-            return Err(changed_history());
-        }
-        let mut history = state.history.lock().await;
-        let mut boundary = state.memory_history_boundary.lock().await;
+        let _selection = state.selection.conversation_switch_lock.lock().await;
+        let selected = state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .as_deref()
+            == Some(conversation_id);
+        let mut history = state.selection.history.lock().await;
+        let mut boundary = state.selection.memory_history_boundary.lock().await;
         // Reserve the writer before the version read so a simultaneous write
         // elsewhere can't invalidate a deferred read-to-write transaction.
         let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
@@ -230,8 +236,10 @@ impl RegenerationPlan {
             return Err(KokoroError::Chat(TURN_CANCELLED_BY_USER_MESSAGE.into()));
         }
         tx.commit().await?;
-        *boundary = self.history.len();
-        *history = self.history;
+        if selected {
+            *boundary = self.history.len();
+            *history = self.history;
+        }
         Ok(())
     }
 }
@@ -239,6 +247,78 @@ impl RegenerationPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reply_regeneration_bounds_the_replayed_saved_prompt() {
+        const MODEL_CHARS: usize = 100;
+        let state = AIOrchestrator::new("sqlite::memory:").await.unwrap();
+        state
+            .set_context_settings("window".into(), MODEL_CHARS)
+            .await;
+        state.set_memory_enabled(false).await;
+        let text = format!("{}\n新问题\n唯一末尾", "上下文".repeat(40));
+        sqlx::query(
+            "INSERT INTO conversations (id, character_id, created_at, updated_at)
+             VALUES ('target', 'default', 'now', 'now')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+             VALUES (1, 'target', 'user', ?, 'now'),
+                    (2, 'target', 'assistant', '主动消息', 'now'),
+                    (3, 'target', 'assistant', '要重生成的回复', 'now')",
+        )
+        .bind(&text)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let request = ReplyRegeneration {
+            assistant_message_id: 3,
+            expected_tail_message_id: 3,
+            expected_history_revision: 3,
+        };
+        let plan = RegenerationPlan::prepare(
+            &state,
+            &ChatRuntimeState::default(),
+            Regeneration::Reply(&request),
+            "default",
+            "target",
+            &text,
+        )
+        .await
+        .unwrap();
+        let (prompt, _) = state
+            .compose_chat_prompt(
+                &text,
+                false,
+                None,
+                false,
+                "default",
+                Some("target"),
+                Some(plan.prompt_history(&text)),
+                true,
+                &state.prompt_snapshot("default").await.unwrap(),
+            )
+            .await
+            .unwrap();
+        let budgeted = format!("{}上…[truncated]", "上下文".repeat(33));
+        let history: Vec<_> = prompt
+            .iter()
+            .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
+            .map(|message| (message.role.as_str(), message.content.as_str()))
+            .collect();
+        assert_eq!(
+            history,
+            [
+                ("user", budgeted.as_str()),
+                ("assistant", "主动消息"),
+                ("user", budgeted.as_str())
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn failed_turn_retry_ignores_other_conversation_writes_and_rejects_target_edits() {
@@ -251,7 +331,7 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
-        *state.current_conversation_id.lock().await = Some("target".into());
+        *state.selection.current_conversation_id.lock().await = Some("target".into());
         let generation = state.bump_conversation_generation();
         sqlx::query(
             r#"INSERT INTO conversation_messages (id, conversation_id, role, content, metadata, created_at)
@@ -299,9 +379,9 @@ mod tests {
         };
         let plan = prepare(&updated).await.unwrap();
         assert_eq!(plan.prompt_history("question").len(), 1);
-        // Webhook chat uses an isolated execution guard with a shared database.
-        let external = state.fork_with_isolated_history().await;
-        let _external_turn = external.try_acquire_chat_turn("webhook").await.unwrap();
+        // Channels share admission; independent database writes still cannot invalidate another conversation.
+        let external = state.clone();
+        assert!(external.try_acquire_chat_turn("webhook").await.is_err());
         let (_, external_id) = external
             .add_message_with_metadata_for_conversation(
                 "user".into(),

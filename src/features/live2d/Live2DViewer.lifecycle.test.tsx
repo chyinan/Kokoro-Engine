@@ -5,9 +5,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Live2DViewer from "./Live2DViewer";
 import { audioPlayer } from "../../core/services";
-import { onChatCue } from "../../lib/kokoro-bridge";
+import { onChatCue, type ChatViewSnapshot } from "../../lib/kokoro-bridge";
+import { chatApplication } from "../../lib/chat/application";
 import { listen } from "@tauri-apps/api/event";
 
+vi.mock("../../lib/chat/application", () => ({ chatApplication: { getSnapshot: vi.fn() } }));
 vi.mock("pixi.js", () => ({
   utils: { skipHello: vi.fn(), clearTextureCache: vi.fn() }, Ticker: class {},
   Application: class {
@@ -52,6 +54,35 @@ describe("Live2DViewer subscription lifecycle", () => {
     const cleanups = resolveRegistrations.map(() => vi.fn());
     await act(async () => resolveRegistrations.forEach((resolve, index) => resolve(cleanups[index])));
     cleanups.forEach(cleanup => expect(cleanup).toHaveBeenCalledOnce());
+  });
+
+  it("filters delayed chat cues after a character or conversation switch and accepts the original view again", async () => {
+    vi.mocked(listen).mockResolvedValue(() => {});
+    let deliver: Parameters<typeof onChatCue>[0] = () => {};
+    vi.mocked(onChatCue).mockImplementation(async callback => { deliver = callback; return () => {}; });
+    const playCue = vi.fn();
+    const controller = { playCue } as unknown as NonNullable<Parameters<typeof Live2DViewer>[0]["controller"]>;
+    const view = { character_id:"a",conversation_id:"session-a",generation:1,turns:[] } as unknown as ChatViewSnapshot;
+    vi.mocked(chatApplication.getSnapshot).mockReturnValue(view);
+    await act(async () => root.render(createElement(Live2DViewer, {modelUrl:"test.model3.json",modelSource:"package",controller})));
+    const cue = {cue:"smile",character_id:"a",conversation_id:"session-a",client_request_id:"request-a",turn_id:"turn-a",conversation_generation:1};
+    deliver({cue:"manual",character_id:"a",conversation_id:null});
+    deliver({cue:"other-role-manual",character_id:"b",conversation_id:null});
+    expect(playCue).toHaveBeenCalledOnce();
+    playCue.mockClear();
+    deliver(cue);
+    expect(playCue).toHaveBeenCalledTimes(1);
+    vi.mocked(chatApplication.getSnapshot).mockReturnValue({...view,character_id:"b",conversation_id:"session-b",generation:2});
+    deliver(cue);
+    expect(playCue).toHaveBeenCalledTimes(1);
+    vi.mocked(chatApplication.getSnapshot).mockReturnValue({...view,generation:3});
+    deliver(cue);
+    expect(playCue).toHaveBeenCalledTimes(2);
+    vi.mocked(chatApplication.getSnapshot).mockReturnValue({...view,conversation_id:null,generation:4});
+    deliver({...cue,conversation_id:"reserved",conversation_generation:4});
+    expect(playCue).toHaveBeenCalledTimes(3);
+    deliver({...cue,conversation_id:"reserved",conversation_generation:3});
+    expect(playCue).toHaveBeenCalledTimes(3);
   });
 
   it("keeps an amplitude listener active after StrictMode effect remount", async () => {

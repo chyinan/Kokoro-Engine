@@ -505,6 +505,8 @@ export default function VisionTab({
         );
     }
 
+    const changeThresholdPercent = (config.change_threshold ?? 0) * 100;
+
     return (
         <div className="space-y-5">
             {/* Enable Vision toggle */}
@@ -842,19 +844,19 @@ export default function VisionTab({
                                 {t("settings.vision.sensitivity.label")}
                             </label>
                         </div>
-                        <span className="text-sm text-[var(--color-accent)] font-mono">{(config.change_threshold * 100).toFixed(0)}%</span>
+                        <span className="text-sm text-[var(--color-accent)] font-mono">{changeThresholdPercent.toFixed(0)}%</span>
                     </div>
                     <input
                         type="range"
                         min={1}
                         max={20}
                         step={1}
-                        value={config.change_threshold * 100}
+                        value={changeThresholdPercent}
                         onChange={(e) => update({ change_threshold: Number(e.target.value) / 100 })}
                         className="w-full accent-[var(--color-accent)]"
                     />
                     <p className="text-xs text-[var(--color-text-muted)]">
-                        {t("settings.vision.sensitivity.desc", { percent: (config.change_threshold * 100).toFixed(0) })}
+                        {t("settings.vision.sensitivity.desc", { percent: changeThresholdPercent.toFixed(0) })}
                     </p>
                 </div>
 

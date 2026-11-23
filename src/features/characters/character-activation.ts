@@ -74,7 +74,7 @@ async function handleLocalPreset(
   if (tts.mode !== "local_preset_confirmation") return token;
 
   const endpoint = tts.endpoint;
-  if (endpoint === null || !isConventionalLoopbackTtsEndpoint(endpoint)) {
+  if (typeof endpoint !== "string" || !isConventionalLoopbackTtsEndpoint(endpoint)) {
     throw new Error("invalid local TTS preset endpoint");
   }
 

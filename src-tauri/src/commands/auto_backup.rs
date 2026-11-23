@@ -2,7 +2,7 @@
 
 // pattern: Imperative Shell
 
-use crate::commands::backup::export_data_to_path;
+use crate::commands::backup::{admit_backup_operation, export_data_to_path};
 use crate::error::KokoroError;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -13,7 +13,7 @@ use tauri::{AppHandle, Manager};
 const CONFIG_FILE: &str = "auto_backup_config.json";
 static AUTO_BACKUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct AutoBackupConfig {
     /// 是否启用自动备份
     pub enabled: bool,
@@ -68,12 +68,14 @@ fn save_config_to_disk(app_data: &Path, config: &AutoBackupConfig) -> Result<(),
 // ── IPC Commands ──────────────────────────────────
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_auto_backup_config(app: AppHandle) -> Result<AutoBackupConfig, KokoroError> {
     let app_data = app_data_dir(&app)?;
     Ok(load_config(&app_data))
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn save_auto_backup_config(
     app: AppHandle,
     config: AutoBackupConfig,
@@ -83,7 +85,9 @@ pub async fn save_auto_backup_config(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn run_auto_backup_now(app: AppHandle) -> Result<String, KokoroError> {
+    let _backup = admit_backup_operation(&app, "manual-auto-backup")?;
     let app_data = app_data_dir(&app)?;
     let config = load_config(&app_data);
     if config.backup_dir.is_empty() {
@@ -173,6 +177,9 @@ pub async fn check_and_run(app_handle: &AppHandle) {
         return;
     }
 
+    let Ok(_backup) = admit_backup_operation(app_handle, "scheduled-auto-backup") else {
+        return;
+    };
     match do_backup(&app_data, &config).await {
         Ok(path) => {
             tracing::info!(target: "backup", "[AutoBackup] Auto backup completed: {}", path);

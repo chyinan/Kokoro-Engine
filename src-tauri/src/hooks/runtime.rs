@@ -31,15 +31,15 @@ pub trait HookHandler: Send + Sync {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct HookRuntime {
-    handlers: RwLock<Vec<Arc<dyn HookHandler>>>,
+    handlers: Arc<RwLock<Vec<Arc<dyn HookHandler>>>>,
 }
 
 impl HookRuntime {
     pub fn new() -> Self {
         Self {
-            handlers: RwLock::new(Vec::new()),
+            handlers: Arc::new(RwLock::new(Vec::new())),
         }
     }
 

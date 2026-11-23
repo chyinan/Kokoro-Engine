@@ -1023,6 +1023,9 @@
                 }
             },
             "refresh_tooltip": "刷新所有服务器的工具",
+            "refresh_failed": "无法刷新 MCP 工具。",
+            "server_status_unavailable": "无法读取服务器状态。",
+            "tool_list_unavailable": "无法读取工具列表。",
             "add_button": "添加",
             "add_modal": {
                 "title": "添加 MCP 服务器",
@@ -1092,6 +1095,11 @@
             "provider_credentials_warning": "提供商凭据永远不会包含在备份中。在其他设备恢复后请重新配置。",
             "restored_characters": "已恢复 {{count}} 个角色实例。",
             "skipped_memories": "有 {{count}} 条记忆因不符合本地数据结构被跳过。",
+            "legacy_telegram_skipped": {
+                "existing_bot_config": "已跳过旧版 Telegram 设置。“跳过已有配置”会保留本机的统一 Bot 配置文件，即使其中只配置了其他平台。",
+                "existing_telegram_config": "已跳过旧版 Telegram 设置。“跳过已有配置”会保留本机的 Telegram 配置文件。"
+            },
+            "reload_now": "立即重新加载",
             "merged_characters": "已把 {{count}} 个角色合并到本地角色。",
             "character_mapping_label": "角色归属",
             "character_mapping_hint": "角色实例 ID 因设备而异。请为备份中的每个角色选择：它的记忆和对话要归到哪个本地角色。",
@@ -1136,7 +1144,11 @@
         }
     },
     "chat": {
+        "tool_only_completion": "工具调用已结束，但未生成文字回复。",
         "speech_failed": "未能朗读这条回复：{{error}}",
+        "persistence_failed": "未能将本轮对话保存到数据库。",
+        "reply_unfinished": "未完成的回复",
+        "retry_save": "重试保存",
         "status": {
             "streaming": "生成中",
             "chat": "对话"
@@ -1151,6 +1163,7 @@
             "edit": "编辑",
             "regenerate": "重新生成",
             "save": "保存 (Ctrl+Enter)",
+            "retry_refresh": "重试刷新",
             "cancel": "取消 (Esc)",
             "clear": "清空对话",
             "confirm_clear_title": "清空当前对话",
@@ -1174,6 +1187,7 @@
             "memory_model_required": "本地记忆模型还没准备好。聊天仍可继续，但暂时不会使用语义记忆。",
             "memory_model_check_failed": "暂时无法确认本地记忆模型状态。聊天仍可继续，方便时再检查下载弹窗。",
             "edit_failed": "保存编辑消息失败",
+            "edit_refresh_failed": "消息已保存，刷新会话失败。",
             "delete_failed": "删除消息失败",
             "new_conversation_failed": "新建会话失败，已保留当前会话",
             "new_conversation_slow": "新建会话响应较慢，请稍候..."
@@ -1300,6 +1314,12 @@
     },
     "bot": {
         "title": "Bot 接入",
+        "config_conflict": {
+            "stale": "编辑期间 Bot 设置发生了变化。请刷新并检查你的修改，再重新保存。",
+            "overlap": "草稿与已保存的设置修改了部分相同字段。你可以保留这些字段的已保存值，再检查其余修改。",
+            "refresh": "刷新 Bot 设置",
+            "keep_saved": "对重叠修改保留已保存值"
+        },
         "status": {
             "enabled": "已启用",
             "disabled": "未启用",
@@ -1388,7 +1408,7 @@
         },
         "whitelist": {
             "label": "允许的聊天 ID",
-            "desc": "只有这些聊天 ID 可以与机器人交互。留空 = 拒绝所有。",
+            "desc": "仅允许列出的聊天 ID（不是发送者 ID）。群聊 ID 授权整个群聊。留空表示尚未授权任何聊天，即使机器人运行中也会拒绝所有消息和命令。 如果升级前留空也能使用，请添加每个要继续授权的聊天 ID，然后点击“保存”。",
             "placeholder": "聊天 ID（数字）",
             "add": "添加"
         },

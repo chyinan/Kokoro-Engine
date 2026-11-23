@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import {
@@ -113,8 +113,10 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
     const { t } = useTranslation();
     const hasInitialServers = initialServers !== undefined;
     const [servers, setServers] = useState<McpServerStatus[]>(initialServers ?? []);
+    const [serverStatusUnavailable, setServerStatusUnavailable] = useState(false);
     const [loading, setLoading] = useState(!hasInitialServers);
     const [refreshing, setRefreshing] = useState(false);
+    const [refreshFailed, setRefreshFailed] = useState(false);
     const [showAdd, setShowAdd] = useState(false);
     const [jsonInput, setJsonInput] = useState("");
     const [parseError, setParseError] = useState<string | null>(null);
@@ -122,6 +124,7 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
     const [removingName, setRemovingName] = useState<string | null>(null);
     const [successMsg, setSuccessMsg] = useState<string | null>(null);
     const [tools, setTools] = useState<ActionInfo[]>([]);
+    const [toolListUnavailable, setToolListUnavailable] = useState(false);
     const [toolSettings, setToolSettings] = useState<ToolSettings>({
         max_tool_rounds: 10,
         enabled_tools: {},
@@ -129,28 +132,42 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
         blocked_risk_tags: [],
     });
     const [savingToolSettings, setSavingToolSettings] = useState(false);
+    const serverRead = useRef(0);
+    const toolStateRead = useRef(0);
 
     const fetchServers = useCallback(async () => {
+        const read = ++serverRead.current;
         try {
             const list = await listMcpServers();
-            setServers(list);
+            if (read === serverRead.current) {
+                setServers(list);
+                setServerStatusUnavailable(false);
+            }
         } catch (e) {
             console.error("[McpTab] Failed to list servers:", e);
+            if (read === serverRead.current) setServerStatusUnavailable(true);
         } finally {
-            setLoading(false);
+            if (read === serverRead.current) setLoading(false);
         }
     }, []);
 
     const fetchToolState = useCallback(async () => {
-        try {
-            const [toolDirectory, settings] = await Promise.all([
-                listActions(),
-                getToolSettings(),
-            ]);
-            setTools(toolDirectory);
-            setToolSettings(settings);
-        } catch (e) {
-            console.error("[McpTab] Failed to fetch tool settings:", e);
+        const read = ++toolStateRead.current;
+        const [toolDirectory, settings] = await Promise.allSettled([
+            listActions(),
+            getToolSettings(),
+        ]);
+        if (read !== toolStateRead.current) return;
+        setToolListUnavailable(toolDirectory.status === "rejected");
+        if (toolDirectory.status === "fulfilled") {
+            setTools(toolDirectory.value);
+        } else {
+            console.error("[McpTab] Failed to list tools:", toolDirectory.reason);
+        }
+        if (settings.status === "fulfilled") {
+            setToolSettings(settings.value);
+        } else {
+            console.error("[McpTab] Failed to fetch tool settings:", settings.reason);
         }
     }, []);
 
@@ -260,12 +277,15 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
     // ── Refresh tools ────────────────────────────────────
     const handleRefresh = async () => {
         setRefreshing(true);
+        setRefreshFailed(false);
         try {
             await refreshMcpTools();
-            await reloadAll();
         } catch (e) {
             console.error("[McpTab] Refresh failed:", e);
+            setRefreshFailed(true);
         } finally {
+            // A failed discovery can still clear the server's tool catalog.
+            await reloadAll();
             setRefreshing(false);
         }
     };
@@ -346,6 +366,7 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
                             refreshing && "opacity-50 cursor-not-allowed"
                         )}
                         title={t("settings.mcp.refresh_tooltip")}
+                        aria-label={t("settings.mcp.refresh_tooltip")}
                     >
                         <RefreshCw size={14} strokeWidth={1.5} className={refreshing ? "animate-spin" : ""} />
                     </motion.button>
@@ -365,6 +386,13 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
                 </div>
             </div>
 
+            {refreshFailed && (
+                <p role="alert" className="flex items-center gap-2 text-xs text-[var(--color-error)]">
+                    <AlertCircle size={14} aria-hidden="true" />
+                    {t("settings.mcp.refresh_failed")}
+                </p>
+            )}
+
             {/* Success message */}
             <AnimatePresence>
                 {successMsg && (
@@ -380,7 +408,11 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
             </AnimatePresence>
 
             {/* Server list */}
-            {servers.length === 0 ? (
+            {serverStatusUnavailable ? (
+                <p role="status" className="text-xs text-[var(--color-text-muted)]">
+                    {t("settings.mcp.server_status_unavailable")}
+                </p>
+            ) : servers.length === 0 ? (
                 <div className="rounded-lg bg-[var(--color-bg-surface)] border border-[var(--color-border)] p-6 text-center">
                     <Server size={24} strokeWidth={1} className="mx-auto mb-2 text-[var(--color-text-muted)]" />
                     <p className="text-sm text-[var(--color-text-muted)]">
@@ -618,7 +650,12 @@ export default function McpTab({ initialServers, visionEnabled, isActive = false
                 </div>
 
                 <div className="space-y-4">
-                    {buildSortedToolGroups(tools).map((group) => (
+                    {toolListUnavailable && (
+                        <p role="status" className="text-xs text-[var(--color-text-muted)]">
+                            {t("settings.mcp.tool_list_unavailable")}
+                        </p>
+                    )}
+                    {!toolListUnavailable && buildSortedToolGroups(tools).map((group) => (
                         <div key={group.key} className="space-y-2">
                             <div>
                                 <div className="text-xs font-heading font-semibold uppercase tracking-wider text-[var(--color-text-secondary)]">

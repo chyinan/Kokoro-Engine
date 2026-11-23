@@ -3,32 +3,22 @@
 // Reason: Telegram 机器人处理网络 I/O、消息路由、持久化和异步任务调度，属于编排层。
 
 use super::config::TelegramConfig;
-use crate::actions::tool_settings::ToolSettings;
-use crate::actions::{execute_tool_calls, ToolInvocation};
 use crate::ai::context::AIOrchestrator;
-use crate::ai::memory_event_ingress::{
-    build_cooldown_key, select_memory_ingress_decision, should_use_structured_extraction,
-    MemoryEventIngressOptions,
-};
-use crate::ai::memory_extractor;
-use crate::chat::tags::{merge_continuation_text, strip_markdown_emphasis_markers};
-use crate::imagegen::ImageGenService;
-use crate::llm::messages::{
-    assistant_text_message, is_user_message, replace_user_message_with_images, role_text_message,
-    system_message, user_message_with_images, user_text_message,
-};
-use crate::llm::service::LlmService;
-use crate::stt::{AudioSource, SttService};
-use crate::tts::TtsService;
-use futures::StreamExt;
-use serde::Serialize;
-use std::collections::HashMap;
+use crate::bot::{lifecycle::BotIngress, BotChatServices, BotChatUnavailable, BotConfig};
+use crate::chat::application::{channel_id, ChatPolicy, ChatRequest, ChatService};
+use crate::chat::persistence::{self, ExternalTurn};
+use crate::error::KokoroError;
+use crate::stt::AudioSource;
+use base64::Engine as _;
+use futures::FutureExt;
+use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
-use tokio::sync::{oneshot, RwLock};
+use teloxide::update_listeners::UpdateListener;
+use tokio::sync::RwLock;
 
 /// 每用户速率限制：滑动窗口内最多允许的消息数
 const RATE_LIMIT_MAX: usize = 10;
@@ -43,106 +33,458 @@ struct RateState {
 
 type RateLimiter = Arc<RwLock<HashMap<ChatId, RateState>>>;
 
-/// Per-chat session state.
-#[derive(Clone, Debug)]
-enum SessionMode {
-    /// Continue the desktop conversation (default).
-    Continue,
-    /// Fresh conversation started via /new.
-    New,
+#[derive(Clone, Debug, Default)]
+pub(crate) enum SessionMode {
+    #[default]
+    Private,
+    Topic {
+        thread: i32,
+    },
+    Fresh {
+        id: String,
+    },
+    Desktop {
+        character_id: String,
+        conversation_id: String,
+    },
 }
 
-type Sessions = Arc<RwLock<HashMap<ChatId, SessionMode>>>;
-
-async fn max_tool_rounds(app: &tauri::AppHandle) -> usize {
-    if let Some(settings) = app.try_state::<Arc<RwLock<ToolSettings>>>() {
-        settings.read().await.max_tool_rounds.max(1)
-    } else {
-        10
+impl SessionMode {
+    fn bind<'a>(&'a self, chat_id: ChatId, character_id: &'a str) -> (&'a str, String, bool) {
+        match self {
+            Self::Private => (
+                character_id,
+                channel_id("telegram", character_id, &chat_id.0.to_string()),
+                true,
+            ),
+            Self::Topic { thread } => (
+                character_id,
+                channel_id(
+                    "telegram",
+                    character_id,
+                    &format!("{}:thread:{thread}", chat_id.0),
+                ),
+                true,
+            ),
+            Self::Fresh { id } => (character_id, channel_id("telegram", character_id, id), true),
+            Self::Desktop {
+                character_id,
+                conversation_id,
+            } => (character_id, conversation_id.clone(), false),
+        }
     }
 }
 
-/// Event payload for syncing Telegram messages to the desktop chat UI.
-#[derive(Clone, Serialize)]
-struct TelegramChatSync {
-    role: String,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    translation: Option<String>,
+#[derive(Clone, Default)]
+struct Sessions {
+    modes: Arc<RwLock<SessionBindings>>,
+    deliveries: Arc<std::sync::Mutex<VecDeque<ReplyDeliveryEntry>>>,
 }
 
-/// Run the long-polling loop. Blocks until `shutdown_rx` fires or an error occurs.
-pub async fn run_polling(
+#[derive(Default)]
+struct SessionBindings {
+    private: HashMap<(ChatId, Option<i32>, String), SessionMode>,
+    continued: HashMap<(ChatId, Option<i32>), SessionMode>,
+}
+
+#[derive(Default)]
+struct ReplyDeliveryProgress {
+    voice_attempted: bool,
+    images_attempted: bool,
+}
+
+struct ReplyDeliveryEntry {
+    conversation_id: String,
+    request_id: String,
+    progress: Arc<tokio::sync::Mutex<ReplyDeliveryProgress>>,
+}
+
+impl Sessions {
+    #[cfg(test)]
+    async fn mode(&self, chat: ChatId, character: &str) -> SessionMode {
+        self.mode_for(chat, None, character).await
+    }
+    async fn mode_for(&self, chat: ChatId, thread: Option<i32>, character: &str) -> SessionMode {
+        let modes = self.modes.read().await;
+        modes
+            .continued
+            .get(&(chat, thread))
+            .or_else(|| modes.private.get(&(chat, thread, character.to_owned())))
+            .cloned()
+            .unwrap_or_else(|| {
+                thread.map_or(SessionMode::Private, |thread| SessionMode::Topic { thread })
+            })
+    }
+
+    #[cfg(test)]
+    async fn start_new(&self, chat: ChatId, character: &str) {
+        self.start_new_for(chat, None, character).await;
+    }
+
+    async fn start_new_for(&self, chat: ChatId, thread: Option<i32>, character: &str) {
+        let mut modes = self.modes.write().await;
+        modes.continued.remove(&(chat, thread));
+        modes.private.insert(
+            (chat, thread, character.to_owned()),
+            SessionMode::Fresh {
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+    }
+
+    #[cfg(test)]
+    async fn continue_desktop(&self, chat: ChatId, character_id: String, conversation_id: String) {
+        self.continue_desktop_for(chat, None, character_id, conversation_id)
+            .await;
+    }
+    async fn continue_desktop_for(
+        &self,
+        chat: ChatId,
+        thread: Option<i32>,
+        character_id: String,
+        conversation_id: String,
+    ) {
+        self.modes.write().await.continued.insert(
+            (chat, thread),
+            SessionMode::Desktop {
+                character_id,
+                conversation_id,
+            },
+        );
+    }
+
+    fn reply_delivery(
+        &self,
+        identity: (&str, &str),
+        newly_committed: bool,
+    ) -> Option<Arc<tokio::sync::Mutex<ReplyDeliveryProgress>>> {
+        let mut deliveries = self.deliveries.lock().unwrap();
+        if let Some(entry) = deliveries
+            .iter()
+            .find(|entry| entry.conversation_id == identity.0 && entry.request_id == identity.1)
+        {
+            return Some(entry.progress.clone());
+        }
+        // A reply loaded from SQLite may already have delivered its media, even
+        // after a restart or cache eviction. Only a new commit admits media work.
+        if !newly_committed {
+            return None;
+        }
+        let progress = Arc::new(tokio::sync::Mutex::new(ReplyDeliveryProgress::default()));
+        deliveries.push_back(ReplyDeliveryEntry {
+            conversation_id: identity.0.to_owned(),
+            request_id: identity.1.to_owned(),
+            progress: progress.clone(),
+        });
+        while deliveries.len() > 32 {
+            deliveries.pop_front();
+        }
+        Some(progress)
+    }
+}
+
+type TelegramDeliveryError = Box<dyn std::error::Error + Send + Sync>;
+
+async fn send_text(
+    bot: &Bot,
+    chat: ChatId,
+    thread: Option<teloxide::types::ThreadId>,
+    text: impl Into<String>,
+) -> Result<Message, teloxide::RequestError> {
+    let request = bot.send_message(chat, text);
+    match thread {
+        Some(thread) => request.message_thread_id(thread).await,
+        None => request.await,
+    }
+}
+
+trait TelegramReplyDelivery: Sync {
+    fn text(
+        &self,
+        text: String,
+    ) -> impl std::future::Future<Output = Result<(), TelegramDeliveryError>> + Send;
+    fn voice(&self, text: &str) -> impl std::future::Future<Output = ()> + Send;
+    fn images(&self, text: &str) -> impl std::future::Future<Output = ()> + Send;
+}
+
+struct TelegramDelivery<'a> {
+    thread: Option<teloxide::types::ThreadId>,
+    speech: Option<&'a crate::tts::manager::TtsExecutionSnapshot>,
+    bot: &'a Bot,
+    chat_id: ChatId,
+    tts_available: bool,
+    media: &'a persistence::ExternalReplyMedia,
+}
+
+impl TelegramReplyDelivery for TelegramDelivery<'_> {
+    async fn text(&self, text: String) -> Result<(), TelegramDeliveryError> {
+        for chunk in split_message(&text) {
+            send_text(self.bot, self.chat_id, self.thread, chunk)
+                .await
+                .map_err(|error| match error {
+                    teloxide::RequestError::Network(error) => format!(
+                        "Telegram reply delivery is uncertain: {}",
+                        error.without_url()
+                    )
+                    .into(),
+                    error => TelegramDeliveryError::from(error),
+                })?;
+        }
+        Ok(())
+    }
+    async fn voice(&self, text: &str) {
+        let _ = send_voice_reply(
+            self.bot,
+            self.chat_id,
+            self.thread,
+            text,
+            self.tts_available,
+            self.speech,
+        )
+        .await;
+    }
+    async fn images(&self, _text: &str) {
+        for image in &self.media.images {
+            if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(&image.data_base64) {
+                let request = self.bot.send_photo(
+                    self.chat_id,
+                    InputFile::memory(data).file_name(image.file_name.clone()),
+                );
+                let result = match self.thread {
+                    Some(thread) => request.message_thread_id(thread).await,
+                    None => request.await,
+                };
+                if let Err(error) = result {
+                    tracing::warn!(target: "telegram", "Image delivery failed: {error}");
+                }
+            }
+        }
+    }
+}
+
+struct TelegramReply<'a> {
+    text: &'a str,
+    translation: Option<&'a str>,
+    newly_committed: bool,
+    voice: bool,
+    images: bool,
+}
+
+/// Normal replies and recovered saves share delivery. Text can be resent, while
+/// optional media is attempted once; a failed text send leaves media available
+/// for another delivery of this request while its bounded progress is retained.
+async fn deliver_telegram_reply(
+    sessions: &Sessions,
+    identity: (&str, &str),
+    reply: TelegramReply<'_>,
+    delivery: &impl TelegramReplyDelivery,
+) -> Result<(), TelegramDeliveryError> {
+    let progress = sessions.reply_delivery(identity, reply.newly_committed);
+    let mut progress = match &progress {
+        Some(progress) => Some(progress.lock().await),
+        None => None,
+    };
+    let text = reply.text.to_owned();
+    delivery
+        .text(match reply.translation {
+            Some(translation) => format!("{text}\n\n🌐 {translation}"),
+            None => text.clone(),
+        })
+        .await?;
+    if let Some(progress) = progress.as_mut() {
+        // Claim before invoking best-effort media so replay never repeats a
+        // generation or delivery whose external outcome may be ambiguous.
+        if !progress.voice_attempted {
+            progress.voice_attempted = true;
+            if reply.voice {
+                delivery.voice(&text).await;
+            }
+        }
+        if !progress.images_attempted {
+            progress.images_attempted = true;
+            if reply.images {
+                delivery.images(&text).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+const MAX_MESSAGE_CHARS: usize = 4096;
+const MAX_MEDIA_BYTES: u32 = 20 * 1024 * 1024;
+
+/// Run the long-polling loop and let the SDK drain its message workers.
+pub(crate) async fn run_polling(
     token: String,
-    config: Arc<RwLock<TelegramConfig>>,
-    app: tauri::AppHandle,
-    mut shutdown_rx: oneshot::Receiver<()>,
-) {
+    config: Arc<RwLock<BotConfig>>,
+    services: BotChatServices,
+    ingress: BotIngress,
+) -> Result<(), String> {
     let bot = Bot::new(&token);
-    let sessions: Sessions = Arc::new(RwLock::new(HashMap::new()));
+    let stop = ingress.token().clone();
+    let mut listener = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Ok(()),
+        listener = teloxide::update_listeners::polling_default(bot.clone()) => listener,
+    };
+    let listener_stop = listener.stop_token();
+    let sessions = Sessions::default();
     let rate_limiter: RateLimiter = Arc::new(RwLock::new(HashMap::new()));
-
-    // Build the update handler
     let handler = Update::filter_message().endpoint(handle_message);
-
-    let mut dispatcher = Dispatcher::builder(bot.clone(), handler)
+    let mut dispatcher = Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
-            config.clone(),
-            sessions.clone(),
-            app.clone(),
-            rate_limiter.clone()
+            config,
+            sessions,
+            services,
+            rate_limiter,
+            ingress
         ])
         .default_handler(|_upd| async {})
         .build();
 
-    // Run dispatcher in a spawned task and monitor its lifecycle.
     let shutdown_token = dispatcher.shutdown_token();
-    let mut dispatch_task = tauri::async_runtime::spawn(async move {
-        dispatcher.dispatch().await;
-    });
-
-    tokio::select! {
-        _ = &mut shutdown_rx => {
-            if let Ok(fut) = shutdown_token.shutdown() {
-                fut.await;
+    let dispatch = dispatcher.try_dispatch_with_listener(
+        listener,
+        teloxide::error_handlers::LoggingErrorHandler::with_custom_text("Telegram polling failed"),
+    );
+    tokio::pin!(dispatch);
+    let result = tokio::select! {
+        biased;
+        result = &mut dispatch => result,
+        _ = stop.cancelled() => {
+            // During get_me, the dispatcher has no update workers yet.
+            if shutdown_token.shutdown().is_err() {
+                return Ok(());
             }
-            let _ = (&mut dispatch_task).await;
+            listener_stop.stop();
+            dispatch.await
         }
-        dispatch_result = &mut dispatch_task => {
-            match dispatch_result {
-                Ok(_) => {
-                    tracing::error!(target: "telegram", "dispatcher exited unexpectedly");
-                }
-                Err(dispatch_err) => {
-                    tracing::error!(
-                        target: "telegram",
-                        "dispatcher task failed: {}",
-                        dispatch_err
-                    );
-                }
+    };
+    // Telegram request errors can include the token in a URL.
+    result.map_err(|_| "Telegram dispatcher could not initialize".to_owned())
+}
+
+/// Central message handler.
+async fn handle_message(
+    bot: Bot,
+    msg: Message,
+    config: Arc<RwLock<BotConfig>>,
+    sessions: Sessions,
+    services: BotChatServices,
+    rate_limiter: RateLimiter,
+    ingress: BotIngress,
+) -> HandlerResult {
+    let Some(_work) = ingress.admit("Telegram message") else {
+        return Ok(());
+    };
+    let reply = AssertUnwindSafe(async {
+        let result = dispatch_message(
+            &bot,
+            &msg,
+            &config,
+            &rate_limiter,
+            &TelegramMessageHandler {
+                bot: &bot,
+                sessions: &sessions,
+                services: &services,
+            },
+        )
+        .await;
+        match result {
+            Err(error) if error.is::<BotChatUnavailable>() => {
+                send_text(&bot, msg.chat.id, msg.thread_id, error.to_string()).await?;
+                Ok(())
             }
+            result => result,
+        }
+    })
+    .catch_unwind()
+    .await;
+    match reply {
+        Ok(result) => result,
+        Err(_) => {
+            Err("Telegram message handler panicked. External reply delivery is uncertain.".into())
         }
     }
 }
 
-/// Central message handler — dispatches commands and regular messages.
-async fn handle_message(
-    bot: Bot,
-    msg: Message,
-    config: Arc<RwLock<TelegramConfig>>,
-    sessions: Sessions,
-    app: tauri::AppHandle,
-    rate_limiter: RateLimiter,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Keep authorization and routing together, before any business or media work.
+/// The handler boundary lets local tests observe whether business work started.
+trait MessageHandler: Sync {
+    fn command(
+        &self,
+        msg: &Message,
+        text: &str,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+    fn voice(
+        &self,
+        msg: &Message,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+    fn photo(
+        &self,
+        msg: &Message,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+    fn text(
+        &self,
+        msg: &Message,
+        text: &str,
+        config: &TelegramConfig,
+    ) -> impl std::future::Future<Output = HandlerResult> + Send;
+}
+
+struct TelegramMessageHandler<'a> {
+    bot: &'a Bot,
+    sessions: &'a Sessions,
+    services: &'a BotChatServices,
+}
+
+impl MessageHandler for TelegramMessageHandler<'_> {
+    async fn command(&self, msg: &Message, text: &str, config: &TelegramConfig) -> HandlerResult {
+        handle_command(self.bot, msg, text, config, self.sessions, self.services).await
+    }
+
+    async fn voice(&self, msg: &Message, config: &TelegramConfig) -> HandlerResult {
+        handle_voice(self.bot, msg, config, self.sessions, self.services).await
+    }
+
+    async fn photo(&self, msg: &Message, config: &TelegramConfig) -> HandlerResult {
+        handle_photo(self.bot, msg, config, self.sessions, self.services).await
+    }
+
+    async fn text(&self, msg: &Message, text: &str, config: &TelegramConfig) -> HandlerResult {
+        reply_to_message(
+            self.bot,
+            msg,
+            text,
+            Vec::new(),
+            config,
+            self.sessions,
+            self.services,
+        )
+        .await
+    }
+}
+
+async fn dispatch_message(
+    bot: &Bot,
+    msg: &Message,
+    config: &RwLock<BotConfig>,
+    rate_limiter: &RateLimiter,
+    handler: &impl MessageHandler,
+) -> HandlerResult {
     let chat_id = msg.chat.id;
     // 不记录消息内容，避免敏感信息泄露到日志
     tracing::info!(target: "telegram", "[Telegram] Received message from chat_id={}", chat_id.0);
 
     // Snapshot config for this request
-    let config = Arc::new(config.read().await.clone());
+    let config = config.read().await.telegram.clone();
 
     // Access control: check whitelist
-    if !config.allowed_chat_ids.is_empty() && !config.allowed_chat_ids.contains(&chat_id.0) {
+    if !config.allowed_chat_ids.contains(&chat_id.0) {
         tracing::info!(target: "telegram", "[Telegram] Chat {} not in whitelist, ignoring", chat_id.0);
         return Ok(());
     }
@@ -161,9 +503,14 @@ async fn handle_message(
         state.count += 1;
         if state.count > RATE_LIMIT_MAX {
             tracing::info!(target: "telegram", "[Telegram] Rate limit exceeded for chat_id={}", chat_id.0);
-            bot.send_message(chat_id, "⚠️ Too many messages. Please wait a moment.")
-                .await
-                .ok();
+            send_text(
+                bot,
+                chat_id,
+                msg.thread_id,
+                "⚠️ Too many messages. Please wait a moment.",
+            )
+            .await
+            .ok();
             return Ok(());
         }
     }
@@ -171,23 +518,23 @@ async fn handle_message(
     // Check for commands
     if let Some(text) = msg.text() {
         if text.starts_with('/') {
-            return handle_command(&bot, &msg, text, &config, &sessions, &app).await;
+            return handler.command(msg, text, &config).await;
         }
     }
 
     // Voice message
     if msg.voice().is_some() {
-        return handle_voice(&bot, &msg, &config, &sessions, &app).await;
+        return handler.voice(msg, &config).await;
     }
 
     // Photo message (with optional caption)
     if msg.photo().is_some() {
-        return handle_photo(&bot, &msg, &config, &app).await;
+        return handler.photo(msg, &config).await;
     }
 
     // Regular text message
     if let Some(text) = msg.text() {
-        return handle_text(&bot, &msg, text, &config, &app).await;
+        return handler.text(msg, text, &config).await;
     }
 
     Ok(())
@@ -198,9 +545,9 @@ async fn handle_command(
     bot: &Bot,
     msg: &Message,
     text: &str,
-    _config: &Arc<TelegramConfig>,
+    config: &TelegramConfig,
     sessions: &Sessions,
-    app: &tauri::AppHandle,
+    services: &BotChatServices,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let chat_id = msg.chat.id;
     let cmd = text.split_whitespace().next().unwrap_or("");
@@ -213,1380 +560,1857 @@ async fn handle_command(
                 /new — Start a fresh conversation\n\
                 /status — Show current session info\n\n\
                 Just send a text or voice message to chat!";
-            if let Err(e) = bot.send_message(chat_id, text).await {
+            if let Err(e) = send_text(bot, chat_id, msg.thread_id, text).await {
                 tracing::error!(target: "telegram", "[Telegram] Failed to send /start reply: {}", e);
             }
         }
         "/new" => {
-            // Clear orchestrator history to start fresh
-            if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                // 标准清空路径：持有会话切换锁、重置历史与边界、置空会话指针、递增 generation 并持久化
-                orchestrator.clear_history().await;
-            }
-            {
-                let mut s = sessions.write().await;
-                s.insert(chat_id, SessionMode::New);
-            }
-            bot.send_message(chat_id, "✨ New conversation started.")
-                .await
-                .ok();
+            let state = services.chat()?.orchestrator.as_ref();
+            let _guard = state.enter_chat_turn()?;
+            let active = state.get_character_id().await;
+            let character = config
+                .character_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&active);
+            sessions
+                .start_new_for(chat_id, msg.thread_id.map(|id| id.0 .0), character)
+                .await;
+            send_text(
+                bot,
+                chat_id,
+                msg.thread_id,
+                "✨ New Telegram conversation started.",
+            )
+            .await?;
         }
         "/continue" => {
+            let state = services.chat()?.orchestrator.as_ref();
+            let (character_id, conversation_id) = {
+                let _activation = state.enter_chat_turn()?;
+                let _selection = state.selection.conversation_switch_lock.lock().await;
+                (
+                    state.get_character_id().await,
+                    state.selection.current_conversation_id.lock().await.clone(),
+                )
+            };
+            let Some(conversation_id) = conversation_id else {
+                send_text(
+                    bot,
+                    chat_id,
+                    msg.thread_id,
+                    "Open an existing desktop conversation before using /continue.",
+                )
+                .await?;
+                return Ok(());
+            };
+            if config
+                .character_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty() && id != character_id)
             {
-                let mut s = sessions.write().await;
-                s.insert(chat_id, SessionMode::Continue);
+                send_text(
+                    bot,
+                    chat_id,
+                    msg.thread_id,
+                    "Telegram is configured to use a different character.",
+                )
+                .await?;
+                return Ok(());
             }
-            bot.send_message(chat_id, "🔗 Continuing desktop conversation.")
-                .await
-                .ok();
+            sessions
+                .continue_desktop_for(
+                    chat_id,
+                    msg.thread_id.map(|id| id.0 .0),
+                    character_id,
+                    conversation_id,
+                )
+                .await;
+            send_text(
+                bot,
+                chat_id,
+                msg.thread_id,
+                "🔗 Continuing the selected desktop conversation.",
+            )
+            .await?;
         }
         "/status" => {
-            let mode = {
-                let s = sessions.read().await;
-                s.get(&chat_id).cloned().unwrap_or(SessionMode::Continue)
-            };
+            let state = services.chat()?.orchestrator.as_ref();
+            let active_character = state.get_character_id().await;
+            let character = config
+                .character_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&active_character);
+            let mode = sessions
+                .mode_for(chat_id, msg.thread_id.map(|id| id.0 .0), character)
+                .await;
+            let (character, conversation, _) = mode.bind(chat_id, character);
+            let history_len = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM conversation_messages AS m JOIN conversations AS c ON m.conversation_id = c.id
+                 WHERE c.id = ? AND c.character_id = ?"
+            ).bind(conversation).bind(character).fetch_one(&state.db).await?;
             let mode_str = match mode {
-                SessionMode::Continue => "Continue (desktop)",
-                SessionMode::New => "New conversation",
+                SessionMode::Desktop { .. } => "Desktop conversation",
+                _ => "Telegram conversation",
             };
-            let history_len = if let Some(orchestrator) = app.try_state::<AIOrchestrator>() {
-                orchestrator.history.lock().await.len()
-            } else {
-                0
-            };
-            bot.send_message(
+            send_text(
+                bot,
                 chat_id,
-                format!(
-                    "📊 Session: {}\n💬 History: {} messages",
-                    mode_str, history_len
-                ),
+                msg.thread_id,
+                format!("📊 Session: {mode_str}\n💬 History: {history_len} messages"),
             )
-            .await
-            .ok();
+            .await?;
         }
         _ => {
-            // Unknown command — treat as text
-            let clean = text.trim_start_matches('/');
-            if !clean.is_empty() {
-                handle_text(bot, msg, text, _config, app).await?;
+            if !text.trim_start_matches('/').trim().is_empty() {
+                reply_to_message(bot, msg, text, Vec::new(), config, sessions, services).await?;
             }
         }
     }
-
     Ok(())
 }
 
-/// Handle a plain text message — run through the LLM pipeline and reply.
-async fn handle_text(
+fn telegram_request_id(chat_id: i64, message_id: i32) -> String {
+    persistence::external_identity("telegram", &[&chat_id.to_string(), &message_id.to_string()])
+}
+
+fn telegram_previous_request_ids(chat_id: i64, message_id: i32) -> Vec<String> {
+    vec![persistence::legacy_external_identity(
+        "telegram",
+        &chat_id.to_string(),
+        &message_id.to_string(),
+    )]
+}
+
+struct TelegramPreparedInput {
+    text: String,
+    image: Option<String>,
+}
+
+/// The committed user row is authoritative on redelivery. Only a new platform
+/// message needs downloading/transcription, and preparation must succeed before
+/// its user row is written so a transient download failure remains retryable.
+async fn prepare_telegram_media_input<F, Fut>(
+    orchestrator: &AIOrchestrator,
+    character_id: &str,
+    chat_id: i64,
+    message_id: i32,
+    prepare: F,
+) -> Result<Option<TelegramPreparedInput>, TelegramDeliveryError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<TelegramPreparedInput>, TelegramDeliveryError>>,
+{
+    persistence::validate_external_request_owner(
+        &orchestrator.db,
+        character_id,
+        "telegram",
+        &telegram_request_id(chat_id, message_id),
+        &telegram_previous_request_ids(chat_id, message_id),
+    )
+    .await?;
+    if let Some((_, text)) = ExternalTurn::saved_user_message(
+        orchestrator,
+        character_id,
+        &telegram_request_id(chat_id, message_id),
+    )
+    .await?
+    {
+        return Ok(Some(TelegramPreparedInput { text, image: None }));
+    }
+    prepare().await
+}
+
+async fn reply_to_message(
     bot: &Bot,
     msg: &Message,
     text: &str,
-    config: &Arc<TelegramConfig>,
-    app: &tauri::AppHandle,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let chat_id = msg.chat.id;
-
-    let orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let llm_service = app
-        .try_state::<LlmService>()
-        .ok_or("LlmService not available")?;
-
-    if let Some(reason) = orchestrator.get_runtime_degraded().await {
-        return Err(format!(
-            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
-        )
-        .into());
-    }
-    let _chat_turn_guard = orchestrator
-        .enter_chat_turn()
-        .map_err(|e| format!("Character activation is in progress: {e}"))?;
-
-    // 1. Record user message
-    // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
-    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
-    tracing::info!(target: "telegram", "[Telegram] Resolved char_id='{}' for this request", char_id);
-    orchestrator
-        .add_message("user".to_string(), text.to_string(), &char_id)
+    images: Vec<String>,
+    config: &TelegramConfig,
+    sessions: &Sessions,
+    services: &BotChatServices,
+) -> HandlerResult {
+    let state = services.chat()?.orchestrator.as_ref();
+    let _guard = state.enter_chat_turn()?;
+    let active_character = state.get_character_id().await;
+    let preferred = config
+        .character_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&active_character);
+    let mode = sessions
+        .mode_for(msg.chat.id, msg.thread_id.map(|id| id.0 .0), preferred)
         .await;
-
-    // Sync user message to desktop UI
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "user".to_string(),
-            text: text.to_string(),
-            translation: None,
-        },
-    );
-
-    // 2. Compose prompt context (with tool prompt)
-    let action_registry = app
-        .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
-        .ok_or("ActionRegistry not available")?;
-    let tool_settings = app
-        .try_state::<Arc<RwLock<ToolSettings>>>()
-        .ok_or("ToolSettings not available")?;
-    let tool_prompt = {
-        let registry = action_registry.read().await;
-        let settings = tool_settings.read().await;
-        let p = registry.generate_tool_prompt_for_prompt_with_settings(
-            orchestrator.is_memory_enabled(),
-            &settings,
-        );
-        if p.is_empty() {
-            None
-        } else {
-            Some(p)
-        }
-    };
-
-    let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(text, false, tool_prompt, false, &char_id, &_chat_turn_guard)
-        .await
-        .map_err(|e| e.to_string())?;
-    for w in &compose_warnings {
-        tracing::warn!("[telegram compose_prompt] {}", w);
-    }
-
-    let mut client_messages = prompt_messages
-        .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Ensure the latest user turn is in the messages
-    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
-    if !already_has_user {
-        client_messages.push(user_text_message(text.to_string()));
-    }
-
-    // 3. LLM call with tool execution loop
-    let provider = llm_service.provider().await;
-    let max_rounds = max_tool_rounds(app).await;
-    let mut all_cleaned_text = String::new();
-    let mut all_translations: Vec<String> = Vec::new();
-
-    for _round in 0..max_rounds {
-        let mut stream = provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(|e| format!("LLM stream error: {}", e))?;
-
-        let mut response = String::new();
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(delta) => response.push_str(&delta),
-                Err(e) => {
-                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        if response.is_empty() {
-            break;
-        }
-
-        let (cleaned, tool_calls) = parse_tool_call_tags(&response);
-        let (cleaned, round_translation) = extract_translate_tags(&cleaned);
-        let cleaned = strip_leaked_tags(&cleaned);
-
-        tracing::info!(
-            target: "telegram",
-            "[Telegram] Tool loop round: {} tool_calls found, char_id='{}'",
-            tool_calls.len(),
-            char_id
-        );
-
-        if let Some(t) = round_translation {
-            all_translations.push(t);
-        }
-        if !cleaned.is_empty() {
-            merge_continuation_text(&mut all_cleaned_text, &cleaned);
-        }
-
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        let tool_invocations = {
-            let registry = action_registry.read().await;
-            tool_calls
-                .iter()
-                .map(|tool_call| {
-                    crate::commands::actions::build_tool_invocation_from_input(
-                        &registry,
-                        &tool_call.name,
-                        tool_call.args.clone(),
-                        None,
-                    )
-                    .map_err(|error| format!("Tool resolution error: {}", error.0))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let execution_outcomes = execute_tool_calls(
-            app,
-            &action_registry,
-            &tool_settings,
-            &char_id,
-            &tool_invocations,
-        )
-        .await;
-        let tool_results: Vec<String> = execution_outcomes
-            .iter()
-            .map(|outcome| {
-                tracing::info!(
-                    target: "telegram::tools",
-                    "[Telegram/ToolCall] Executing: {} with args {:?}",
-                    outcome.invocation.name, outcome.invocation.args
-                );
-                match &outcome.result {
-                    Ok(result) => {
-                        tracing::info!(target: "telegram::tools", "[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "telegram::tools", "[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    }
-                }
-                outcome.result_line()
-            })
-            .collect();
-        let any_needs_feedback = execution_outcomes
-            .iter()
-            .any(|outcome| outcome.needs_feedback);
-
-        if !any_needs_feedback {
-            break;
-        }
-
-        client_messages.push(assistant_text_message(response));
-        client_messages.push(system_message(format!(
-            "[Tool results]\n{}\nContinue your response naturally.",
-            tool_results.join("\n")
-        )));
-    }
-
-    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
-        &all_cleaned_text,
-    )));
-    let translation = if all_translations.is_empty() {
-        None
-    } else {
-        Some(compact_newlines(&all_translations.join(" ")))
-    };
-
-    if response.is_empty() {
-        bot.send_message(chat_id, "(No response from AI)")
-            .await
-            .ok();
-        return Ok(());
-    }
-
-    // 5. Persist assistant message
-    let metadata = translation
-        .as_ref()
-        .map(|t| serde_json::json!({ "translation": t }).to_string());
-    if let Err(e) = orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            response.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await
-    {
-        tracing::error!(
-            target: "telegram",
-            "[Telegram] Failed to persist assistant message: {}",
-            e
-        );
-    }
-
-    // Event-driven + periodic memory extraction
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let upgrade_config =
-        crate::config::load_memory_upgrade_config(&crate::ai::memory::memory_upgrade_config_path());
-    let ingress_options = MemoryEventIngressOptions {
-        enabled: upgrade_config.event_trigger_enabled,
-        event_cooldown_secs: upgrade_config.event_cooldown_secs,
-        intent_routing_enabled: upgrade_config.intent_routing_enabled,
-    };
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-    tracing::info!(
-        target: "telegram::memory",
-        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
-        msg_count, memory_msg_count, char_id
-    );
-
-    if orchestrator.is_memory_enabled() {
-        if let Some(decision) = select_memory_ingress_decision(text, &ingress_options) {
-            let cooldown_key =
-                build_cooldown_key(&char_id, &chat_id.to_string(), decision.event.event_type);
-            if orchestrator
-                .should_trigger_memory_event(&cooldown_key, decision.event.cooldown_secs)
-                .await
-            {
-                tracing::info!(
-                    target: "telegram::memory",
-                    "[Telegram/Memory] Triggering event-driven extraction (trigger={}, count={})",
-                    decision.trigger_label,
-                    msg_count
-                );
-
-                let history = orchestrator.get_recent_memory_history(10).await;
-                let memory_mgr = orchestrator.memory_manager.clone();
-                let provider_for_mem = llm_service.provider().await;
-                let char_id_for_mem = char_id.clone();
-                let memory_enabled = orchestrator.memory_enabled_flag();
-                let observation_started_at = std::time::Instant::now();
-                let trigger_for_observation = decision.trigger_label.to_string();
-                let extraction_options = memory_extractor::MemoryExtractionOptions {
-                    structured_memory_enabled: should_use_structured_extraction(
-                        upgrade_config.structured_memory_enabled,
-                        &ingress_options,
-                    ),
-                    target_language: Some(memory_target_language.clone()),
-                };
-                tauri::async_runtime::spawn(async move {
-                    if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                        return;
-                    }
-                    let _ = memory_mgr
-                        .record_periodic_write_if_enabled(
-                            &char_id_for_mem,
-                            "telegram",
-                            &trigger_for_observation,
-                            observation_started_at,
-                        )
-                        .await;
-                    memory_extractor::extract_and_store_memories_with_options(
-                        &history,
-                        &memory_mgr,
-                        provider_for_mem,
-                        char_id_for_mem,
-                        extraction_options,
-                    )
-                    .await;
-                });
-            }
-        }
-    }
-
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        tracing::info!(
-            target: "telegram::memory",
-            "[Telegram/Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = orchestrator.get_recent_memory_history(10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.clone();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "telegram",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // Sync assistant message to desktop UI
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "assistant".to_string(),
-            text: response.clone(),
-            translation: translation.clone(),
-        },
-    );
-
-    // 6. Build reply text (include translation if present)
-    let reply_text = if let Some(ref t) = translation {
-        format!("{}\n\n📝 {}", response, t)
-    } else {
-        response.clone()
-    };
-
-    // 7. Send text reply
-    bot.send_message(chat_id, &reply_text).await.ok();
-
-    // 8. Optionally send voice reply
-    if config.send_voice_reply {
-        send_voice_reply(bot, chat_id, &response, app).await;
-    }
-
-    // 9. Handle image generation tags
-    handle_image_tags(bot, chat_id, &response, app).await;
-
-    Ok(())
+    drop(_guard);
+    reply_bound(
+        bot, msg, text, images, config, sessions, services, &mode, preferred, None,
+    )
+    .await
 }
 
-/// Handle voice messages — download, transcribe via STT, then process as text.
+#[allow(clippy::too_many_arguments)]
+async fn reply_bound(
+    bot: &Bot,
+    msg: &Message,
+    text: &str,
+    images: Vec<String>,
+    config: &TelegramConfig,
+    sessions: &Sessions,
+    services: &BotChatServices,
+    mode: &SessionMode,
+    preferred: &str,
+    input_text: Option<String>,
+) -> HandlerResult {
+    let chat_id = msg.chat.id;
+    let (character_id, _, create_conversation) = mode.bind(chat_id, preferred);
+    if !create_conversation
+        && config
+            .character_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty() && id != character_id)
+    {
+        send_text(
+            bot,
+            chat_id,
+            msg.thread_id,
+            "The configured character changed. Use /new or /continue to select a conversation.",
+        )
+        .await?;
+        return Ok(());
+    }
+    let chat = &services.chat()?.service;
+    let result = if input_text.is_some() {
+        submit_message_input(
+            chat, chat_id, msg.id.0, text, images, mode, preferred, input_text,
+        )
+        .await
+    } else {
+        submit_message(chat, chat_id, msg.id.0, text, images, mode, preferred).await
+    };
+    let result = match result {
+        Ok(result) if result.status.as_deref() == Some("cancelled") => {
+            send_text(bot, chat_id, msg.thread_id, "Chat cancelled.").await?;
+            return Ok(());
+        }
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(target: "telegram", "Chat generation failed: {error}");
+            let feedback = if error.to_string().contains("chat_turn_busy") {
+                "Another chat is in progress. Send a new message after it finishes."
+            } else if error.to_string().contains("chat_shutting_down") {
+                "Kokoro Engine is shutting down."
+            } else {
+                "Kokoro Engine could not complete this chat. Check the client for details."
+            };
+            send_text(bot, chat_id, msg.thread_id, feedback).await?;
+            return Ok(());
+        }
+    };
+    let mut text = result.text.clone();
+    for warning in &result.output_warnings {
+        text.push_str(&format!("\n\n⚠️ {warning}"));
+    }
+    deliver_telegram_reply(
+        sessions,
+        (
+            &result.conversation_id,
+            &telegram_request_id(chat_id.0, msg.id.0),
+        ),
+        TelegramReply {
+            text: &text,
+            translation: result.translation.as_deref(),
+            newly_committed: result.newly_committed,
+            voice: config.send_voice_reply,
+            images: !result.external_media.images.is_empty(),
+        },
+        &TelegramDelivery {
+            thread: msg.thread_id,
+            speech: result.speech_snapshot.as_deref(),
+            bot,
+            chat_id,
+            tts_available: services.tts.is_some(),
+            media: &result.external_media,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn submit_message(
+    chat: &ChatService,
+    chat_id: ChatId,
+    message_id: i32,
+    text: &str,
+    images: Vec<String>,
+    mode: &SessionMode,
+    preferred_character: &str,
+) -> Result<crate::chat::application::StreamChatResponse, crate::error::KokoroError> {
+    submit_message_input(
+        chat,
+        chat_id,
+        message_id,
+        text,
+        images,
+        mode,
+        preferred_character,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_message_input(
+    chat: &ChatService,
+    chat_id: ChatId,
+    message_id: i32,
+    text: &str,
+    images: Vec<String>,
+    mode: &SessionMode,
+    preferred_character: &str,
+    external_input_text: Option<String>,
+) -> Result<crate::chat::application::StreamChatResponse, KokoroError> {
+    let (character_id, conversation_id, create_conversation) =
+        mode.bind(chat_id, preferred_character);
+    chat.submit(
+        ChatRequest {
+            message: text.to_owned(),
+            character_id: Some(character_id.to_owned()),
+            conversation_id: Some(conversation_id),
+            // Telegram message identifiers are unique within each chat.
+            client_request_id: Some(telegram_request_id(chat_id.0, message_id)),
+            previous_request_ids: telegram_previous_request_ids(chat_id.0, message_id),
+            images: Some(images),
+            external_input_text,
+            ..Default::default()
+        },
+        ChatPolicy::External {
+            create_conversation,
+            image_output: true,
+            source: "telegram",
+        },
+    )
+    .await
+}
+
+fn split_message(text: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = text.trim();
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let boundary = remaining
+            .char_indices()
+            .nth(MAX_MESSAGE_CHARS)
+            .map(|(index, _)| index)
+            .unwrap_or(remaining.len());
+        let (chunk, rest) = remaining.split_at(boundary);
+        remaining = rest;
+        Some(chunk)
+    })
+}
+
 async fn handle_voice(
     bot: &Bot,
     msg: &Message,
-    config: &Arc<TelegramConfig>,
-    _sessions: &Sessions,
-    app: &tauri::AppHandle,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let chat_id = msg.chat.id;
-    let voice = msg.voice().ok_or("No voice data")?;
-
-    let stt_service = match app.try_state::<SttService>() {
-        Some(s) => s,
-        None => {
-            bot.send_message(chat_id, "⚠️ STT service not available.")
-                .await
-                .ok();
-            return Ok(());
+    config: &TelegramConfig,
+    sessions: &Sessions,
+    services: &BotChatServices,
+) -> HandlerResult {
+    let state = services.chat()?.orchestrator.as_ref();
+    let _guard = state.enter_chat_turn()?;
+    let active = state.get_character_id().await;
+    let preferred = config
+        .character_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&active);
+    let mode = sessions
+        .mode_for(msg.chat.id, msg.thread_id.map(|id| id.0 .0), preferred)
+        .await;
+    drop(_guard);
+    let (character, _, _) = mode.bind(msg.chat.id, preferred);
+    let input = prepare_telegram_media_input(state, character, msg.chat.id.0, msg.id.0, || async {
+        let voice = msg.voice().ok_or("No voice data")?;
+        if voice.file.size > MAX_MEDIA_BYTES {
+            return Err("Voice message exceeds the 20 MB limit".into());
         }
-    };
-
-    // Download voice file from Telegram
-    let file = bot.get_file(&voice.file.id).await?;
-    let mut buf = Vec::new();
-    teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
-
-    // Transcribe (Telegram voice messages are OGG/Opus)
-    let audio_source = AudioSource::Encoded {
-        data: buf,
-        format: "ogg".to_string(),
-    };
-    let transcription = match stt_service.transcribe(&audio_source, None).await {
-        Ok(result) => result.text,
-        Err(e) => {
-            tracing::error!(target: "telegram", "[Telegram] STT error: {}", e);
-            bot.send_message(chat_id, "⚠️ Failed to transcribe voice message.")
-                .await
-                .ok();
-            return Ok(());
+        let file = bot.get_file(&voice.file.id).await?;
+        let mut data = Vec::new();
+        teloxide::net::Download::download_file(bot, &file.path, &mut data).await?;
+        let stt = services.stt.as_ref().ok_or("STT service not available")?;
+        let text = stt
+            .transcribe(
+                &AudioSource::Encoded {
+                    data,
+                    format: "ogg".into(),
+                },
+                None,
+            )
+            .await?
+            .text;
+        if text.trim().is_empty() {
+            return Ok(None);
         }
-    };
-
-    if transcription.trim().is_empty() {
-        bot.send_message(chat_id, "🔇 (Could not recognize speech)")
-            .await
-            .ok();
-        return Ok(());
+        Ok(Some(TelegramPreparedInput { text, image: None }))
+    })
+    .await?;
+    if let Some(input) = input {
+        reply_bound(
+            bot,
+            msg,
+            &input.text,
+            vec![],
+            config,
+            sessions,
+            services,
+            &mode,
+            preferred,
+            Some(msg.caption().unwrap_or("").to_owned()),
+        )
+        .await?;
     }
-
-    // Send recognized text back as context
-    bot.send_message(chat_id, format!("🎤 {}", transcription))
-        .await
-        .ok();
-
-    // Process as regular text
-    handle_text(bot, msg, &transcription, config, app).await
+    Ok(())
 }
 
-/// Handle photo messages — download image, convert to base64, send to LLM with vision.
 async fn handle_photo(
     bot: &Bot,
     msg: &Message,
-    config: &Arc<TelegramConfig>,
-    app: &tauri::AppHandle,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let chat_id = msg.chat.id;
-    let photos = msg.photo().ok_or("No photo data")?;
-
-    // Telegram sends multiple sizes — pick the largest one
-    let photo = photos.last().ok_or("Empty photo array")?;
-
-    let orchestrator = app
-        .try_state::<AIOrchestrator>()
-        .ok_or("AIOrchestrator not available")?;
-    let llm_service = app
-        .try_state::<LlmService>()
-        .ok_or("LlmService not available")?;
-
-    if let Some(reason) = orchestrator.get_runtime_degraded().await {
-        return Err(format!(
-            "Character runtime is degraded ({reason}). Please re-activate or select a character in Character Settings."
-        )
-        .into());
-    }
-    let _chat_turn_guard = orchestrator
-        .enter_chat_turn()
-        .map_err(|e| format!("Character activation is in progress: {e}"))?;
-
-    // Download photo file
-    let file = bot.get_file(&photo.file.id).await?;
-    let mut buf = Vec::new();
-    teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
-
-    // Convert to base64 data URL
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-    // Detect mime from file extension or default to jpeg
-    let mime = if file.path.ends_with(".png") {
-        "image/png"
-    } else {
-        "image/jpeg"
-    };
-    let data_url = format!("data:{};base64,{}", mime, b64);
-
-    // Use caption as the user message, or a default prompt
-    let caption = msg
-        .caption()
-        .unwrap_or("The user sent you a photo:")
-        .to_string();
-
-    tracing::info!(target: "telegram", "[Telegram] Photo received, caption: {}", caption);
-
-    // 1. Record user message
-    // char_id 解析优先级：config 指定 > orchestrator 内存状态 > 磁盘文件 > "default"
-    let char_id = match config.character_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(id) => id.to_string(),
-        None => {
-            let mem_id = orchestrator.get_character_id().await;
-            if !mem_id.is_empty() && mem_id != "default" {
-                mem_id
-            } else {
-                crate::ai::context::AIOrchestrator::load_active_character_id()
-                    .unwrap_or_else(|| "default".to_string())
-            }
-        }
-    };
-    tracing::info!(
-        target: "telegram",
-        "[Telegram] Resolved char_id='{}' for photo request",
-        char_id
-    );
-    orchestrator
-        .add_message("user".to_string(), caption.clone(), &char_id)
+    config: &TelegramConfig,
+    sessions: &Sessions,
+    services: &BotChatServices,
+) -> HandlerResult {
+    let state = services.chat()?.orchestrator.as_ref();
+    let _guard = state.enter_chat_turn()?;
+    let active = state.get_character_id().await;
+    let preferred = config
+        .character_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(&active);
+    let mode = sessions
+        .mode_for(msg.chat.id, msg.thread_id.map(|id| id.0 .0), preferred)
         .await;
-
-    // Sync user message to desktop UI
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "user".to_string(),
-            text: format!("[TG] 📷 {}", caption),
-            translation: None,
-        },
-    );
-
-    // 2. Compose prompt context (with tool prompt)
-    let action_registry = app
-        .try_state::<Arc<RwLock<crate::actions::ActionRegistry>>>()
-        .ok_or("ActionRegistry not available")?;
-    let tool_settings = app
-        .try_state::<Arc<RwLock<ToolSettings>>>()
-        .ok_or("ToolSettings not available")?;
-    let tool_prompt = {
-        let registry = action_registry.read().await;
-        let settings = tool_settings.read().await;
-        let p = registry.generate_tool_prompt_for_prompt_with_settings(
-            orchestrator.is_memory_enabled(),
-            &settings,
-        );
-        if p.is_empty() {
-            None
+    drop(_guard);
+    let (character, _, _) = mode.bind(msg.chat.id, preferred);
+    let input = prepare_telegram_media_input(state, character, msg.chat.id.0, msg.id.0, || async {
+        let photo = msg
+            .photo()
+            .and_then(|photos| photos.last())
+            .ok_or("No photo data")?;
+        if photo.file.size > MAX_MEDIA_BYTES {
+            return Err("Photo exceeds the 20 MB limit".into());
+        }
+        let file = bot.get_file(&photo.file.id).await?;
+        let mut data = Vec::new();
+        teloxide::net::Download::download_file(bot, &file.path, &mut data).await?;
+        let mime = if file.path.ends_with(".png") {
+            "image/png"
         } else {
-            Some(p)
-        }
-    };
-
-    let (prompt_messages, compose_warnings) = orchestrator
-        .compose_prompt_with_guard(
-            &caption,
-            false,
-            tool_prompt,
-            false,
-            &char_id,
-            &_chat_turn_guard,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    for w in &compose_warnings {
-        tracing::warn!("[telegram compose_prompt] {}", w);
-    }
-
-    let mut client_messages = prompt_messages
-        .into_iter()
-        .map(|m| role_text_message(&m.role, m.content))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Replace or append the last user message with multimodal content (text + image)
-    let already_has_user = client_messages.last().map(is_user_message).unwrap_or(false);
-    if already_has_user {
-        let last = client_messages.last_mut().unwrap();
-        replace_user_message_with_images(last, caption.clone(), vec![data_url])?;
-    } else {
-        client_messages.push(user_message_with_images(caption.clone(), vec![data_url]));
-    }
-
-    // 3. LLM call with tool execution loop
-    let provider = llm_service.provider().await;
-    let max_rounds = max_tool_rounds(app).await;
-    let mut all_cleaned_text = String::new();
-    let mut all_translations: Vec<String> = Vec::new();
-
-    for _round in 0..max_rounds {
-        let mut stream = provider
-            .chat_stream(client_messages.clone(), None)
-            .await
-            .map_err(|e| format!("LLM stream error: {}", e))?;
-
-        let mut round_response = String::new();
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(delta) => round_response.push_str(&delta),
-                Err(e) => {
-                    tracing::error!(target: "telegram", "[Telegram] LLM stream error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        if round_response.is_empty() {
-            break;
-        }
-
-        let (cleaned, tool_calls) = parse_tool_call_tags(&round_response);
-        let (cleaned, round_translation) = extract_translate_tags(&cleaned);
-        let cleaned = strip_leaked_tags(&cleaned);
-
-        tracing::info!(
-            target: "telegram",
-            "[Telegram/Photo] Tool loop round: {} tool_calls found, char_id='{}'",
-            tool_calls.len(),
-            char_id
-        );
-
-        if let Some(t) = round_translation {
-            all_translations.push(t);
-        }
-        if !cleaned.is_empty() {
-            merge_continuation_text(&mut all_cleaned_text, &cleaned);
-        }
-
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        let tool_invocations = {
-            let registry = action_registry.read().await;
-            tool_calls
-                .iter()
-                .map(|tool_call| {
-                    crate::commands::actions::build_tool_invocation_from_input(
-                        &registry,
-                        &tool_call.name,
-                        tool_call.args.clone(),
-                        None,
-                    )
-                    .map_err(|error| format!("Tool resolution error: {}", error.0))
-                })
-                .collect::<Result<Vec<_>, _>>()?
+            "image/jpeg"
         };
-        let execution_outcomes = execute_tool_calls(
-            app,
-            &action_registry,
-            &tool_settings,
-            &char_id,
-            &tool_invocations,
+        Ok(Some(TelegramPreparedInput {
+            text: msg
+                .caption()
+                .filter(|caption| !caption.trim().is_empty())
+                .unwrap_or("The user sent you a photo:")
+                .to_owned(),
+            image: Some(format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(data)
+            )),
+        }))
+    })
+    .await?;
+    if let Some(input) = input {
+        reply_bound(
+            bot,
+            msg,
+            &input.text,
+            input.image.into_iter().collect(),
+            config,
+            sessions,
+            services,
+            &mode,
+            preferred,
+            Some(msg.caption().unwrap_or("").to_owned()),
         )
-        .await;
-        let tool_results: Vec<String> = execution_outcomes
-            .iter()
-            .map(|outcome| {
-                tracing::info!(
-                    target: "telegram::tools",
-                    "[Telegram/ToolCall] Executing: {} with args {:?}",
-                    outcome.invocation.name, outcome.invocation.args
-                );
-                match &outcome.result {
-                    Ok(result) => {
-                        tracing::info!(target: "telegram::tools", "[Telegram/ToolCall] {} => {}", outcome.tool_name(), result.message);
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "telegram::tools", "[Telegram/ToolCall] {} failed: {}", outcome.tool_name(), error);
-                    }
-                }
-                outcome.result_line()
-            })
-            .collect();
-        let any_needs_feedback = execution_outcomes
-            .iter()
-            .any(|outcome| outcome.needs_feedback);
-
-        if !any_needs_feedback {
-            break;
-        }
-
-        client_messages.push(assistant_text_message(round_response));
-        client_messages.push(system_message(format!(
-            "[Tool results]\n{}\nContinue your response naturally.",
-            tool_results.join("\n")
-        )));
+        .await?;
     }
-
-    let response = strip_markdown_emphasis_markers(&strip_control_tags(&compact_newlines(
-        &all_cleaned_text,
-    )));
-    let translation = if all_translations.is_empty() {
-        None
-    } else {
-        Some(compact_newlines(&all_translations.join(" ")))
-    };
-
-    if response.is_empty() {
-        bot.send_message(chat_id, "(No response from AI)")
-            .await
-            .ok();
-        return Ok(());
-    }
-
-    // 5. Persist
-    let metadata = translation
-        .as_ref()
-        .map(|t| serde_json::json!({ "translation": t }).to_string());
-    if let Err(e) = orchestrator
-        .add_message_with_metadata(
-            "assistant".to_string(),
-            response.clone(),
-            metadata,
-            &char_id,
-            None,
-        )
-        .await
-    {
-        tracing::error!(
-            target: "telegram",
-            "[Telegram] Failed to persist assistant message: {}",
-            e
-        );
-    }
-
-    // Trigger periodic memory extraction (every 5 user messages)
-    let msg_count = orchestrator.get_message_count().await;
-    let memory_msg_count = orchestrator.get_memory_trigger_count().await;
-    let memory_target_language = orchestrator.response_language.lock().await.clone();
-    tracing::info!(
-        target: "telegram::memory",
-        "[Telegram/Memory] User message count: {}, memory trigger count: {}, char_id: {}",
-        msg_count, memory_msg_count, char_id
-    );
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 5 == 0 {
-        tracing::info!(
-            target: "telegram::memory",
-            "[Telegram/Memory] Triggering memory extraction (count={})",
-            msg_count
-        );
-        let history = orchestrator.get_recent_memory_history(10).await;
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let provider_for_mem = llm_service.provider().await;
-        let char_id_for_mem = char_id.clone();
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let extraction_options = memory_extractor::MemoryExtractionOptions {
-            structured_memory_enabled: false,
-            target_language: Some(memory_target_language.clone()),
-        };
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_write_observation_for_telegram(&char_id_for_mem, observation_started_at)
-                .await;
-            memory_extractor::extract_and_store_memories_with_options(
-                &history,
-                &memory_mgr,
-                provider_for_mem,
-                char_id_for_mem,
-                extraction_options,
-            )
-            .await;
-        });
-    }
-    if orchestrator.is_memory_enabled() && memory_msg_count > 0 && memory_msg_count % 20 == 0 {
-        let memory_mgr = orchestrator.memory_manager.clone();
-        let char_id_for_consolidation = char_id.clone();
-        let provider_for_consolidation = llm_service.provider().await;
-        let memory_enabled = orchestrator.memory_enabled_flag();
-        let observation_started_at = std::time::Instant::now();
-        let target_language_for_consolidation = memory_target_language.clone();
-        tauri::async_runtime::spawn(async move {
-            if !memory_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            let _ = memory_mgr
-                .periodic_consolidation_observation(
-                    &char_id_for_consolidation,
-                    "telegram",
-                    observation_started_at,
-                )
-                .await;
-            match memory_mgr
-                .consolidate_memories_with_language(
-                    &char_id_for_consolidation,
-                    provider_for_consolidation,
-                    Some(target_language_for_consolidation),
-                )
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    tracing::info!(target: "telegram::memory", "[Telegram/Memory] Consolidated {} memory clusters", count);
-                }
-                Err(e) => {
-                    tracing::error!(target: "telegram::memory", "[Telegram/Memory] Consolidation failed: {}", e);
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // Sync to desktop
-    let _ = app.emit(
-        "telegram:chat-sync",
-        TelegramChatSync {
-            role: "assistant".to_string(),
-            text: response.clone(),
-            translation: translation.clone(),
-        },
-    );
-
-    // 6. Reply
-    let reply_text = if let Some(ref t) = translation {
-        format!("{}\n\n📝 {}", response, t)
-    } else {
-        response.clone()
-    };
-    bot.send_message(chat_id, &reply_text).await.ok();
-
-    // 7. Voice reply
-    if config.send_voice_reply {
-        send_voice_reply(bot, chat_id, &response, app).await;
-    }
-
     Ok(())
 }
 
 /// Synthesize text via TTS and send as a Telegram voice message.
-async fn send_voice_reply(bot: &Bot, chat_id: ChatId, text: &str, app: &tauri::AppHandle) {
-    let tts_service = match app.try_state::<TtsService>() {
-        Some(s) => s,
-        None => return,
-    };
+async fn send_voice_reply(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread: Option<teloxide::types::ThreadId>,
+    text: &str,
+    tts_available: bool,
+    speech: Option<&crate::tts::manager::TtsExecutionSnapshot>,
+) -> HandlerResult {
+    if !tts_available {
+        send_text(bot, chat_id, thread, "⚠️ The TTS service is unavailable.").await?;
+        return Ok(());
+    }
 
-    match tts_service.synthesize_text(text, None).await {
+    let Some(speech) = speech else {
+        return Ok(());
+    };
+    match speech.synthesize(text).await {
         Ok(audio_bytes) if !audio_bytes.is_empty() => {
-            let (mime_type, extension) =
-                crate::commands::bot::audio_metadata_for_external(&audio_bytes);
+            let (mime_type, extension) = crate::bot::audio_metadata_for_external(&audio_bytes);
             let input = InputFile::memory(audio_bytes).file_name(format!("reply.{extension}"));
             let result = if mime_type == "audio/ogg" {
-                bot.send_voice(chat_id, input).await.map(|_| ())
+                {
+                    let request = bot.send_voice(chat_id, input);
+                    match thread {
+                        Some(thread) => request.message_thread_id(thread).await,
+                        None => request.await,
+                    }
+                    .map(|_| ())
+                }
             } else {
-                bot.send_audio(chat_id, input).await.map(|_| ())
+                {
+                    let request = bot.send_audio(chat_id, input);
+                    match thread {
+                        Some(thread) => request.message_thread_id(thread).await,
+                        None => request.await,
+                    }
+                    .map(|_| ())
+                }
             };
-            if let Err(e) = result {
-                tracing::error!(target: "telegram", "[Telegram] Failed to send voice: {}", e);
-            }
+            result?;
         }
-        Ok(_) => {} // Empty audio, skip
-        Err(e) => {
-            tracing::error!(target: "telegram", "[Telegram] TTS synthesis error: {}", e);
+        outcome => {
+            tracing::warn!(target: "telegram", "Voice reply unavailable: {outcome:?}");
+            send_text(
+                bot,
+                chat_id,
+                thread,
+                "⚠️ Kokoro Engine could not synthesize the voice reply.",
+            )
+            .await?;
         }
     }
+    Ok(())
 }
 
-/// Check for `[IMAGE_PROMPT:...]` tags in the response and generate/send images.
-async fn handle_image_tags(bot: &Bot, chat_id: ChatId, response: &str, app: &tauri::AppHandle) {
-    let prefix = "[IMAGE_PROMPT:";
-    let mut search = response.as_bytes();
-    let response_bytes = response.as_bytes();
-
-    loop {
-        let offset = response_bytes.len() - search.len();
-        let haystack = &response[offset..];
-        let start = match haystack.find(prefix) {
-            Some(s) => s,
-            None => break,
-        };
-        let rest = &haystack[start + prefix.len()..];
-        let end = match rest.find(']') {
-            Some(e) => e,
-            None => break,
-        };
-        let prompt = rest[..end].trim();
-        // Advance search past this tag
-        search = &response_bytes[offset + start + prefix.len() + end + 1..];
-
-        if prompt.is_empty() {
-            continue;
-        }
-
-        let imagegen = match app.try_state::<ImageGenService>() {
-            Some(s) => s,
-            None => break,
-        };
-
-        match imagegen
-            .generate(prompt.to_string(), None, None, None)
-            .await
-        {
-            Ok(result) => {
-                // result.image_url is a local file path
-                match tokio::fs::read(&result.image_url).await {
-                    Ok(data) => {
-                        let input = InputFile::memory(data).file_name("image.png");
-                        if let Err(e) = bot.send_photo(chat_id, input).await {
-                            tracing::error!(target: "telegram", "[Telegram] Failed to send photo: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(target: "telegram", "[Telegram] Failed to read generated image: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(target: "telegram", "[Telegram] Image generation failed: {}", e);
-                bot.send_message(chat_id, format!("⚠️ Image generation failed: {}", e))
-                    .await
-                    .ok();
-            }
-        }
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) async fn verify_bound_session_submission(services: &BotChatServices) {
+    let sessions = Sessions::default();
+    let chat = services.chat().unwrap();
+    let state = chat.orchestrator.as_ref();
+    let selected = state.selection.current_conversation_id.lock().await.clone();
+    let first = sessions
+        .mode_for(ChatId(901), Some(7), "test-character")
+        .await;
+    let old = submit_message(
+        &chat.service,
+        ChatId(901),
+        1,
+        "topic original",
+        vec![],
+        &first,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    sessions
+        .start_new_for(ChatId(901), Some(7), "test-character")
+        .await;
+    let fresh = sessions
+        .mode_for(ChatId(901), Some(7), "test-character")
+        .await;
+    let new = submit_message(
+        &chat.service,
+        ChatId(901),
+        2,
+        "topic new",
+        vec![],
+        &fresh,
+        "test-character",
+    )
+    .await
+    .unwrap();
+    assert_ne!(old.conversation_id, new.conversation_id);
+    sessions
+        .continue_desktop_for(
+            ChatId(901),
+            Some(7),
+            "test-character".into(),
+            "ownership-a".into(),
+        )
+        .await;
+    let continued = sessions
+        .mode_for(ChatId(901), Some(7), "other-character")
+        .await;
+    let shared = submit_message(
+        &chat.service,
+        ChatId(901),
+        3,
+        "topic continued",
+        vec![],
+        &continued,
+        "other-character",
+    )
+    .await
+    .unwrap();
+    assert_eq!(shared.conversation_id, "ownership-a");
+    for (id, text) in [
+        (&old.conversation_id, "topic original"),
+        (&new.conversation_id, "topic new"),
+        (&shared.conversation_id, "topic continued"),
+    ] {
+        let actual: String = sqlx::query_scalar(
+            "SELECT conversation_id FROM conversation_messages WHERE role='user' AND content=?",
+        )
+        .bind(text)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(&actual, id);
     }
-}
-
-// ── Tag parsing helpers (mirrored from commands/chat.rs) ──────────
-
-const TOOL_CALL_TAG_PREFIX: &str = "[TOOL_CALL:";
-const TRANSLATE_TAG_PREFIX: &str = "[TRANSLATE:";
-
-#[derive(Debug, Clone)]
-struct ToolCall {
-    name: String,
-    args: HashMap<String, String>,
-}
-
-impl From<ToolCall> for ToolInvocation {
-    fn from(value: ToolCall) -> Self {
-        Self {
-            tool_call_id: None,
-            name: value.name,
-            args: value.args,
-        }
-    }
-}
-
-fn parse_tool_call_tags(text: &str) -> (String, Vec<ToolCall>) {
-    let mut result = text.to_string();
-    let mut calls = Vec::new();
-
-    // Parse [TOOL_CALL:name|key=val|...] format
-    while let Some(start) = result.rfind(TOOL_CALL_TAG_PREFIX) {
-        let rest = &result[start..];
-        if let Some(end_bracket) = rest.find(']') {
-            let inner = &rest[TOOL_CALL_TAG_PREFIX.len()..end_bracket];
-            let parts: Vec<&str> = inner.split('|').collect();
-            if let Some(name) = parts.first() {
-                let name = name.trim().to_string();
-                let mut args = HashMap::new();
-                for part in parts.iter().skip(1) {
-                    if let Some(eq_pos) = part.find('=') {
-                        let key = part[..eq_pos].trim().to_string();
-                        let val = part[eq_pos + 1..].trim().to_string();
-                        args.insert(key, val);
-                    }
-                }
-                calls.push(ToolCall { name, args });
-            }
-            let tag_end = start + end_bracket + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                if tag_end < result.len() {
-                    &result[tag_end..]
-                } else {
-                    ""
-                }
-            );
-        } else {
-            break;
-        }
-    }
-
-    // Also parse simplified [action_name|key=val] format
-    let mut extra_calls = Vec::new();
-    let mut cleaned = result.clone();
-    let mut offset = 0;
-    while offset < cleaned.len() {
-        let Some(rel_start) = cleaned[offset..].find('[') else {
-            break;
-        };
-        let start = offset + rel_start;
-        let rest = &cleaned[start..];
-        let Some(end) = rest.find(']') else { break };
-        let inner = &rest[1..end];
-        let mut matched = false;
-        if let Some(pipe_pos) = inner.find('|') {
-            let name_part = &inner[..pipe_pos];
-            let is_identifier =
-                !name_part.is_empty() && name_part.chars().all(|c| c.is_alphanumeric() || c == '_');
-            let has_kv = inner[pipe_pos + 1..].contains('=');
-            if is_identifier && has_kv {
-                let parts: Vec<&str> = inner.split('|').collect();
-                let name = parts[0].trim().to_string();
-                let mut args = HashMap::new();
-                for part in parts.iter().skip(1) {
-                    if let Some(eq_pos) = part.find('=') {
-                        let key = part[..eq_pos].trim().to_string();
-                        let val = part[eq_pos + 1..].trim().to_string();
-                        args.insert(key, val);
-                    }
-                }
-                extra_calls.push(ToolCall { name, args });
-                let tag_end = start + end + 1;
-                cleaned = format!(
-                    "{}{}",
-                    cleaned[..start].trim_end(),
-                    if tag_end < cleaned.len() {
-                        &cleaned[tag_end..]
-                    } else {
-                        ""
-                    }
-                );
-                matched = true;
-            }
-        }
-        if !matched {
-            offset = start + 1;
-        }
-    }
-    calls.extend(extra_calls);
-    calls.reverse();
-    (cleaned.trim().to_string(), calls)
-}
-
-fn extract_translate_tags(text: &str) -> (String, Option<String>) {
-    let mut translations = Vec::new();
-    let mut result = text.to_string();
-    while let Some(start) = result.find(TRANSLATE_TAG_PREFIX) {
-        if let Some(end_bracket) = result[start..].find(']') {
-            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..start + end_bracket];
-            let trimmed = inner.trim();
-            if !trimmed.is_empty() {
-                translations.push(trimmed.to_string());
-            }
-            let tag_end = start + end_bracket + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            let inner = &result[start + TRANSLATE_TAG_PREFIX.len()..];
-            let trimmed = inner.trim();
-            if !trimmed.is_empty() {
-                translations.push(trimmed.to_string());
-            }
-            result = result[..start].trim_end().to_string();
-        }
-    }
-    let translation = if translations.is_empty() {
-        None
-    } else {
-        Some(translations.join(" "))
-    };
-    (result.trim().to_string(), translation)
-}
-
-fn strip_leaked_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    while let Some(start) = result.find("<tool_result>") {
-        if let Some(end) = result[start..].find("</tool_result>") {
-            let tag_end = start + end + "</tool_result>".len();
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            let line_end = result[start..]
-                .find('\n')
-                .map(|i| start + i)
-                .unwrap_or(result.len());
-            result = format!("{}{}", result[..start].trim_end(), &result[line_end..]);
-        }
-    }
-    // Markdown emphasis must be cleaned only after all tool rounds have been
-    // merged; a delimiter can legitimately be opened in one round and closed
-    // in the next.
-    result.trim().to_string()
-}
-
-/// Strip control tags that shouldn't appear in Telegram messages:
-/// [ACTION:xxx], [EMOTION:xxx], [IMAGE_PROMPT:xxx] (image handled separately)
-fn strip_control_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    // Remove [ACTION:...] tags
-    while let Some(start) = result.find("[ACTION:") {
-        if let Some(end) = result[start..].find(']') {
-            let tag_end = start + end + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            break;
-        }
-    }
-    // Remove [EMOTION:...] tags
-    while let Some(start) = result.find("[EMOTION:") {
-        if let Some(end) = result[start..].find(']') {
-            let tag_end = start + end + 1;
-            result = format!(
-                "{}{}",
-                result[..start].trim_end(),
-                result[tag_end..].trim_start()
-            );
-        } else {
-            break;
-        }
-    }
-    result.trim().to_string()
-}
-
-/// Collapse excessive newlines for cleaner Telegram output.
-/// Removes lines that contain only ellipsis/whitespace, then collapses 2+ newlines to 1.
-fn compact_newlines(text: &str) -> String {
-    // Filter out lines that are only whitespace or lone ellipsis fragments
-    let filtered: Vec<&str> = text
-        .lines()
-        .filter(|line| {
-            let t = line.trim().trim_matches('…').trim_matches('.').trim();
-            !t.is_empty()
-        })
-        .collect();
-    filtered.join("\n").trim().to_string()
+    let other_topic = sessions
+        .mode_for(ChatId(901), Some(8), "test-character")
+        .await
+        .bind(ChatId(901), "test-character")
+        .1;
+    let other_chat = sessions
+        .mode_for(ChatId(902), Some(7), "test-character")
+        .await
+        .bind(ChatId(902), "test-character")
+        .1;
+    assert_ne!(other_topic, old.conversation_id);
+    assert_ne!(other_chat, old.conversation_id);
+    let restart = Sessions::default()
+        .mode_for(ChatId(901), Some(7), "test-character")
+        .await
+        .bind(ChatId(901), "test-character")
+        .1;
+    assert_eq!(
+        restart, old.conversation_id,
+        "restart reconstructs platform private mapping, never desktop selection"
+    );
+    assert_eq!(
+        *state.selection.current_conversation_id.lock().await,
+        selected
+    );
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── compact_newlines ──────────────────────────────────
-
-    #[test]
-    fn test_compact_newlines_removes_ellipsis_only_lines() {
-        let input = "Hello\n…\nWorld";
-        assert_eq!(compact_newlines(input), "Hello\nWorld");
+pub(super) mod tests {
+    #[derive(Default)]
+    struct EntryEffects {
+        routes: Vec<&'static str>,
+        model: usize,
+        tools: usize,
+        storage: usize,
+        memory: usize,
+        download: usize,
+        transcription: usize,
+        vision: usize,
+        tts: usize,
     }
 
-    #[test]
-    fn test_compact_newlines_removes_dot_only_lines() {
-        let input = "Hello\n...\nWorld";
-        assert_eq!(compact_newlines(input), "Hello\nWorld");
+    struct RecordingMessageHandler {
+        state: AIOrchestrator,
+        sessions: Sessions,
+        effects: std::sync::Mutex<EntryEffects>,
     }
 
-    #[test]
-    fn test_compact_newlines_no_change_needed() {
-        let input = "Hello\nWorld";
-        assert_eq!(compact_newlines(input), "Hello\nWorld");
-    }
-
-    #[test]
-    fn test_compact_newlines_empty_string() {
-        assert_eq!(compact_newlines(""), "");
-    }
-
-    // ── strip_control_tags ────────────────────────────────
-
-    #[test]
-    fn test_strip_control_tags_removes_action_tag() {
-        // trim_end/trim_start collapses surrounding spaces
-        let input = "Hello [ACTION:wave] world";
-        assert_eq!(strip_control_tags(input), "Helloworld");
-    }
-
-    #[test]
-    fn test_strip_control_tags_removes_emotion_tag() {
-        let input = "[EMOTION:happy] Nice to meet you";
-        assert_eq!(strip_control_tags(input), "Nice to meet you");
-    }
-
-    #[test]
-    fn test_strip_control_tags_no_tags_unchanged() {
-        let input = "Just a normal message";
-        assert_eq!(strip_control_tags(input), "Just a normal message");
-    }
-
-    #[test]
-    fn test_strip_control_tags_multiple_tags() {
-        let input = "[ACTION:nod] Hello [EMOTION:curious] there";
-        let result = strip_control_tags(input);
-        assert!(!result.contains("[ACTION:"));
-        assert!(!result.contains("[EMOTION:"));
-        assert!(result.contains("Hello"));
-        assert!(result.contains("there"));
-    }
-
-    // ── extract_translate_tags ────────────────────────────
-
-    #[test]
-    fn test_extract_translate_tags_basic() {
-        let input = "こんにちは [TRANSLATE:Hello]";
-        let (text, translation) = extract_translate_tags(input);
-        assert_eq!(text, "こんにちは");
-        assert_eq!(translation, Some("Hello".to_string()));
-    }
-
-    #[test]
-    fn test_extract_translate_tags_none() {
-        let input = "Hello world";
-        let (text, translation) = extract_translate_tags(input);
-        assert_eq!(text, "Hello world");
-        assert!(translation.is_none());
-    }
-
-    // ── parse_tool_call_tags ──────────────────────────────
-
-    #[test]
-    fn test_parse_tool_call_tags_no_tags() {
-        let input = "Just a response";
-        let (text, calls) = parse_tool_call_tags(input);
-        assert_eq!(text, "Just a response");
-        assert!(calls.is_empty());
-    }
-
-    #[test]
-    fn test_parse_tool_call_tags_with_params() {
-        let input = "Sure! [TOOL_CALL:get_time|tz=UTC]";
-        let (text, calls) = parse_tool_call_tags(input);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "get_time");
-        assert_eq!(calls[0].args.get("tz"), Some(&"UTC".to_string()));
-        assert!(!text.contains("[TOOL_CALL:"));
-    }
-
-    #[test]
-    fn test_tool_round_markdown_is_cleaned_after_merge() {
-        let mut merged = String::new();
-        for round in ["**hello [TOOL_CALL:get_time|{}]", "world**"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            if !cleaned.is_empty() {
-                merge_continuation_text(&mut merged, &cleaned);
-            }
-        }
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "hello world");
-
-        merged.clear();
-        for round in ["**[TOOL_CALL:get_time|{}]", "answer**。"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            if !cleaned.is_empty() {
-                merge_continuation_text(&mut merged, &cleaned);
+    impl RecordingMessageHandler {
+        async fn new() -> Self {
+            Self {
+                state: AIOrchestrator::new("sqlite::memory:").await.unwrap(),
+                sessions: Sessions::default(),
+                effects: std::sync::Mutex::new(EntryEffects::default()),
             }
         }
 
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
-
-        merged.clear();
-        for round in ["*[TOOL_CALL:get_time|{}]", "answer*。"] {
-            let (cleaned, _) = parse_tool_call_tags(round);
-            let cleaned = strip_leaked_tags(&cleaned);
-            if !cleaned.is_empty() {
-                merge_continuation_text(&mut merged, &cleaned);
+        async fn reply(&self, msg: &Message, text: &str) -> HandlerResult {
+            self.effects.lock().unwrap().storage += 1;
+            let turn = begin_telegram_turn(
+                &self.state,
+                "default",
+                msg.chat.id.0,
+                msg.id.0,
+                text,
+                false,
+                &self.sessions,
+            )
+            .await?;
+            {
+                // Local substitutes for external services; persistence and
+                // session mutations below use the existing application code.
+                let mut effects = self.effects.lock().unwrap();
+                effects.model += 1;
+                effects.tools += 1;
+                effects.memory += 1;
+                effects.tts += 1;
             }
+            turn.save_reply(&self.state, "local reply", None).await?;
+            Ok(())
         }
 
-        assert_eq!(strip_markdown_emphasis_markers(&merged), "answer。");
+        async fn assert_no_business_effects(&self) {
+            {
+                let effects = self.effects.lock().unwrap();
+                assert!(effects.routes.is_empty());
+                assert_eq!(effects.model, 0);
+                assert_eq!(effects.tools, 0);
+                assert_eq!(effects.storage, 0);
+                assert_eq!(effects.memory, 0);
+                assert_eq!(effects.download, 0);
+                assert_eq!(effects.transcription, 0);
+                assert_eq!(effects.vision, 0);
+                assert_eq!(effects.tts, 0);
+            }
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap();
+            assert_eq!(rows, 0);
+            let conversations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap();
+            assert_eq!(conversations, 0);
+            let modes = self.sessions.modes.read().await;
+            assert!(modes.private.is_empty());
+            assert!(modes.continued.is_empty());
+            assert!(self.state.selection.history.lock().await.is_empty());
+        }
     }
 
-    #[test]
-    fn test_telegram_error_log_prefix_format() {
-        let rendered = format!(
-            "[ERROR][Telegram] Dispatcher task failed: {}. 常见原因是网络不可达或未开启代理。",
-            "Network timeout"
-        );
-        assert!(rendered.starts_with("[ERROR][Telegram]"));
-        assert!(rendered.contains("Network timeout"));
+    impl MessageHandler for RecordingMessageHandler {
+        async fn command(
+            &self,
+            msg: &Message,
+            _text: &str,
+            _config: &TelegramConfig,
+        ) -> HandlerResult {
+            self.effects.lock().unwrap().routes.push("command");
+            // Any command reaching this substitute mutates real session state.
+            self.sessions.start_new(msg.chat.id, "default").await;
+            Ok(())
+        }
+
+        async fn voice(&self, msg: &Message, _config: &TelegramConfig) -> HandlerResult {
+            {
+                let mut effects = self.effects.lock().unwrap();
+                effects.routes.push("voice");
+                effects.download += 1;
+                effects.transcription += 1;
+            }
+            self.reply(msg, "local transcript").await
+        }
+
+        async fn photo(&self, msg: &Message, _config: &TelegramConfig) -> HandlerResult {
+            {
+                let mut effects = self.effects.lock().unwrap();
+                effects.routes.push("photo");
+                effects.download += 1;
+                effects.vision += 1;
+            }
+            self.reply(msg, "local photo description").await
+        }
+
+        async fn text(&self, msg: &Message, text: &str, _config: &TelegramConfig) -> HandlerResult {
+            self.effects.lock().unwrap().routes.push("text");
+            self.reply(msg, text).await
+        }
+    }
+
+    fn incoming_message(chat_id: i64, message_id: i32, input: &str) -> Message {
+        let mut message = serde_json::json!({
+            "message_id": message_id,
+            "date": 1_700_000_000,
+            "chat": if chat_id < 0 {
+                serde_json::json!({"id": chat_id, "type": "supergroup", "title": "Local group"})
+            } else {
+                serde_json::json!({"id": chat_id, "type": "private", "first_name": "Local chat"})
+            },
+            "from": {"id": 42, "is_bot": false, "first_name": "Local sender", "username": "allowed_name"}
+        });
+        match input {
+            "voice" => {
+                message["voice"] = serde_json::json!({
+                "file_id": "voice", "file_unique_id": "voice-unique", "duration": 1,
+                "file_size": 10, "mime_type": "audio/ogg"
+                })
+            }
+            "photo" => {
+                message["photo"] = serde_json::json!([{
+                    "file_id": "photo", "file_unique_id": "photo-unique", "width": 1, "height": 1, "file_size": 10
+                }])
+            }
+            "document" => {
+                message["document"] = serde_json::json!({
+                    "file_id": "document", "file_unique_id": "document-unique", "file_size": 10
+                })
+            }
+            text => message["text"] = serde_json::json!(text),
+        }
+        let message: Message = serde_json::from_value(message).unwrap();
+        match input {
+            "voice" => assert!(message.voice().is_some()),
+            "photo" => assert!(message.photo().is_some()),
+            "document" => assert!(message.document().is_some()),
+            text => assert_eq!(message.text(), Some(text)),
+        }
+        message
+    }
+
+    async fn local_bot() -> (Bot, wiremock::MockServer) {
+        let server = wiremock::MockServer::start().await;
+        let bot = Bot::new("local-test-token").set_api_url(server.uri().parse().unwrap());
+        (bot, server)
+    }
+
+    pub(in crate::telegram) async fn assert_dispatched_text_chats(
+        config: &RwLock<crate::bot::BotConfig>,
+        chat_ids: &[i64],
+        expected: &[i64],
+    ) {
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, server) = local_bot().await;
+        let limiter = RateLimiter::default();
+        let mut dispatched = Vec::new();
+        for (index, chat_id) in chat_ids.iter().copied().enumerate() {
+            dispatch_message(
+                &bot,
+                &incoming_message(chat_id, index as i32 + 1, "local test prompt"),
+                config,
+                &limiter,
+                &handler,
+            )
+            .await
+            .unwrap();
+            if handler.effects.lock().unwrap().routes.len() > dispatched.len() {
+                dispatched.push(chat_id);
+            }
+        }
+        assert_eq!(dispatched, expected);
+        assert_eq!(handler.effects.lock().unwrap().model, expected.len());
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&handler.state.db)
+            .await
+            .unwrap();
+        assert_eq!(messages as usize, expected.len() * 2);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn test_telegram_new_conversation_bumps_generation_and_clears_active_id() {
-        let orchestrator = crate::ai::context::AIOrchestrator::new("sqlite::memory:").await.unwrap();
-        *orchestrator.current_conversation_id.lock().await = Some("conv-active".to_string());
-        let initial_gen = orchestrator.current_conversation_generation();
+    async fn telegram_reports_chat_unavailable_only_to_authorized_chats() {
+        use crate::bot::BotEvent;
+        use serde_json::json;
+        use wiremock::{matchers::method, Mock, ResponseTemplate};
 
-        // Simulate /new action calling clear_history()
-        orchestrator.clear_history().await;
+        let (bot, telegram) = local_bot().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": {
+                    "message_id": 42,
+                    "date": 1_700_000_000,
+                    "chat": {"id": 123, "type": "private", "first_name": "Local"}
+                }
+            })))
+            .expect(2)
+            .mount(&telegram)
+            .await;
+        let config = Arc::new(RwLock::new(BotConfig {
+            telegram: TelegramConfig {
+                allowed_chat_ids: vec![123],
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let services = BotChatServices::new(None, None, None, None, Arc::new(|_: BotEvent| Ok(())));
+        let sessions = Sessions::default();
+        let limiter = RateLimiter::default();
+        let ingress = BotIngress::for_test();
+        for (chat, id, message) in [(456, 1, "hello"), (123, 2, "/start"), (123, 3, "voice")] {
+            handle_message(
+                bot.clone(),
+                incoming_message(chat, id, message),
+                config.clone(),
+                sessions.clone(),
+                services.clone(),
+                limiter.clone(),
+                ingress.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        let requests = telegram.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request
+            .url
+            .path()
+            .to_ascii_lowercase()
+            .ends_with("/sendmessage")));
+        let body = |index: usize| {
+            serde_json::from_slice::<serde_json::Value>(&requests[index].body).unwrap()
+        };
+        assert!(body(0)["text"]
+            .as_str()
+            .unwrap()
+            .contains("Telegram Bridge"));
+        assert_eq!(body(1)["text"], "Kokoro Engine chat is unavailable.");
+    }
 
-        assert!(orchestrator.current_conversation_id.lock().await.is_none());
+    #[tokio::test]
+    async fn telegram_entry_rejects_all_routes_before_business_or_media_work() {
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, telegram) = local_bot().await;
+        let limiter = RateLimiter::default();
+        // Empty, mismatched sender ID, and special values are never wildcards.
+        for ids in [vec![], vec![42], vec![0, -1], vec![123]] {
+            let config = RwLock::new(BotConfig {
+                telegram: TelegramConfig {
+                    allowed_chat_ids: ids,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            for chat in [456, -1001234567890] {
+                for (index, input) in [
+                    "hello",
+                    "/new",
+                    "/continue",
+                    "/status",
+                    "/start",
+                    "/unknown",
+                    "voice",
+                    "photo",
+                    "document",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    dispatch_message(
+                        &bot,
+                        &incoming_message(chat, index as i32 + 1, input),
+                        &config,
+                        &limiter,
+                        &handler,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
+        handler.assert_no_business_effects().await;
+        assert!(limiter.read().await.is_empty());
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_accepts_exact_signed_chat_ids_and_preserves_routes() {
+        for chat in [
+            123,
+            -1001234567890,
+            4_503_599_627_370_495,
+            -4_503_599_627_370_495,
+        ] {
+            let handler = RecordingMessageHandler::new().await;
+            let (bot, telegram) = local_bot().await;
+            let limiter = RateLimiter::default();
+            let config = RwLock::new(BotConfig {
+                telegram: TelegramConfig {
+                    allowed_chat_ids: vec![chat],
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            // A sign change must not authorize a different chat.
+            dispatch_message(
+                &bot,
+                &incoming_message(-chat, 1, "hello"),
+                &config,
+                &limiter,
+                &handler,
+            )
+            .await
+            .unwrap();
+            handler.assert_no_business_effects().await;
+            for (id, input) in [
+                (1, "hello"),
+                (2, "/new"),
+                (3, "voice"),
+                (4, "photo"),
+                (5, "document"),
+            ] {
+                dispatch_message(
+                    &bot,
+                    &incoming_message(chat, id, input),
+                    &config,
+                    &limiter,
+                    &handler,
+                )
+                .await
+                .unwrap();
+            }
+            {
+                let effects = handler.effects.lock().unwrap();
+                assert_eq!(effects.routes, ["text", "command", "voice", "photo"]);
+                assert_eq!(
+                    (
+                        effects.model,
+                        effects.tools,
+                        effects.storage,
+                        effects.memory,
+                        effects.tts
+                    ),
+                    (3, 3, 3, 3, 3)
+                );
+                assert_eq!(
+                    (effects.download, effects.transcription, effects.vision),
+                    (2, 1, 1)
+                );
+            }
+            assert!(matches!(
+                handler.sessions.mode(ChatId(chat), "default").await,
+                SessionMode::Fresh { .. }
+            ));
+            let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+                .fetch_one(&handler.state.db)
+                .await
+                .unwrap();
+            assert_eq!(rows, 6);
+            assert!(telegram.received_requests().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_uses_updated_service_whitelist_for_each_new_message() {
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, telegram) = local_bot().await;
+        let limiter = RateLimiter::default();
+        let lifecycle = crate::lifecycle::AppLifecycle::new();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = crate::bot::BotRuntimeService::with_config_path(
+            BotConfig::default(),
+            lifecycle.scope(crate::lifecycle::TaskStage::Work, "bot"),
+            lifecycle.scope(crate::lifecycle::TaskStage::Service, "bot"),
+            temp.path().join("bot_config.json"),
+        );
+        let service = crate::telegram::TelegramService::new(
+            &runtime,
+            lifecycle.scope(crate::lifecycle::TaskStage::Work, "Telegram"),
+            lifecycle.scope(crate::lifecycle::TaskStage::Service, "Telegram"),
+        );
+        for (ids, chat, id, input, expected_calls) in [
+            (vec![123], 123, 1, "hello", 1),
+            (vec![-1001234567890], 123, 2, "/new", 1),
+            (vec![-1001234567890], -1001234567890, 3, "photo", 2),
+            (vec![], -1001234567890, 4, "voice", 2),
+            (vec![], 123, 5, "/continue", 2),
+            (vec![123], 123, 6, "/new", 3),
+        ] {
+            let (revision, mut config) = runtime.current_telegram_config().await;
+            config.allowed_chat_ids = ids;
+            runtime
+                .save_telegram_config(revision, config)
+                .await
+                .unwrap();
+            dispatch_message(
+                &bot,
+                &incoming_message(chat, id, input),
+                &service.config,
+                &limiter,
+                &handler,
+            )
+            .await
+            .unwrap();
+            assert_eq!(handler.effects.lock().unwrap().routes.len(), expected_calls);
+        }
+        {
+            let effects = handler.effects.lock().unwrap();
+            assert_eq!(effects.routes, ["text", "photo", "command"]);
+            assert_eq!(effects.transcription, 0);
+        }
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn telegram_entry_rejects_missing_or_invalid_authorization_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("telegram.json");
+        let handler = RecordingMessageHandler::new().await;
+        let (bot, telegram) = local_bot().await;
+        let limiter = RateLimiter::default();
+        for contents in [
+            None,
+            Some("{}"),
+            Some(r#"{"enabled":true,"bot_token":"local-test-token"}"#),
+            Some("not json"),
+            Some(r#"{"allowed_chat_ids":null}"#),
+            Some(r#"{"allowed_chat_ids":["*"]}"#),
+            Some(r#"{"allowed_chat_ids":[1.5]}"#),
+        ] {
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let config = RwLock::new(BotConfig {
+                telegram: super::super::config::load_config(&path),
+                ..Default::default()
+            });
+            for input in ["hello", "/new", "voice", "photo"] {
+                dispatch_message(
+                    &bot,
+                    &incoming_message(123, 1, input),
+                    &config,
+                    &limiter,
+                    &handler,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        handler.assert_no_business_effects().await;
+        assert!(limiter.read().await.is_empty());
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+    }
+
+    async fn start_new_telegram_session(
+        _state: &AIOrchestrator,
+        sessions: &Sessions,
+        character: &str,
+        chat: ChatId,
+    ) {
+        sessions.start_new(chat, character).await;
+    }
+    async fn begin_telegram_turn(
+        state: &AIOrchestrator,
+        character: &str,
+        chat: i64,
+        message: i32,
+        text: &str,
+        continue_selected: bool,
+        sessions: &Sessions,
+    ) -> Result<ExternalTurn, KokoroError> {
+        let mode = sessions.mode(ChatId(chat), character).await;
+        let (_, conversation, _) = mode.bind(ChatId(chat), character);
+        ExternalTurn::begin(
+            state,
+            character,
+            conversation,
+            telegram_request_id(chat, message),
+            text,
+            continue_selected,
+        )
+        .await
+    }
+    #[test]
+    fn topic_delivery_payloads_keep_the_origin_thread() {
+        use teloxide::requests::HasPayload;
+        let bot = Bot::new("fixture-token");
+        let chat = ChatId(901);
+        let thread = teloxide::types::ThreadId(teloxide::types::MessageId(7));
+        let text = bot.send_message(chat, "reply").message_thread_id(thread);
+        let voice = bot
+            .send_voice(chat, InputFile::memory(vec![1u8]))
+            .message_thread_id(thread);
+        let audio = bot
+            .send_audio(chat, InputFile::memory(vec![2u8]))
+            .message_thread_id(thread);
+        let photo = bot
+            .send_photo(chat, InputFile::memory(vec![3u8]))
+            .message_thread_id(thread);
+        for payload in [
+            serde_json::to_value(text.payload_ref()).unwrap(),
+            serde_json::to_value(voice.payload_ref()).unwrap(),
+            serde_json::to_value(audio.payload_ref()).unwrap(),
+            serde_json::to_value(photo.payload_ref()).unwrap(),
+        ] {
+            assert_eq!(payload["chat_id"], 901);
+            assert_eq!(payload["message_thread_id"], 7);
+        }
+    }
+
+    #[tokio::test]
+    async fn new_rotates_only_its_character_and_chat_while_continue_stays_explicitly_bound() {
+        let sessions = Sessions::default();
+        sessions.start_new(ChatId(10), "a").await;
+        sessions.start_new(ChatId(10), "b").await;
+        sessions.start_new(ChatId(11), "a").await;
+        let before_a = sessions.mode(ChatId(10), "a").await.bind(ChatId(10), "a").1;
+        let before_b = sessions.mode(ChatId(10), "b").await.bind(ChatId(10), "b").1;
+        let before_other = sessions.mode(ChatId(11), "a").await.bind(ChatId(11), "a").1;
+        sessions
+            .continue_desktop(ChatId(10), "a".into(), "desktop-a".into())
+            .await;
+        let pinned = sessions.mode(ChatId(10), "b").await;
         assert_eq!(
-            orchestrator.current_conversation_generation(),
-            initial_gen + 1
+            pinned.bind(ChatId(10), "b"),
+            ("a", "desktop-a".into(), false)
+        );
+        sessions.start_new(ChatId(10), "b").await;
+        assert_eq!(
+            sessions.mode(ChatId(10), "a").await.bind(ChatId(10), "a").1,
+            before_a
+        );
+        assert_ne!(
+            sessions.mode(ChatId(10), "b").await.bind(ChatId(10), "b").1,
+            before_b
+        );
+        assert_eq!(
+            sessions.mode(ChatId(11), "a").await.bind(ChatId(11), "a").1,
+            before_other
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingDelivery {
+        texts: std::sync::Mutex<Vec<String>>,
+        voices: std::sync::Mutex<Vec<String>>,
+        images: std::sync::Mutex<Vec<String>>,
+        fail_text_once: std::sync::atomic::AtomicBool,
+    }
+
+    impl TelegramReplyDelivery for RecordingDelivery {
+        async fn text(&self, text: String) -> Result<(), TelegramDeliveryError> {
+            self.texts.lock().unwrap().push(text);
+            if self
+                .fail_text_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(std::io::Error::other("injected Telegram send failure").into());
+            }
+            Ok(())
+        }
+        async fn voice(&self, text: &str) {
+            self.voices.lock().unwrap().push(text.to_owned());
+        }
+        async fn images(&self, text: &str) {
+            assert!(text.contains("[IMAGE_PROMPT:a forest]"));
+            self.images.lock().unwrap().push(text.to_owned());
+        }
+    }
+
+    /// A generation substitute exercises the same replay decision and shared
+    /// delivery path without a model, tool service, or Telegram credentials.
+    async fn delivery_attempt(
+        state: &AIOrchestrator,
+        sessions: &Sessions,
+        input: &str,
+        photos: bool,
+        generation_calls: &std::sync::atomic::AtomicUsize,
+        delivery: &RecordingDelivery,
+    ) -> Result<(), TelegramDeliveryError> {
+        let turn = begin_telegram_turn(state, "default", 10, 1, input, false, sessions).await?;
+        let (text, translation, newly_committed) =
+            if let Some(reply) = &turn.previous_reply {
+                (
+                    reply.text.clone(),
+                    reply.translation.clone(),
+                    reply.newly_committed,
+                )
+            } else {
+                generation_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let text = "**answer** [IMAGE_PROMPT:a forest]".to_owned();
+                turn.save_reply(state, &text, Some("translation")).await?;
+                (text, Some("translation".into()), true)
+            };
+        deliver_telegram_reply(
+            sessions,
+            (&turn.target.conversation_id, turn.request_id()),
+            TelegramReply {
+                text: &text,
+                translation: translation.as_deref(),
+                newly_committed,
+                voice: true,
+                images: !photos,
+            },
+            delivery,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn telegram_media_replay_reuses_committed_input_before_preparation() {
+        for photos in [false, true] {
+            for fail_save in [false, true] {
+                let state = AIOrchestrator::new("sqlite::memory:")
+                    .await
+                    .unwrap()
+                    .clone();
+                let sessions = Sessions::default();
+                let delivery = RecordingDelivery::default();
+                let generations = std::sync::atomic::AtomicUsize::new(0);
+                let preparations = std::sync::atomic::AtomicUsize::new(0);
+                let original = "  Original transcript, with punctuation!\n";
+                let input = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+                    preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Some(TelegramPreparedInput {
+                        text: original.into(),
+                        image: photos.then(|| "data:image/jpeg;base64,aW1hZ2U=".into()),
+                    }))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(input.image.is_some(), photos);
+                if fail_save {
+                    sqlx::query("CREATE TRIGGER reject_media_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply save fault'); END")
+                        .execute(&state.db).await.unwrap();
+                }
+                let first = delivery_attempt(
+                    &state,
+                    &sessions,
+                    &input.text,
+                    photos,
+                    &generations,
+                    &delivery,
+                )
+                .await;
+                assert_eq!(first.is_err(), fail_save);
+                let original_conversation: String = sqlx::query_scalar(
+                    "SELECT conversation_id FROM conversation_messages WHERE role = 'user'",
+                )
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+                // Reproduce the old path: a second STT result with only spacing
+                // and punctuation changes is rejected before reply recovery.
+                let error = begin_telegram_turn(
+                    &state,
+                    "default",
+                    10,
+                    1,
+                    "Original transcript with punctuation",
+                    false,
+                    &sessions,
+                )
+                .await
+                .err()
+                .unwrap();
+                // The public error intentionally redacts SQLite details.
+                assert!(matches!(error, KokoroError::ChatPersistence(_)));
+                // Both a new /new session and a fresh request orchestrator must
+                // still recover the original request's transcript and target.
+                start_new_telegram_session(&state, &sessions, "default", ChatId(10)).await;
+                if fail_save {
+                    // A drifted second STT result must not be attempted, even
+                    // while the final SQLite write is still failing.
+                    let fresh = state.clone();
+                    let replay = prepare_telegram_media_input(&fresh, "default", 10, 1, || async {
+                        preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(Some(TelegramPreparedInput {
+                            text: "Original transcript with punctuation".into(),
+                            image: None,
+                        }))
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(replay.text, original);
+                    assert!(delivery_attempt(
+                        &fresh,
+                        &sessions,
+                        &replay.text,
+                        photos,
+                        &generations,
+                        &delivery
+                    )
+                    .await
+                    .is_err());
+                    sqlx::query("DROP TRIGGER reject_media_reply")
+                        .execute(&state.db)
+                        .await
+                        .unwrap();
+                }
+                for _ in 0..2 {
+                    let fresh = state.clone();
+                    let replay = prepare_telegram_media_input(&fresh, "default", 10, 1, || async {
+                        preparations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Err(std::io::Error::other("STT unavailable / Telegram file expired").into())
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(replay.text, original);
+                    assert!(replay.image.is_none());
+                    delivery_attempt(
+                        &fresh,
+                        &sessions,
+                        &replay.text,
+                        photos,
+                        &generations,
+                        &delivery,
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert_eq!(preparations.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(
+                    delivery.texts.lock().unwrap().len(),
+                    if fail_save { 2 } else { 3 }
+                );
+                assert_eq!(delivery.voices.lock().unwrap().len(), 1);
+                assert_eq!(delivery.images.lock().unwrap().len(), usize::from(!photos));
+                let rows: Vec<(String, String, String)> = sqlx::query_as(
+                    "SELECT conversation_id, role, content FROM conversation_messages ORDER BY id",
+                )
+                .fetch_all(&state.db)
+                .await
+                .unwrap();
+                assert_eq!(
+                    rows,
+                    [
+                        (
+                            original_conversation.clone(),
+                            "user".into(),
+                            original.into()
+                        ),
+                        (
+                            original_conversation,
+                            "assistant".into(),
+                            "**answer** [IMAGE_PROMPT:a forest]".into()
+                        ),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_media_preparation_failure_keeps_new_input_retryable() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone();
+        // Download/network failure and unrecognized/unavailable STT produce no
+        // user row, so the same platform message can be prepared successfully.
+        assert!(
+            prepare_telegram_media_input(&state, "default", 10, 1, || async {
+                Err(std::io::Error::other("download failed").into())
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            prepare_telegram_media_input(&state, "default", 10, 1, || async { Ok(None) })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let input = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+            Ok(Some(TelegramPreparedInput {
+                text: "retry succeeded".into(),
+                image: None,
+            }))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let sessions = Sessions::default();
+        let turn = begin_telegram_turn(&state, "default", 10, 1, &input.text, false, &sessions)
+            .await
+            .unwrap();
+        turn.save_reply(&state, "answer", None).await.unwrap();
+        let replay = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+            panic!("completed request must not download or transcribe again")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.text, "retry succeeded");
+    }
+
+    #[tokio::test]
+    async fn telegram_saved_media_input_is_scoped_to_character_chat_and_message() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone();
+        let sessions = Sessions::default();
+        sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES ('other', 'Other', '', '', 'test', 1, 1)")
+            .execute(&state.db).await.unwrap();
+        for (character, chat, message, transcript) in [
+            ("default", 10, 1, "original"),
+            ("other", 10, 3, "other character"),
+            ("default", 11, 1, "other chat"),
+            ("default", 10, 2, "other message"),
+        ] {
+            let input = prepare_telegram_media_input(&state, character, chat, message, || async {
+                Ok(Some(TelegramPreparedInput {
+                    text: transcript.into(),
+                    image: None,
+                }))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(input.text, transcript);
+            let turn = begin_telegram_turn(
+                &state,
+                character,
+                chat,
+                message,
+                &input.text,
+                false,
+                &sessions,
+            )
+            .await
+            .unwrap();
+            turn.save_reply(&state, "answer", None).await.unwrap();
+            let replay = prepare_telegram_media_input(&state, character, chat, message, || async {
+                panic!("scoped committed input must be reused")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(replay.text, transcript);
+        }
+        let conflict = prepare_telegram_media_input(&state, "other", 10, 1, || async {
+            panic!("a request owned by another character must not trigger media work")
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            matches!(conflict.downcast_ref::<KokoroError>(), Some(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+        );
+        let conversation: String =
+            sqlx::query_scalar("SELECT id FROM conversations WHERE character_id='default' LIMIT 1")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO conversation_messages (conversation_id,role,content,metadata,created_at) VALUES (?,'user','legacy transcript',?,'now')")
+            .bind(conversation)
+            .bind(serde_json::json!({"source":"telegram","client_request_id":persistence::legacy_external_identity("telegram", "10", "4")}).to_string())
+            .execute(&state.db).await.unwrap();
+        for character in ["default", "other"] {
+            let conflict = prepare_telegram_media_input(&state, character, 10, 4, || async {
+                panic!("legacy accepted input must not trigger media work")
+            })
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                matches!(conflict.downcast_ref::<KokoroError>(), Some(KokoroError::Chat(error)) if error.starts_with("chat_request_conflict:"))
+            );
+        }
+        // Read errors cannot be misinterpreted as a fresh request and trigger STT.
+        state.db.close().await;
+        let error = prepare_telegram_media_input(&state, "default", 10, 1, || async {
+            panic!("failed persisted-input read must not trigger media work")
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<KokoroError>(),
+            Some(KokoroError::ChatPersistence(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn telegram_save_recovery_delivers_text_voice_and_images_once_per_input_kind() {
+        for (input, photos) in [
+            ("typed prompt", false),
+            ("voice transcript", false),
+            ("photo caption", true),
+        ] {
+            let state = AIOrchestrator::new("sqlite::memory:")
+                .await
+                .unwrap()
+                .clone();
+            // Replay delivery must not depend on whether memory extraction ran.
+            state.set_memory_enabled(false).await;
+            let sessions = Sessions::default();
+            let delivery = RecordingDelivery::default();
+            let generations = std::sync::atomic::AtomicUsize::new(0);
+            sqlx::query("CREATE TRIGGER reject_delivery_reply BEFORE INSERT ON conversation_messages WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'reply save fault'); END")
+                .execute(&state.db).await.unwrap();
+            for _ in 0..2 {
+                let error =
+                    delivery_attempt(&state, &sessions, input, photos, &generations, &delivery)
+                        .await
+                        .unwrap_err();
+                assert!(matches!(
+                    error.downcast_ref::<KokoroError>(),
+                    Some(KokoroError::ChatPersistence(_))
+                ));
+            }
+            assert!(delivery.texts.lock().unwrap().is_empty());
+            assert!(delivery.voices.lock().unwrap().is_empty());
+            assert!(delivery.images.lock().unwrap().is_empty());
+            sqlx::query("DROP TRIGGER reject_delivery_reply")
+                .execute(&state.db)
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                delivery_attempt(&state, &sessions, input, photos, &generations, &delivery)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(delivery.texts.lock().unwrap().len(), 2);
+            assert!(delivery.texts.lock().unwrap()[0].ends_with("🌐 translation"));
+            assert_eq!(delivery.voices.lock().unwrap().len(), 1);
+            assert_eq!(delivery.images.lock().unwrap().len(), usize::from(!photos));
+            let roles: Vec<String> =
+                sqlx::query_scalar("SELECT role FROM conversation_messages ORDER BY id")
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(roles, ["user", "assistant"]);
+            // Lost in-process progress must not regenerate already delivered media.
+            delivery_attempt(
+                &state,
+                &Sessions::default(),
+                input,
+                photos,
+                &generations,
+                &delivery,
+            )
+            .await
+            .unwrap();
+            assert_eq!(delivery.voices.lock().unwrap().len(), 1);
+            assert_eq!(delivery.images.lock().unwrap().len(), usize::from(!photos));
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_replay_continues_media_after_text_delivery_failure_without_regeneration() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone();
+        let sessions = Sessions::default();
+        let delivery = RecordingDelivery::default();
+        delivery
+            .fail_text_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let generations = std::sync::atomic::AtomicUsize::new(0);
+        assert!(
+            delivery_attempt(&state, &sessions, "prompt", false, &generations, &delivery)
+                .await
+                .is_err()
+        );
+        assert!(delivery.voices.lock().unwrap().is_empty());
+        assert!(delivery.images.lock().unwrap().is_empty());
+        let (first, duplicate) = tokio::join!(
+            delivery_attempt(&state, &sessions, "prompt", false, &generations, &delivery),
+            delivery_attempt(&state, &sessions, "prompt", false, &generations, &delivery),
+        );
+        first.unwrap();
+        duplicate.unwrap();
+        assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(delivery.texts.lock().unwrap().len(), 3);
+        assert_eq!(delivery.voices.lock().unwrap().len(), 1);
+        assert_eq!(delivery.images.lock().unwrap().len(), 1);
+        let assistants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversation_messages WHERE role = 'assistant'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(assistants, 1);
+    }
+
+    use super::*;
+
+    #[test]
+    fn new_and_default_sessions_are_isolated_while_continue_pins_desktop_scope() {
+        let default = SessionMode::Private;
+        let other = default.bind(ChatId(2), "character").1;
+        let first = default.bind(ChatId(1), "character").1;
+        assert_ne!(first, other);
+        assert_ne!(first, default.bind(ChatId(1), "another-character").1);
+        let fresh = SessionMode::Fresh { id: "fresh".into() };
+        assert_ne!(fresh.bind(ChatId(1), "character").1, first);
+        assert_eq!(default.bind(ChatId(2), "character").1, other);
+        let continue_desktop = SessionMode::Desktop {
+            character_id: "character".into(),
+            conversation_id: "selected".into(),
+        };
+        assert_eq!(
+            continue_desktop.bind(ChatId(1), "switched"),
+            ("character", "selected".into(), false)
+        );
+    }
+
+    #[test]
+    fn splitting_preserves_the_message_and_handles_multibyte_characters() {
+        let original = "界".repeat(MAX_MESSAGE_CHARS + 3);
+        let chunks = split_message(&original).collect::<Vec<_>>();
+        assert_eq!(chunks[0].chars().count(), MAX_MESSAGE_CHARS);
+        assert_eq!(chunks.concat(), original);
+    }
+    #[tokio::test]
+    async fn telegram_memory_cadence_follows_mixed_messages_and_new_sessions() {
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone();
+        let sessions = Sessions::default();
+        sqlx::query("INSERT INTO characters (id, name, persona, user_nickname, source_format, created_at, updated_at) VALUES ('memory-bot', 'Bot', '', '', 'test', 1, 1)")
+            .execute(&state.db).await.unwrap();
+        let mut extractions = 0;
+        let mut consolidations = 0;
+        for id in 1..=20 {
+            let fork = state.clone();
+            fork.apply_character_profile("memory-bot").await.unwrap();
+            let text = ["typed prompt", "photo caption", "voice transcript"][id as usize % 3];
+            let turn = begin_telegram_turn(&fork, "memory-bot", 10, id, text, false, &sessions)
+                .await
+                .unwrap();
+            let work = turn
+                .save_reply(&fork, "answer", None)
+                .await
+                .unwrap()
+                .unwrap();
+            extractions += usize::from(work.extract());
+            consolidations += usize::from(work.consolidate());
+            assert_eq!(work.count, id as u64);
+            assert!(!turn
+                .recent_committed_history(&fork, work, 10)
+                .await
+                .is_empty());
+        }
+        assert_eq!((extractions, consolidations), (4, 1));
+        start_new_telegram_session(&state, &sessions, "memory-bot", ChatId(10)).await;
+        let fork = state.clone();
+        let turn = begin_telegram_turn(&fork, "memory-bot", 10, 21, "new prompt", false, &sessions)
+            .await
+            .unwrap();
+        let work = turn
+            .save_reply(&fork, "new answer", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(work.count, 1);
+        let history = turn.recent_committed_history(&fork, work, 10).await;
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["new prompt", "new answer"]
+        );
+        assert_eq!(state.get_memory_trigger_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn telegram_initial_write_failure_propagates_before_text_or_photo_can_generate() {
+        let sessions = Sessions::default();
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone();
+        sqlx::query(
+            "CREATE TRIGGER reject_telegram_user BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'user' BEGIN SELECT RAISE(ABORT, 'Telegram user fault'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        for (id, text) in [
+            (1, "typed prompt"),
+            (2, "photo caption"),
+            (3, "voice transcript"),
+        ] {
+            assert!(matches!(
+                begin_telegram_turn(&state, "default", 10, id, text, true, &sessions).await,
+                Err(KokoroError::ChatPersistence(_))
+            ));
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(state.selection.history.lock().await.is_empty());
+        assert!(state
+            .selection
+            .current_conversation_id
+            .lock()
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_redelivery_retries_only_the_saved_reply_in_its_original_conversation() {
+        let sessions = Sessions::default();
+        let state = AIOrchestrator::new("sqlite::memory:")
+            .await
+            .unwrap()
+            .clone();
+        let first =
+            begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions)
+                .await
+                .unwrap();
+        assert!(first.previous_reply.is_none());
+        state.clear_history().await;
+        sessions.start_new(ChatId(10), "default").await;
+        let second =
+            begin_telegram_turn(&state, "default", 10, 2, "second question", true, &sessions)
+                .await
+                .unwrap();
+        assert_ne!(second.target.conversation_id, first.target.conversation_id);
+        sqlx::query(
+            "CREATE TRIGGER reject_telegram_assistant BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'Telegram assistant fault'); END",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let raw_reply = "**full reply**\n\n\nnext paragraph";
+        assert!(matches!(
+            first
+                .save_reply(&state, raw_reply, Some("translation"))
+                .await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        assert!(matches!(
+            begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions).await,
+            Err(KokoroError::ChatPersistence(_))
+        ));
+        sqlx::query("DROP TRIGGER reject_telegram_assistant")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let retry =
+                begin_telegram_turn(&state, "default", 10, 1, " typed prompt ", true, &sessions)
+                    .await
+                    .unwrap();
+            assert_eq!(retry.target.conversation_id, first.target.conversation_id);
+            let reply = retry.previous_reply.unwrap();
+            assert_eq!(reply.text, raw_reply);
+            assert_eq!(reply.translation.as_deref(), Some("translation"));
+        }
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT role, content FROM conversation_messages WHERE conversation_id = ? ORDER BY id",
+        )
+        .bind(&first.target.conversation_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("user".into(), " typed prompt ".into()),
+                ("assistant".into(), raw_reply.into())
+            ]
+        );
+        let wrong: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages WHERE role = 'assistant' AND conversation_id = ?")
+            .bind(&second.target.conversation_id).fetch_one(&state.db).await.unwrap();
+        assert_eq!(wrong, 0);
+        assert!(
+            state.selection.history.lock().await.is_empty(),
+            "platform session rotation does not edit the desktop projection"
         );
     }
 }

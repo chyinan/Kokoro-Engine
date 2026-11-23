@@ -2,16 +2,17 @@ use super::config::ProviderConfig;
 use super::interface::{
     Gender, ProviderCapabilities, TtsEngine, TtsError, TtsParams, TtsProvider, VoiceProfile,
 };
+use crate::lifecycle::TaskScope;
 use async_trait::async_trait;
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::fs;
-use tokio::process::Command;
-use uuid::Uuid;
+use tokio::{fs, io::AsyncReadExt, process::Command};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MODEL: &str = "k2-fsa/OmniVoice";
 const DEFAULT_PYTHON: &str = "python";
@@ -87,7 +88,9 @@ sf.write(req["output"], audio[0], model.sampling_rate)
 /// - `extra.ref_text` or `extra.prompt_text`: optional reference transcript
 /// - `extra.project_path`: optional local OmniVoice checkout path for `PYTHONPATH`
 /// - `extra.python_executable`: optional Python executable, defaults to `python`
+#[derive(Clone)]
 pub struct OmniVoiceProvider {
+    scope: Option<TaskScope>,
     provider_id: String,
     python_executable: String,
     project_path: Option<PathBuf>,
@@ -116,6 +119,7 @@ impl OmniVoiceProvider {
             .unwrap_or_else(|| DEFAULT_PYTHON.to_string());
 
         Some(Self {
+            scope: None,
             provider_id: config.id.clone(),
             python_executable,
             project_path: extra_string(extra, &["project_path", "install_path"]).map(PathBuf::from),
@@ -352,48 +356,69 @@ impl TtsProvider for OmniVoiceProvider {
     }
 
     async fn synthesize(&self, text: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
-        let output_path = std::env::temp_dir().join(format!("omnivoice-{}.wav", Uuid::new_v4()));
-        let request_path =
-            std::env::temp_dir().join(format!("omnivoice-request-{}.json", Uuid::new_v4()));
+        let provider = self.clone();
+        let text = text.to_owned();
+        let stop = self
+            .scope
+            .as_ref()
+            .map_or_else(CancellationToken::new, |scope| scope.token().child_token());
+        let _cancel_if_abandoned = stop.clone().drop_guard();
+        let run = async move { provider.run_synthesis(&text, params, stop).await };
+        if let Some(scope) = &self.scope {
+            let mut task = scope
+                .spawn_durable("OmniVoice Python inference", run)
+                .map_err(|_| TtsError::Cancelled)?;
+            task.join()
+                .await
+                .map_err(|error| TtsError::SynthesisFailed(error.to_string()))?
+        } else {
+            run.await
+        }
+    }
+}
+
+impl OmniVoiceProvider {
+    pub(crate) fn with_scope(mut self, scope: Option<TaskScope>) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    async fn run_synthesis(
+        &self,
+        text: &str,
+        params: TtsParams,
+        stop: CancellationToken,
+    ) -> Result<Vec<u8>, TtsError> {
+        let workspace = tempfile::tempdir()
+            .map_err(|error| TtsError::SynthesisFailed(format!("OmniVoice staging: {error}")))?;
+        let output_path = workspace.path().join("audio.wav");
+        let request_path = workspace.path().join("request.json");
         let request = self.build_request(text, &params, &output_path)?;
         let request_json = serde_json::to_vec(&request).map_err(|error| {
-            TtsError::SynthesisFailed(format!("OmniVoice request serialization failed: {}", error))
+            TtsError::SynthesisFailed(format!("OmniVoice request serialization failed: {error}"))
         })?;
         fs::write(&request_path, request_json)
             .await
             .map_err(|error| {
-                TtsError::SynthesisFailed(format!(
-                    "OmniVoice failed to write request file {}: {}",
-                    request_path.display(),
-                    error
-                ))
+                TtsError::SynthesisFailed(format!("OmniVoice request file: {error}"))
             })?;
 
-        let python_executable = self.python_executable_for_params(&params);
-        let mut command = Command::new(&python_executable);
-        command.arg("-c");
-        command.arg(OMNIVOICE_PYTHON_SCRIPT);
-        command.arg(&request_path);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        let python = self.python_executable_for_params(&params);
+        let mut command = Command::new(&python);
+        command
+            .args(["-c", OMNIVOICE_PYTHON_SCRIPT])
+            .arg(&request_path);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         if let Some(project_path) = self.project_path_for_params(&params) {
             command.current_dir(&project_path);
             command.env("PYTHONPATH", build_pythonpath(&project_path));
         }
-
-        let output = command.output().await.map_err(|error| {
-            let _ = std::fs::remove_file(&request_path);
-            TtsError::SynthesisFailed(format!(
-                "OmniVoice failed to start '{}': {}",
-                python_executable, error
-            ))
-        })?;
-        let _ = fs::remove_file(&request_path).await;
-
+        let output = run_python(command, &stop, self.scope.as_ref()).await?;
         if !output.status.success() {
-            let _ = fs::remove_file(&output_path).await;
             return Err(TtsError::SynthesisFailed(format!(
                 "OmniVoice exited with {}. stdout: {} stderr: {}",
                 output.status,
@@ -401,23 +426,68 @@ impl TtsProvider for OmniVoiceProvider {
                 process_output_text(&output.stderr)
             )));
         }
-
         let bytes = fs::read(&output_path).await.map_err(|error| {
-            TtsError::SynthesisFailed(format!(
-                "OmniVoice did not produce readable audio at {}: {}",
-                output_path.display(),
-                error
-            ))
+            TtsError::SynthesisFailed(format!("OmniVoice did not produce readable audio: {error}"))
         })?;
-        let _ = fs::remove_file(&output_path).await;
-
         if bytes.is_empty() {
             return Err(TtsError::SynthesisFailed(
-                "OmniVoice produced an empty audio file".to_string(),
+                "OmniVoice produced an empty audio file".into(),
             ));
         }
-
         Ok(bytes)
+    }
+}
+
+async fn run_python(
+    command: Command,
+    stop: &CancellationToken,
+    scope: Option<&TaskScope>,
+) -> Result<std::process::Output, TtsError> {
+    if stop.is_cancelled() {
+        return Err(TtsError::Cancelled);
+    }
+    let mut command = CommandWrap::from(command);
+    command.wrap(KillOnDrop);
+    #[cfg(windows)]
+    {
+        let mut flags = process_wrap::tokio::CreationFlags(Default::default());
+        flags.0 .0 = 0x08000000; // CREATE_NO_WINDOW
+        command.wrap(flags).wrap(process_wrap::tokio::JobObject);
+    }
+    #[cfg(unix)]
+    command.wrap(process_wrap::tokio::ProcessGroup::leader());
+    let mut child = command.spawn().map_err(|error| {
+        TtsError::SynthesisFailed(format!("OmniVoice process launch failed: {error}"))
+    })?;
+    let mut stdout = child.stdout().take().expect("piped OmniVoice stdout");
+    let mut stderr = child.stderr().take().expect("piped OmniVoice stderr");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let outcome = tokio::select! {
+        biased;
+        output = async { tokio::try_join!(child.wait(), stdout.read_to_end(&mut out), stderr.read_to_end(&mut err)) } => Some(output),
+        _ = stop.cancelled() => None,
+    };
+    if let Some(Ok((status, _, _))) = outcome {
+        return Ok(std::process::Output {
+            status,
+            stdout: out,
+            stderr: err,
+        });
+    }
+    drop((stdout, stderr));
+    if let Err(error) = Box::into_pin(child.kill()).await {
+        let message = format!("OmniVoice process exit could not be confirmed: {error}");
+        if let Some(scope) = scope {
+            scope.report_failure("OmniVoice Python inference", &message);
+        }
+        return Err(TtsError::SynthesisFailed(message));
+    }
+    match outcome {
+        Some(Err(error)) => Err(TtsError::SynthesisFailed(format!(
+            "OmniVoice process output: {error}"
+        ))),
+        _ => Err(TtsError::Cancelled),
     }
 }
 
@@ -514,6 +584,42 @@ fn process_output_text(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn cancelling_native_inference_waits_for_process_exit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("started.pid");
+        let mut command = Command::new("node");
+        command
+            .args(["-e", "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)"])
+            .arg(&marker)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let stop = CancellationToken::new();
+        let child_stop = stop.clone();
+        let worker = tokio::spawn(async move { run_python(command, &child_stop, None).await });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(value) = fs::read_to_string(&marker).await {
+                    if value.parse::<u32>().is_ok() {
+                        break value;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.cancel();
+        assert!(matches!(worker.await.unwrap(), Err(TtsError::Cancelled)));
+        let exited = Command::new("node")
+            .args(["-e", "try { process.kill(Number(process.argv[1]), 0); process.exitCode = 1 } catch(e) { process.exitCode = e.code === 'ESRCH' ? 0 : 2 }", &pid])
+            .status()
+            .await
+            .unwrap()
+            .success();
+        assert!(exited);
+    }
 
     fn provider_config(extra: HashMap<String, Value>) -> ProviderConfig {
         ProviderConfig {

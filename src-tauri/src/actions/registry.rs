@@ -11,22 +11,23 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::AppHandle;
 
 // ── Types ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ActionParam {
     pub name: String,
     pub description: String,
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ActionResult {
     pub success: bool,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[specta(type = Option<crate::ipc::wire::JsonValue>)]
+    #[serde(default)]
     pub data: Option<serde_json::Value>,
 }
 
@@ -67,22 +68,60 @@ impl std::fmt::Display for ActionError {
 
 impl std::error::Error for ActionError {}
 
+type ScreenCapture = fn(
+    &crate::vision::capture::CaptureOptions,
+) -> Result<crate::vision::capture::CapturedImage, String>;
+
+pub(crate) type DesktopNotification = dyn Fn(&str, &str) -> Result<(), String> + Send + Sync;
+
+/// Services used by built-in tool handlers. Request ownership remains in ActionContext.
+pub(crate) struct ActionServices {
+    pub(crate) state: Option<Arc<crate::ai::context::AIOrchestrator>>,
+    pub(crate) vision: crate::vision::watcher::VisionWatcher,
+    pub(crate) capture_screen: ScreenCapture,
+    pub(crate) imagegen: Option<crate::imagegen::ImageGenService>,
+    pub(crate) window_size: Option<crate::imagegen::WindowSizeState>,
+    pub(crate) live2d: Arc<crate::live2d::Live2dStore>,
+    pub(crate) events: crate::chat::events::ChatEvents,
+    pub(crate) notification: Option<Arc<DesktopNotification>>,
+}
+
 /// Context passed to action handlers at execution time.
+#[derive(Clone)]
 pub struct ActionContext {
-    pub app: AppHandle,
+    pub(crate) memory_scope: Option<Arc<crate::chat::ownership::MemoryWriteScope>>,
+    pub cue_names: Option<Arc<HashSet<String>>>,
+    pub request_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub(crate) services: Arc<ActionServices>,
     pub character_id: String,
     pub conversation_id: Option<String>,
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Final dispatch boundary shared by direct, normal-chat and approved tools.
+/// Owner revocation is independent of the optional memory feature.
+pub(crate) async fn dispatch_handler(
+    handler: &dyn ActionHandler,
+    args: HashMap<String, String>,
+    ctx: ActionContext,
+) -> Result<ActionResult, ActionError> {
+    if let Some(scope) = &ctx.memory_scope {
+        scope
+            .ensure_owner_current()
+            .map_err(|error| ActionError(error.to_string()))?;
+    }
+    handler.execute(args, ctx).await
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionSource {
     Builtin,
     Mcp,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionRiskTag {
     Read,
@@ -91,7 +130,7 @@ pub enum ActionRiskTag {
     Sensitive,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionPermissionLevel {
     Safe,
@@ -99,12 +138,13 @@ pub enum ActionPermissionLevel {
 }
 
 /// Metadata for a registered action (returned to frontend / LLM prompt).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ActionInfo {
     pub id: String,
     pub name: String,
     pub source: ActionSource,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub server_name: Option<String>,
     pub description: String,
     pub parameters: Vec<ActionParam>,
@@ -376,7 +416,7 @@ impl ActionRegistry {
         ctx: ActionContext,
     ) -> Result<ActionResult, ActionError> {
         let entry = self.resolve_entry(name_or_id)?;
-        entry.handler.execute(args, ctx).await
+        dispatch_handler(entry.handler.as_ref(), args, ctx).await
     }
 
     /// Check if a named action needs its result fed back to the LLM.
@@ -521,26 +561,30 @@ impl ActionRegistry {
         vision_enabled: bool,
         tool_settings: &ToolSettings,
     ) -> Vec<LlmToolDefinition> {
-        self.list_actions_for_prompt_with_settings_and_availability(
+        Self::tool_definitions(self.list_actions_for_prompt_with_settings_and_availability(
             memory_enabled,
             vision_enabled,
             tool_settings,
-        )
-        .into_iter()
-        .map(|action| LlmToolDefinition {
-            name: action.id,
-            description: action.description,
-            parameters: action
-                .parameters
-                .into_iter()
-                .map(|param| LlmToolParam {
-                    name: param.name,
-                    description: param.description,
-                    required: param.required,
-                })
-                .collect(),
-        })
-        .collect()
+        ))
+    }
+
+    pub(crate) fn tool_definitions(actions: Vec<ActionInfo>) -> Vec<LlmToolDefinition> {
+        actions
+            .into_iter()
+            .map(|action| LlmToolDefinition {
+                name: action.id,
+                description: action.description,
+                parameters: action
+                    .parameters
+                    .into_iter()
+                    .map(|param| LlmToolParam {
+                        name: param.name,
+                        description: param.description,
+                        required: param.required,
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Generate the prompt instruction block describing available tools.
@@ -587,7 +631,7 @@ impl ActionRegistry {
         }
     }
 
-    fn generate_tool_prompt_from_actions(&self, actions: Vec<ActionInfo>) -> String {
+    pub(crate) fn generate_tool_prompt_from_actions(&self, actions: Vec<ActionInfo>) -> String {
         if actions.is_empty() {
             return String::new();
         }

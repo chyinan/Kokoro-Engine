@@ -56,7 +56,9 @@ pub fn setup_test_server() -> (VisionServer, TempDir) {
 pub async fn start_test_server() -> (VisionServer, TempDir) {
     let tmp = TempDir::new().expect("failed to create temp dir");
     let mut server = VisionServer::new(tmp.path());
-    server.start().await;
+    let life = crate::lifecycle::AppLifecycle::new();
+    let scope = life.scope(crate::lifecycle::TaskStage::Service, "vision-http");
+    server.start(&scope).unwrap();
     (server, tmp)
 }
 

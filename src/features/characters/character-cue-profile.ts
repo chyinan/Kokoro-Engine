@@ -31,8 +31,9 @@ export function parseCharacterCueProfile(value: unknown): AppliedCharacterCuePro
     const motionGroup = optionalString(binding, "motion_group");
     if (expression === null && motionGroup === null) continue;
     cueMap[name] = {
-      ...(expression === null ? {} : { expression }),
-      ...(motionGroup === null ? {} : { motion_group: motionGroup }),
+      expression,
+      motion_group: motionGroup,
+      exclude_from_prompt: false,
     };
   }
   const defaultCue = typeof root.default === "string"

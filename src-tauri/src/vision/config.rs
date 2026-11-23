@@ -22,7 +22,7 @@ fn default_vlm_model(provider: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct NormalizedRect {
     pub x: f64,
     pub y: f64,
@@ -47,7 +47,7 @@ impl NormalizedRect {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct VisionConfig {
     /// Master screen/VLM capability gate.
     pub vlm_enabled: bool,
@@ -73,10 +73,12 @@ pub struct VisionConfig {
     /// Provider type: "ollama", "openai", "anthropic", "llama_cpp", or "llm" (use active LLM)
     pub vlm_provider: String,
     /// Base URL for the VLM API (e.g. "http://localhost:11434/v1")
+    #[serde(default)]
     pub vlm_base_url: Option<String>,
     /// Model name (e.g. "minicpm-v", "moondream2", "gpt-4o")
     pub vlm_model: String,
     /// API key (only needed for online services)
+    #[serde(default)]
     pub vlm_api_key: Option<String>,
 
     // ── Camera (Webcam) ───────────────────────────────

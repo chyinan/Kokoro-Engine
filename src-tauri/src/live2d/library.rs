@@ -1,0 +1,720 @@
+use super::{
+    ensure_profile_for_model, load_saved_model_profile, normalize_relative_model_path,
+    save_model_profile, Live2dStore,
+};
+use crate::error::KokoroError;
+use serde::Serialize;
+use std::fs;
+use std::io;
+use std::io::Write;
+use std::path::PathBuf;
+use zip::write::SimpleFileOptions;
+
+#[derive(Debug, Serialize, specta::Type)]
+pub struct Live2dModelInfo {
+    /// Human-friendly name (top-level folder name)
+    pub name: String,
+    /// Relative path to the .model3.json (used for protocol URL)
+    pub path: String,
+}
+
+impl Live2dStore {
+    /// Extract a Live2D character zip package and return the path to the .model3.json file.
+    ///
+    /// Official Live2D packages have a structure like:
+    /// ```text
+    /// character_name/
+    /// ├── runtime/
+    /// │   ├── *.model3.json   ← entry point we need
+    /// │   ├── *.moc3
+    /// │   ├── *.physics3.json
+    /// │   ├── textures/
+    /// │   └── motion/
+    /// └── (editor files, ReadMe, etc.)
+    /// ```
+    ///
+    /// We extract the full zip into `{app_data_dir}/live2d_models/` and then
+    /// locate the `.model3.json` inside.
+    pub(crate) fn import_zip(&self, zip_path: String) -> Result<String, KokoroError> {
+        let archive_path = std::path::Path::new(&zip_path);
+        if !archive_path.exists() {
+            return Err(KokoroError::NotFound("Zip file does not exist".to_string()));
+        }
+
+        let models_dir = self.models_dir();
+        fs::create_dir_all(&models_dir)
+            .map_err(|e| KokoroError::Internal(format!("Failed to create models dir: {}", e)))?;
+        let import_tmp_dir = self.app_data.join(format!(
+            "live2d_import_tmp_{}",
+            chrono::Utc::now().timestamp_millis()
+        ));
+        if import_tmp_dir.exists() {
+            if import_tmp_dir.is_dir() {
+                fs::remove_dir_all(&import_tmp_dir).map_err(|e| {
+                    KokoroError::Internal(format!("Failed to clear temp import dir: {}", e))
+                })?;
+            } else {
+                fs::remove_file(&import_tmp_dir).map_err(|e| {
+                    KokoroError::Internal(format!("Failed to clear temp import file: {}", e))
+                })?;
+            }
+        }
+        fs::create_dir_all(&import_tmp_dir).map_err(|e| {
+            KokoroError::Internal(format!("Failed to create temp import dir: {}", e))
+        })?;
+
+        let file = fs::File::open(archive_path).map_err(KokoroError::from)?;
+        let mut archive = zip::ZipArchive::new(file).map_err(KokoroError::from)?;
+
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(KokoroError::from)?;
+            let outpath = match entry.enclosed_name() {
+                Some(path) => import_tmp_dir.join(path),
+                None => continue,
+            };
+            if entry.name().ends_with('/') {
+                fs::create_dir_all(&outpath).map_err(KokoroError::from)?;
+            } else {
+                if let Some(parent) = outpath.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent).map_err(KokoroError::from)?;
+                    }
+                }
+                let mut outfile = fs::File::create(&outpath).map_err(KokoroError::from)?;
+                io::copy(&mut entry, &mut outfile).map_err(KokoroError::from)?;
+            }
+        }
+
+        let result = (|| -> Result<String, KokoroError> {
+            let model_json = find_model3_json(&import_tmp_dir).ok_or_else(|| {
+                KokoroError::NotFound("No .model3.json file found in the zip archive".to_string())
+            })?;
+            let model_root = find_model_root(&model_json).ok_or_else(|| {
+                KokoroError::NotFound(
+                    "Cannot find model root directory (no .moc3 file found near .model3.json)"
+                        .to_string(),
+                )
+            })?;
+
+            let folder_name = if model_root == import_tmp_dir {
+                model_folder_name_from_model_json(&model_json).map_err(KokoroError::Validation)?
+            } else {
+                model_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| {
+                        KokoroError::Validation("Invalid model folder name".to_string())
+                    })?
+                    .to_string()
+            };
+            let target_dir = models_dir.join(&folder_name);
+
+            if target_dir.exists() {
+                if target_dir.is_dir() {
+                    fs::remove_dir_all(&target_dir).map_err(|e| {
+                        KokoroError::Internal(format!(
+                            "Failed to remove existing model folder: {}",
+                            e
+                        ))
+                    })?;
+                } else {
+                    fs::remove_file(&target_dir).map_err(|e| {
+                        KokoroError::Internal(format!(
+                            "Failed to remove existing model file: {}",
+                            e
+                        ))
+                    })?;
+                }
+            }
+
+            fs::rename(&model_root, &target_dir).map_err(|e| {
+                KokoroError::Internal(format!(
+                    "Failed to move extracted model folder into place: {}",
+                    e
+                ))
+            })?;
+
+            let copied_model_json = find_model3_json(&target_dir).ok_or_else(|| {
+                KokoroError::NotFound(
+                    "Copied model folder does not contain a .model3.json file".to_string(),
+                )
+            })?;
+            let relative = copied_model_json.strip_prefix(&models_dir).map_err(|e| {
+                KokoroError::Internal(format!("Failed to compute relative path: {}", e))
+            })?;
+            let relative_str = relative.to_string_lossy().replace('\\', "/");
+
+            ensure_profile_for_model(&models_dir, &relative_str).map_err(KokoroError::Internal)?;
+            Ok(relative_str)
+        })();
+
+        let _ = fs::remove_dir_all(&import_tmp_dir);
+        result
+    }
+
+    /// List all imported Live2D models found under `{app_data_dir}/live2d_models/`.
+    ///
+    /// Each top-level subdirectory is treated as a separate model. We search for a
+    /// `.model3.json` file inside each subdirectory.
+    pub(crate) fn list_models(&self) -> Result<Vec<Live2dModelInfo>, KokoroError> {
+        let models_dir = self.models_dir();
+
+        if !models_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = fs::read_dir(&models_dir)
+            .map_err(|e| KokoroError::Internal(format!("Failed to read models dir: {}", e)))?;
+
+        let mut models = Vec::new();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            // Search for .model3.json inside this model folder
+            if let Some(model_json) = find_model3_json(&path) {
+                if let Ok(relative) = model_json.strip_prefix(&models_dir) {
+                    let relative_str = relative.to_string_lossy().replace('\\', "/");
+                    models.push(Live2dModelInfo {
+                        name: folder_name,
+                        path: relative_str,
+                    });
+                }
+            }
+        }
+
+        // Sort by name for consistent ordering
+        models.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(models)
+    }
+
+    /// Delete an imported Live2D model by its folder name.
+    pub(crate) fn delete_model(&self, model_name: String) -> Result<(), KokoroError> {
+        let model_path = resolve_owned_model_for_deletion(&self.app_data, &model_name)?;
+
+        if model_path.is_dir() {
+            fs::remove_dir_all(&model_path).map_err(|e| {
+                KokoroError::Internal(format!("Failed to delete model '{}': {}", model_name, e))
+            })?;
+        } else {
+            fs::remove_file(&model_path).map_err(|e| {
+                KokoroError::Internal(format!("Failed to delete model '{}': {}", model_name, e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn rename_model(
+        &self,
+        model_path: String,
+        new_name: String,
+    ) -> Result<String, String> {
+        let models_dir = self.models_dir();
+        let normalized = normalize_relative_model_path(&model_path)?;
+        let old_root = normalized
+            .split('/')
+            .next()
+            .filter(|segment| !segment.is_empty())
+            .ok_or_else(|| "Invalid model path".to_string())?;
+        let new_root = normalize_model_folder_name(&new_name)?;
+
+        if old_root == new_root {
+            return Ok(normalized);
+        }
+
+        let old_path = models_dir.join(old_root);
+        if !old_path.exists() {
+            return Err(format!("Model '{}' not found", old_root));
+        }
+
+        let new_path = models_dir.join(&new_root);
+        if new_path.exists() {
+            return Err(format!("A model named '{}' already exists", new_root));
+        }
+
+        fs::rename(&old_path, &new_path)
+            .map_err(|e| format!("Failed to rename model folder: {}", e))?;
+
+        let rest = normalized
+            .strip_prefix(old_root)
+            .unwrap_or("")
+            .trim_start_matches('/');
+        let new_model_path = if rest.is_empty() {
+            new_root.clone()
+        } else {
+            format!("{}/{}", new_root, rest)
+        };
+
+        if let Ok(Some(mut saved_profile)) = load_saved_model_profile(&models_dir, &new_model_path)
+        {
+            saved_profile.model_path = new_model_path.clone();
+            save_model_profile(&models_dir, &saved_profile)?;
+        }
+
+        if let Some(active_path) = self.load_active_model_path() {
+            let normalized_active = normalize_relative_model_path(&active_path)?;
+            if normalized_active == normalized
+                || normalized_active.starts_with(&format!("{}/", old_root))
+            {
+                let active_rest = normalized_active
+                    .strip_prefix(old_root)
+                    .unwrap_or("")
+                    .trim_start_matches('/');
+                let next_active = if active_rest.is_empty() {
+                    new_root.clone()
+                } else {
+                    format!("{}/{}", new_root, active_rest)
+                };
+                self.set_active_model(Some(&next_active))?;
+            }
+        }
+
+        Ok(new_model_path)
+    }
+
+    /// Import a Live2D model from an extracted folder (by its .model3.json path).
+    ///
+    /// Finds the model root directory (the folder containing .moc3), copies the
+    /// entire folder into `{app_data_dir}/live2d_models/{folder_name}/`, and
+    /// returns the relative path to the .model3.json (same format as zip import).
+    pub(crate) fn import_folder(&self, model_json_path: String) -> Result<String, KokoroError> {
+        let json_path = std::path::Path::new(&model_json_path);
+        if !json_path.exists() {
+            return Err(KokoroError::NotFound(
+                "model3.json file does not exist".to_string(),
+            ));
+        }
+
+        // Walk up from the .model3.json to find the model root (directory containing a .moc3 file)
+        let model_root = find_model_root(json_path).ok_or_else(|| {
+            KokoroError::NotFound(
+                "Cannot find model root directory (no .moc3 file found in parent directories)"
+                    .to_string(),
+            )
+        })?;
+
+        let folder_name =
+            model_folder_name_from_model_json(json_path).map_err(KokoroError::Validation)?;
+
+        // Determine target directory
+        let models_dir = self.models_dir();
+        let target_dir = models_dir.join(&folder_name);
+
+        // If target already exists, remove it first (re-import scenario)
+        if target_dir.exists() {
+            if target_dir.is_dir() {
+                fs::remove_dir_all(&target_dir).map_err(|e| {
+                    KokoroError::Internal(format!("Failed to remove existing model folder: {}", e))
+                })?;
+            } else {
+                fs::remove_file(&target_dir).map_err(|e| {
+                    KokoroError::Internal(format!("Failed to remove existing model file: {}", e))
+                })?;
+            }
+        }
+
+        // Copy the entire model folder
+        copy_dir_recursive(&model_root, &target_dir)
+            .map_err(|e| KokoroError::Internal(format!("Failed to copy model folder: {}", e)))?;
+
+        // Validate the copy by finding .model3.json in the target
+        let model_json = find_model3_json(&target_dir).ok_or_else(|| {
+            KokoroError::NotFound("Copied folder does not contain a .model3.json file".to_string())
+        })?;
+
+        let relative = model_json.strip_prefix(&models_dir).map_err(|e| {
+            KokoroError::Internal(format!("Failed to compute relative path: {}", e))
+        })?;
+
+        let relative_str = relative.to_string_lossy().replace('\\', "/");
+
+        ensure_profile_for_model(&models_dir, &relative_str).map_err(KokoroError::Internal)?;
+
+        Ok(relative_str)
+    }
+
+    pub(crate) fn export_model(
+        &self,
+        model_path: String,
+        export_path: String,
+    ) -> Result<String, String> {
+        let models_dir = self.models_dir();
+        let normalized = normalize_relative_model_path(&model_path)?;
+        let root = normalized
+            .split('/')
+            .next()
+            .filter(|segment| !segment.is_empty())
+            .ok_or_else(|| "Invalid model path".to_string())?;
+        let model_dir = models_dir.join(root);
+
+        if !model_dir.exists() || !model_dir.is_dir() {
+            return Err(format!("Model '{}' not found", root));
+        }
+
+        let out_path = PathBuf::from(&export_path);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create export directory '{}': {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+
+        let file = fs::File::create(&out_path).map_err(|e| {
+            format!(
+                "Failed to create export file '{}': {}",
+                out_path.display(),
+                e
+            )
+        })?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+        let export_root = model_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve model export root".to_string())?;
+        add_dir_to_zip(&mut zip, export_root, &model_dir, options)?;
+
+        zip.finish()
+            .map_err(|e| format!("Failed to finish ZIP export: {}", e))?;
+
+        Ok(export_path)
+    }
+}
+
+fn model_folder_name_from_model_json(model_json: &std::path::Path) -> Result<String, String> {
+    let stem = model_json
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "Invalid model file name".to_string())?;
+    Ok(stem.strip_suffix(".model3").unwrap_or(stem).to_string())
+}
+
+fn normalize_model_folder_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Model name cannot be empty".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("Invalid model name".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("Model name cannot contain path separators".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn resolve_owned_model_for_deletion(
+    app_data_dir: &std::path::Path,
+    model_name: &str,
+) -> Result<PathBuf, KokoroError> {
+    let normalized = normalize_model_folder_name(model_name).map_err(KokoroError::Validation)?;
+    let canonical_app_data = app_data_dir.canonicalize().map_err(|error| {
+        KokoroError::Internal(format!("Failed to resolve app data directory: {}", error))
+    })?;
+    let expected_root = canonical_app_data.join("live2d_models");
+    let root_metadata = fs::symlink_metadata(&expected_root).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            KokoroError::NotFound(format!("Model '{}' not found", model_name))
+        } else {
+            KokoroError::Internal(format!("Failed to inspect Live2D model root: {}", error))
+        }
+    })?;
+    if is_symlink_or_reparse_point(&root_metadata) || !root_metadata.is_dir() {
+        return Err(KokoroError::Validation(
+            "Live2D model root must be a direct non-redirected app-data directory".to_string(),
+        ));
+    }
+    let canonical_root = expected_root.canonicalize().map_err(|error| {
+        KokoroError::Internal(format!("Failed to resolve Live2D model root: {}", error))
+    })?;
+    if canonical_root != expected_root {
+        return Err(KokoroError::Validation(
+            "Live2D model root resolves outside its direct app-data location".to_string(),
+        ));
+    }
+    let expected_path = canonical_root.join(&normalized);
+    let model_metadata = fs::symlink_metadata(&expected_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            KokoroError::NotFound(format!("Model '{}' not found", model_name))
+        } else {
+            KokoroError::Internal(format!(
+                "Failed to inspect Live2D model '{}': {}",
+                model_name, error
+            ))
+        }
+    })?;
+    if is_symlink_or_reparse_point(&model_metadata) {
+        return Err(KokoroError::Validation("Invalid model name".to_string()));
+    }
+    let canonical_model = expected_path.canonicalize().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            KokoroError::NotFound(format!("Model '{}' not found", model_name))
+        } else {
+            KokoroError::Internal(format!(
+                "Failed to resolve Live2D model '{}': {}",
+                model_name, error
+            ))
+        }
+    })?;
+
+    let is_direct_child = canonical_model.parent() == Some(canonical_root.as_path());
+    if !is_direct_child || canonical_model != expected_path {
+        return Err(KokoroError::Validation("Invalid model name".to_string()));
+    }
+
+    Ok(canonical_model)
+}
+
+#[cfg(not(windows))]
+fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Walk up from a .model3.json file to find the model root directory.
+/// The root is the directory (or an ancestor) that contains a .moc3 file.
+fn find_model_root(model_json: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = model_json.parent()?;
+    loop {
+        if dir_contains_moc3(dir) {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Check if a directory directly contains a .moc3 file.
+fn dir_contains_moc3(dir: &std::path::Path) -> bool {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".moc3") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Recursively copy a directory and all its contents.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<fs::File>,
+    base_dir: &std::path::Path,
+    current_dir: &std::path::Path,
+    options: SimpleFileOptions,
+) -> Result<(), String> {
+    let entries = fs::read_dir(current_dir).map_err(|e| {
+        format!(
+            "Failed to read directory '{}': {}",
+            current_dir.display(),
+            e
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(base_dir)
+            .map_err(|e| format!("Failed to compute ZIP entry path: {}", e))?;
+        let name = relative.to_string_lossy().replace('\\', "/");
+
+        if path.is_dir() {
+            let dir_name = format!("{}/", name);
+            zip.add_directory(&dir_name, options)
+                .map_err(|e| format!("Failed to add directory '{}' to ZIP: {}", dir_name, e))?;
+            add_dir_to_zip(zip, base_dir, &path, options)?;
+        } else {
+            zip.start_file(&name, options)
+                .map_err(|e| format!("Failed to add file '{}' to ZIP: {}", name, e))?;
+            let bytes = fs::read(&path)
+                .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
+            zip.write_all(&bytes)
+                .map_err(|e| format!("Failed to write file '{}' to ZIP: {}", name, e))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn find_model3_json(dir: &std::path::Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    let mut dirs = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".model3.json") {
+                    return Some(path);
+                }
+            }
+        } else if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+
+    // Recurse into subdirectories
+    for sub in dirs {
+        if let Some(found) = find_model3_json(&sub) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deletion_resolves_only_a_direct_owned_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let models_dir = temp.path().join("live2d_models");
+        let model_dir = models_dir.join("pico");
+        fs::create_dir_all(&model_dir).expect("model dir");
+
+        let resolved = resolve_owned_model_for_deletion(temp.path(), "pico")
+            .expect("direct model should resolve");
+
+        assert_eq!(resolved, model_dir.canonicalize().expect("canonical model"));
+    }
+
+    #[test]
+    fn deletion_reports_a_missing_model_without_falling_outside_the_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let models_dir = temp.path().join("live2d_models");
+        fs::create_dir_all(&models_dir).expect("models dir");
+
+        let error = resolve_owned_model_for_deletion(temp.path(), "missing")
+            .expect_err("missing model should fail");
+
+        assert!(matches!(error, KokoroError::NotFound(_)));
+    }
+
+    #[test]
+    fn deletion_rejects_traversal_and_sibling_prefix_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let models_dir = temp.path().join("live2d_models");
+        let sibling = temp.path().join("live2d_models_backup");
+        fs::create_dir_all(&models_dir).expect("models dir");
+        fs::create_dir_all(&sibling).expect("sibling dir");
+
+        for candidate in [
+            "..",
+            "../live2d_models_backup",
+            "pico/../../live2d_models_backup",
+        ] {
+            let error = resolve_owned_model_for_deletion(temp.path(), candidate)
+                .expect_err("traversal should fail");
+            assert!(matches!(error, KokoroError::Validation(_)));
+        }
+        assert!(sibling.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_rejects_a_symlink_to_an_outside_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let models_dir = temp.path().join("live2d_models");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&models_dir).expect("models dir");
+        fs::create_dir_all(&outside).expect("outside dir");
+        symlink(&outside, models_dir.join("escape")).expect("symlink");
+
+        let error = resolve_owned_model_for_deletion(temp.path(), "escape")
+            .expect_err("outside symlink should fail");
+        assert!(matches!(error, KokoroError::Validation(_)));
+        assert!(outside.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_rejects_a_redirected_models_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(outside.join("victim")).expect("outside model");
+        symlink(&outside, temp.path().join("live2d_models")).expect("root symlink");
+
+        let error = resolve_owned_model_for_deletion(temp.path(), "victim")
+            .expect_err("redirected model root should fail");
+
+        assert!(matches!(error, KokoroError::Validation(_)));
+        assert!(outside.join("victim").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deletion_rejects_a_redirected_models_root_junction() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let outside = temp.path().join("outside");
+        let models_dir = temp.path().join("live2d_models");
+        fs::create_dir_all(outside.join("victim")).expect("outside model");
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&models_dir)
+            .arg(&outside)
+            .output()
+            .expect("create junction");
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error = resolve_owned_model_for_deletion(temp.path(), "victim")
+            .expect_err("redirected model root should fail");
+
+        assert!(matches!(error, KokoroError::Validation(_)));
+        assert!(outside.join("victim").exists());
+        fs::remove_dir(&models_dir).expect("remove junction without touching target");
+    }
+}

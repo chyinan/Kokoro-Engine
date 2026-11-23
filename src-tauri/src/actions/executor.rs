@@ -3,7 +3,9 @@
 use crate::actions::permission::{
     evaluate_permission_decision, risk_tag_label, PermissionDecision,
 };
-use crate::actions::registry::{ActionContext, ActionInfo, ActionRegistry, ActionResult};
+use crate::actions::registry::{
+    ActionContext, ActionError, ActionInfo, ActionRegistry, ActionResult, ActionRiskTag,
+};
 use crate::actions::tool_settings::ToolSettings;
 use crate::hooks::types::HookModifyPolicy;
 use crate::hooks::{
@@ -11,7 +13,6 @@ use crate::hooks::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::Manager;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,20 @@ pub struct ToolInvocation {
     pub tool_call_id: Option<String>,
     pub name: String,
     pub args: HashMap<String, String>,
+}
+
+pub(crate) fn build_tool_invocation_from_input(
+    registry: &ActionRegistry,
+    input: &str,
+    args: HashMap<String, String>,
+    tool_call_id: Option<String>,
+) -> Result<ToolInvocation, crate::actions::registry::ActionError> {
+    let action_id = registry.resolve_action_id_for_input(input)?;
+    Ok(ToolInvocation {
+        tool_call_id,
+        name: action_id,
+        args,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -952,8 +967,7 @@ mod tests {
             _event: &HookEvent,
             _payload: &HookPayload,
         ) -> Result<HookOutcome, String> {
-            self.called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(HookOutcome::Continue)
         }
     }
@@ -1263,17 +1277,31 @@ pub(crate) async fn emit_after_action_invoke_with_protection(
     }
 }
 
-pub async fn execute_tool_calls_with_cancellation(
-    app: &tauri::AppHandle,
+pub(crate) struct ToolExecutionScope<'a> {
+    pub external_turn: Option<&'a crate::chat::persistence::ExternalTurn>,
+    pub memory_scope: Option<&'a Arc<crate::chat::ownership::MemoryWriteScope>>,
+    pub cue_names: Option<&'a Arc<std::collections::HashSet<String>>>,
+    pub request_id: &'a str,
+    pub turn_id: &'a str,
+    pub character_id: &'a str,
+    pub conversation_id: Option<&'a str>,
+    pub source: &'a str,
+    pub hooks: Option<&'a HookRuntime>,
+    pub allowed_tool_ids: Option<&'a std::collections::HashSet<String>>,
+}
+
+pub(crate) async fn execute_tool_calls_with_cancellation(
+    services: Arc<super::registry::ActionServices>,
     registry_state: &Arc<RwLock<ActionRegistry>>,
     tool_settings_state: &Arc<RwLock<ToolSettings>>,
-    character_id: &str,
+    scope: &ToolExecutionScope<'_>,
     tool_calls: &[ToolInvocation],
     mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
     tool_timeout: Option<std::time::Duration>,
 ) -> Result<Vec<ToolExecutionOutcome>, ToolCancellationError> {
     let mut outcomes = Vec::with_capacity(tool_calls.len());
-    let hook_runtime = app.try_state::<HookRuntime>();
+    let hook_runtime = scope.hooks;
+    let conversation_id = || scope.conversation_id.map(str::to_owned);
 
     for tool_call in tool_calls {
         if let Some(rx) = cancel_rx.as_ref() {
@@ -1295,9 +1323,9 @@ pub async fn execute_tool_calls_with_cancellation(
                             hooks.emit_action_gate(
                                 &HookEvent::BeforeActionInvoke,
                                 &build_action_hook_payload(
-                                    None,
-                                    character_id,
-                                    Some("chat".to_string()),
+                                    conversation_id(),
+                                    scope.character_id,
+                                    Some(scope.source.to_owned()),
                                     tool_call,
                                     None,
                                     None,
@@ -1312,9 +1340,9 @@ pub async fn execute_tool_calls_with_cancellation(
                             .emit_action_gate(
                                 &HookEvent::BeforeActionInvoke,
                                 &build_action_hook_payload(
-                                    None,
-                                    character_id,
-                                    Some("chat".to_string()),
+                                    conversation_id(),
+                                    scope.character_id,
+                                    Some(scope.source.to_owned()),
                                     tool_call,
                                     None,
                                     None,
@@ -1337,7 +1365,8 @@ pub async fn execute_tool_calls_with_cancellation(
         };
 
         let gated = continue_unless_denied(gate, || ());
-        let (action, needs_feedback, permission_decision, result, registry_generation) = match gated {
+        let (action, needs_feedback, permission_decision, result, registry_generation) = match gated
+        {
             Err(error) => {
                 let generation = registry_state.read().await.generation();
                 (None, true, None, Err(error), generation)
@@ -1346,7 +1375,10 @@ pub async fn execute_tool_calls_with_cancellation(
                 let resolved = {
                     let registry = registry_state.read().await;
                     let generation = registry.generation();
-                    (generation, registry.resolve_action_for_execution(&tool_call.name))
+                    (
+                        generation,
+                        registry.resolve_action_for_execution(&tool_call.name),
+                    )
                 };
                 let (registry_generation, resolved) = resolved;
                 let needs_feedback = resolved
@@ -1362,7 +1394,15 @@ pub async fn execute_tool_calls_with_cancellation(
                             tool_settings.is_enabled(&action.id)
                         };
 
-                        if !enabled {
+                        if scope
+                            .allowed_tool_ids
+                            .is_some_and(|ids| !ids.contains(&action.id))
+                        {
+                            (
+                                None,
+                                Err(format!("Tool '{}' is unavailable in this chat", action.id)),
+                            )
+                        } else if !enabled {
                             (None, Err(format!("Tool '{}' is disabled", action.id)))
                         } else {
                             let permission_decision = {
@@ -1372,13 +1412,14 @@ pub async fn execute_tool_calls_with_cancellation(
                             match permission_decision.clone() {
                                 PermissionDecision::Allow => {
                                     let mut args_payload = build_before_action_args_payload(
-                                        None,
-                                        character_id,
-                                        Some("chat".to_string()),
+                                        conversation_id(),
+                                        scope.character_id,
+                                        Some(scope.source.to_owned()),
                                         tool_call,
                                         action,
                                     );
-                                    let modify_outcome = if let Some(hooks) = hook_runtime.as_ref() {
+                                    let modify_outcome = if let Some(hooks) = hook_runtime.as_ref()
+                                    {
                                         tokio::select! {
                                             biased;
                                             _ = wait_for_cancel_event(&mut cancel_rx) => {
@@ -1414,40 +1455,68 @@ pub async fn execute_tool_calls_with_cancellation(
                                             let effective_args =
                                                 apply_before_action_args_payload(args_payload);
                                             let ctx = ActionContext {
-                                                app: app.clone(),
-                                                character_id: character_id.to_string(),
-                                                conversation_id: None,
-                                                source: Some("chat".to_string()),
+                                                memory_scope: scope.memory_scope.cloned(),
+                                                cue_names: scope.cue_names.cloned(),
+                                                request_id: Some(scope.request_id.to_owned()),
+                                                turn_id: Some(scope.turn_id.to_owned()),
+                                                services: services.clone(),
+                                                character_id: scope.character_id.to_owned(),
+                                                conversation_id: conversation_id(),
+                                                source: Some(scope.source.to_owned()),
                                             };
-                                            let exec_res = tokio::select! {
-                                                biased;
-                                                _ = wait_for_cancel_event(&mut cancel_rx) => {
-                                                    return Err(ToolCancellationError);
-                                                }
-                                                res = async {
-                                                    if let Some(timeout) = tool_timeout {
-                                                        tokio::time::timeout(timeout, handler.execute(effective_args, ctx))
-                                                            .await
-                                                            .map_err(|_| {
-                                                                format!(
-                                                                    "Tool '{}' execution timed out after {}s",
-                                                                    tool_call.name,
-                                                                    timeout.as_secs()
-                                                                )
-                                                            })
-                                                    } else {
-                                                        Ok(handler.execute(effective_args, ctx).await)
+                                            let record = if let Some(turn) =
+                                                scope.external_turn.filter(|_| {
+                                                    action.risk_tags.iter().any(|tag| {
+                                                        matches!(
+                                                            tag,
+                                                            ActionRiskTag::Write
+                                                                | ActionRiskTag::External
+                                                        )
+                                                    })
+                                                }) {
+                                                turn.mark_tool_dispatch().await
+                                            } else {
+                                                Ok(())
+                                            };
+                                            let exec_res = if let Err(error) = record {
+                                                Ok(Err(ActionError(error)))
+                                            } else {
+                                                tokio::select! {
+                                                    biased;
+                                                    _ = wait_for_cancel_event(&mut cancel_rx) => {
+                                                        return Err(ToolCancellationError);
                                                     }
-                                                } => res,
+                                                    res = async {
+                                                        if let Some(timeout) = tool_timeout {
+                                                            tokio::time::timeout(timeout, crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx))
+                                                                .await
+                                                                .map_err(|_| {
+                                                                    format!(
+                                                                        "Tool '{}' execution timed out after {}s",
+                                                                        tool_call.name,
+                                                                        timeout.as_secs()
+                                                                    )
+                                                                })
+                                                        } else {
+                                                            Ok(crate::actions::registry::dispatch_handler(handler.as_ref(), effective_args, ctx).await)
+                                                        }
+                                                    } => res,
+                                                }
                                             };
                                             match exec_res {
                                                 Ok(Ok(res)) => (Some(permission_decision), Ok(res)),
-                                                Ok(Err(err)) => (Some(permission_decision), Err(err.0)),
-                                                Err(timeout_err) => (Some(permission_decision), Err(timeout_err)),
+                                                Ok(Err(err)) => {
+                                                    (Some(permission_decision), Err(err.0))
+                                                }
+                                                Err(timeout_err) => {
+                                                    (Some(permission_decision), Err(timeout_err))
+                                                }
                                             }
                                         }
                                         Ok(Err(error)) => (Some(permission_decision), Err(error)),
-                                        Err(timeout_err) => (Some(permission_decision), Err(timeout_err)),
+                                        Err(timeout_err) => {
+                                            (Some(permission_decision), Err(timeout_err))
+                                        }
                                     }
                                 }
                                 PermissionDecision::DenyPolicy { reason }
@@ -1461,7 +1530,13 @@ pub async fn execute_tool_calls_with_cancellation(
                     Err(error) => (None, Err(error.0.clone())),
                 };
 
-                (action, needs_feedback, permission_decision, result, registry_generation)
+                (
+                    action,
+                    needs_feedback,
+                    permission_decision,
+                    result,
+                    registry_generation,
+                )
             }
         };
 
@@ -1477,9 +1552,9 @@ pub async fn execute_tool_calls_with_cancellation(
                 Err(error) => Some(error.clone()),
             };
             let payload = build_action_hook_payload(
-                None,
-                character_id,
-                Some("chat".to_string()),
+                conversation_id(),
+                scope.character_id,
+                Some(scope.source.to_owned()),
                 tool_call,
                 action.as_ref(),
                 Some(action_result_is_success(&result)),
@@ -1506,24 +1581,4 @@ pub async fn execute_tool_calls_with_cancellation(
     }
 
     Ok(outcomes)
-}
-
-pub async fn execute_tool_calls(
-    app: &tauri::AppHandle,
-    registry_state: &Arc<RwLock<ActionRegistry>>,
-    tool_settings_state: &Arc<RwLock<ToolSettings>>,
-    character_id: &str,
-    tool_calls: &[ToolInvocation],
-) -> Vec<ToolExecutionOutcome> {
-    execute_tool_calls_with_cancellation(
-        app,
-        registry_state,
-        tool_settings_state,
-        character_id,
-        tool_calls,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_default()
 }

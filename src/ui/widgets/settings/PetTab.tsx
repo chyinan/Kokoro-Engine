@@ -1,19 +1,6 @@
+import { commands, events, type PetConfig } from "@/lib/generated/ipc";
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
-
-interface PetConfig {
-    enabled: boolean;
-    position_x: number;
-    position_y: number;
-    shortcut: string;
-    model_url: string | null;
-    window_width: number;
-    window_height: number;
-    model_scale: number;
-    render_fps?: number;
-}
 
 const isMac = navigator.platform.toUpperCase().includes("MAC");
 
@@ -62,7 +49,7 @@ export default function PetTab() {
 
     const persistConfig = useCallback(async (nextConfig: PetConfig, showSavedState = false) => {
         setConfig(nextConfig);
-        await invoke("save_pet_config", { config: nextConfig }).catch(console.error);
+        await commands.savePetConfig(nextConfig).catch(console.error);
 
         if (showSavedState) {
             setSaved(true);
@@ -107,14 +94,14 @@ export default function PetTab() {
     }, [config, persistConfig, t]);
 
     useEffect(() => {
-        invoke<PetConfig>("get_pet_config").then(setConfig).catch(console.error);
+        commands.getPetConfig().then(setConfig).catch(console.error);
 
-        const unlistenClosed = listen("pet-window-closed", () => {
+        const unlistenClosed = events.petWindowClosed.listen(() => {
             console.log("[PetTab] Pet window closed, updating config");
             setConfig(c => ({ ...c, enabled: false }));
         });
 
-        const unlistenConfig = listen<PetConfig>("pet-config-updated", (event) => {
+        const unlistenConfig = events.petConfigUpdated.listen((event) => {
             setConfig(event.payload);
         });
 
@@ -130,19 +117,19 @@ export default function PetTab() {
         if (enabled) {
             console.log("[PetTab] Calling show_pet_window...");
             try {
-                const result = await invoke("show_pet_window");
+                const result = await commands.showPetWindow();
                 console.log("[PetTab] show_pet_window result:", result);
             } catch (e) {
                 console.error("[PetTab] show_pet_window error:", e);
             }
         } else {
             console.log("[PetTab] Calling hide_pet_window...");
-            await invoke("hide_pet_window").catch(console.error);
+            await commands.hidePetWindow().catch(console.error);
         }
     };
 
     const handleResetPosition = async () => {
-        await invoke("move_pet_window", { x: 100, y: 100 }).catch(console.error);
+        await commands.movePetWindow(100, 100).catch(console.error);
         const newCfg = { ...config, position_x: 100, position_y: 100 };
         await persistConfig(newCfg);
     };

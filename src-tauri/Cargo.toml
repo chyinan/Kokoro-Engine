@@ -22,9 +22,16 @@ ureq = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
+sha2 = "0.10"
+tempfile = "3"
 
 [dependencies]
+tempfile = "3"
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+# The locked tauri-macros 2.6 series exposes command names to Tauri Specta.
+tauri-specta = { version = "=2.0.0-rc.29", features = ["derive", "typescript"] }
+specta = { version = "=2.0.0-rc.28", features = ["derive", "function", "serde_json"] }
+specta-typescript = "=0.0.15"
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
@@ -38,6 +45,10 @@ eventsource-stream = "0.2"
 futures = "0.3"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+rmcp = { version = "=3.11.0", default-features = false, features = ["client", "reqwest-native-tls", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = false }
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "creation-flags", "job-object", "kill-on-drop", "process-group"] }
 rand = "0.8"
 async-trait = "0.1"
 bincode = "1.3"
@@ -74,6 +85,13 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
+[target.'cfg(windows)'.dependencies]
+which = "8"
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 stress = []
 
@@ -82,10 +100,10 @@ stress = []
 screenshots = { path = "vendor/screenshots" }
 
 [dev-dependencies]
-tempfile = "3"
 proptest = "1"
 wiremock = "0.6"
 tokio-test = "0.4"
+tokio = { version = "1", features = ["test-util"] }
 
 # Reduces disk usage from third-party dependencies by emitting line-level debuginfo only.
 # Retains panic backtraces while dramatically shrinking PDB files.

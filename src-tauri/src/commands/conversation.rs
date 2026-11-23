@@ -1,10 +1,11 @@
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::State;
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct ConversationInfo {
     pub id: String,
     pub character_id: String,
@@ -15,55 +16,52 @@ pub struct ConversationInfo {
     pub updated_at: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConversationMessage {
-    pub id: i64,
-    pub role: String,
-    pub content: String,
-    pub metadata: Option<String>,
-    pub created_at: String,
-}
+pub use crate::chat::runtime::ConversationMessage;
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct LoadedConversation {
     pub topic: String,
     pub pinned_state: String,
     pub messages: Vec<ConversationMessage>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct ListConversationsRequest {
     pub character_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct LoadConversationRequest {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct DeleteConversationRequest {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct RenameConversationRequest {
     pub id: String,
     pub title: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct UpdateConversationStateRequest {
     pub id: String,
+    #[serde(default)]
     pub topic: Option<String>,
+    #[serde(default)]
     pub pinned_state: Option<String>,
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_conversations(
     request: ListConversationsRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<Vec<ConversationInfo>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "list_conversations")?;
     list_conversations_inner(request, &state.db).await
 }
 
@@ -160,7 +158,11 @@ pub async fn load_conversation_inner(
             })
             .collect();
         let mut history_guard = history.lock().await;
-        crate::ai::context::sync_history_window(&mut history_guard, history_messages, max_message_chars);
+        crate::ai::context::sync_history_window(
+            &mut history_guard,
+            history_messages,
+            max_message_chars,
+        );
     }
 
     {
@@ -188,7 +190,9 @@ pub async fn load_conversation_inner(
                 .and_then(|value| value.as_str());
             if matches!(
                 technical_type,
-                Some("assistant_tool_calls") | Some("translation_instruction") | Some("invalid_failure_event")
+                Some("assistant_tool_calls")
+                    | Some("translation_instruction")
+                    | Some("invalid_failure_event")
             ) {
                 return None;
             }
@@ -210,28 +214,26 @@ pub async fn load_conversation_inner(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn load_conversation(
     request: LoadConversationRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<LoadedConversation, KokoroError> {
+) -> Result<Response<LoadedConversation>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "load_conversation")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
-
     let max_chars = *state.max_message_chars.lock().await;
     load_conversation_inner(
         request,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
+        &state.selection.history,
+        &state.selection.current_conversation_id,
         max_chars,
-        &state.conversation_switch_lock,
-        Some(&state.conversation_generation),
+        &state.selection.conversation_switch_lock,
+        Some(&state.selection.conversation_generation),
         true,
     )
     .await
+        .map(Response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -295,34 +297,37 @@ pub async fn delete_conversation_inner(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_conversation(
     request: DeleteConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "delete_conversation")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
-
+    let _memory_commit = state.owners.memory_commit.write().await;
+    let deleted_id = request.id.clone();
     delete_conversation_inner(
         request,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
-        Some(&state.memory_history_boundary),
-        Some(&state.memory_trigger_count),
-        &state.conversation_switch_lock,
-        Some(&state.conversation_generation),
+        &state.selection.history,
+        &state.selection.current_conversation_id,
+        Some(&state.selection.memory_history_boundary),
+        None,
+        &state.selection.conversation_switch_lock,
+        Some(&state.selection.conversation_generation),
         true,
     )
-    .await
+    .await?;
+    state.forget_conversation(&deleted_id).await;
+    Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_character_ids(
     state: State<'_, AIOrchestrator>,
 ) -> Result<Vec<String>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "list_character_ids")?;
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT character_id FROM conversations
          UNION
@@ -337,21 +342,21 @@ pub async fn list_character_ids(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_conversation(state: State<'_, AIOrchestrator>) -> Result<String, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "create_conversation")?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
-    let _history_guard = state
-        .try_acquire_chat_turn("history_mutation")
-        .await
-        .map_err(KokoroError::Chat)?;
     state.clear_history().await;
     Ok(String::new())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn rename_conversation(
     request: RenameConversationRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "rename_conversation")?;
     sqlx::query("UPDATE conversations SET title = ? WHERE id = ?")
         .bind(&request.title)
         .bind(&request.id)
@@ -363,10 +368,12 @@ pub async fn rename_conversation(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_conversation_state(
     request: UpdateConversationStateRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "conversation", "update_conversation_state")?;
     let current = sqlx::query_as::<_, (String, String)>(
         "SELECT topic, pinned_state FROM conversations WHERE id = ?",
     )
@@ -393,16 +400,20 @@ pub async fn update_conversation_state(
     Ok(())
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, specta::Type)]
 pub struct EditConversationMessageRequest {
+    #[serde(default)]
     pub conversation_id: Option<String>,
+    #[serde(default)]
     pub conversation_generation: Option<u64>,
+    #[serde(default)]
     pub message_id: Option<i64>,
+    #[serde(default)]
     pub visible_index: Option<usize>,
     pub new_content: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, specta::Type)]
 pub struct EditConversationMessageResponse {
     pub message_id: i64,
     pub updated_content: String,
@@ -410,8 +421,9 @@ pub struct EditConversationMessageResponse {
 
 /// Edits one persisted message after resolving and validating its authoritative conversation.
 ///
-/// The message content and owning conversation timestamp are updated atomically. The in-memory
-/// history is refreshed only when the database-owned conversation is still active.
+/// The full message content and owning conversation timestamp are updated atomically. The
+/// character budget applies only to the model history, refreshed when the owning conversation
+/// is still active.
 pub async fn edit_conversation_message_inner(
     request: EditConversationMessageRequest,
     db: &sqlx::SqlitePool,
@@ -421,8 +433,7 @@ pub async fn edit_conversation_message_inner(
     conversation_switch_lock: &tokio::sync::Mutex<()>,
     conversation_generation: &AtomicU64,
 ) -> Result<EditConversationMessageResponse, KokoroError> {
-    let trimmed = request.new_content.trim();
-    if trimmed.is_empty() {
+    if request.new_content.trim().is_empty() {
         return Err(KokoroError::Validation(
             "Message content cannot be empty".to_string(),
         ));
@@ -442,9 +453,6 @@ pub async fn edit_conversation_message_inner(
             ));
         }
     }
-    let content_to_persist =
-        crate::ai::context::truncate_message_content(trimmed.to_string(), max_message_chars);
-
     // Resolve message ownership and perform both database writes in one transaction. The
     // conversation stored on the message row is authoritative; a caller-provided ID is only a
     // constraint and must never redirect timestamp or history updates.
@@ -453,9 +461,9 @@ pub async fn edit_conversation_message_inner(
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-    let (target_id, authoritative_conversation_id) = if let Some(id) = request.message_id {
-        let actual_conversation_id = sqlx::query_scalar::<_, String>(
-            "SELECT conversation_id FROM conversation_messages WHERE id = ?",
+    let (target_id, authoritative_conversation_id, role) = if let Some(id) = request.message_id {
+        let (actual_conversation_id, role) = sqlx::query_as::<_, (String, String)>(
+            "SELECT conversation_id, role FROM conversation_messages WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&mut *transaction)
@@ -472,7 +480,7 @@ pub async fn edit_conversation_message_inner(
             }
         }
 
-        (id, actual_conversation_id)
+        (id, actual_conversation_id, role)
     } else if let (Some(conv_id), Some(index)) =
         (request.conversation_id.as_deref(), request.visible_index)
     {
@@ -484,30 +492,32 @@ pub async fn edit_conversation_message_inner(
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-        let visible_rows: Vec<i64> = rows
+        let (message_id, role, _) = rows
             .into_iter()
             .filter(|(_, role, meta)| super::context::is_visible_message_raw(role, meta.as_deref()))
-            .map(|(id, _, _)| id)
-            .collect();
+            .nth(index)
+            .ok_or_else(|| {
+                KokoroError::NotFound(format!(
+                    "Message at index {} not found in conversation {}",
+                    index, conv_id
+                ))
+            })?;
 
-        let message_id = *visible_rows.get(index).ok_or_else(|| {
-            KokoroError::NotFound(format!(
-                "Message at index {} not found in conversation {}",
-                index, conv_id
-            ))
-        })?;
-
-        (message_id, conv_id.to_string())
+        (message_id, conv_id.to_string(), role)
     } else {
         return Err(KokoroError::Validation(
             "Either message_id or (conversation_id, visible_index) must be provided".to_string(),
         ));
     };
 
+    if role == "user" {
+        crate::chat::persistence::validate_user_input(&request.new_content)?;
+    }
+
     let message_update = sqlx::query(
         "UPDATE conversation_messages SET content = ? WHERE id = ? AND conversation_id = ?",
     )
-    .bind(&content_to_persist)
+    .bind(&request.new_content)
     .bind(target_id)
     .bind(&authoritative_conversation_id)
     .execute(&mut *transaction)
@@ -536,24 +546,30 @@ pub async fn edit_conversation_message_inner(
         )));
     }
 
+    // Read the active history in the transaction so a read failure also rolls back the edit.
+    let is_active = current_conversation_id_lock.lock().await.as_deref()
+        == Some(authoritative_conversation_id.as_str());
+    let history_rows = if is_active {
+        Some(
+            sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
+            )
+            .bind(&authoritative_conversation_id)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|e| KokoroError::Database(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     transaction
         .commit()
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-    // Refresh only the authoritative active conversation. Recheck immediately before replacing
-    // history so a conversation switch during the database query cannot apply a stale snapshot.
-    let should_refresh_history = current_conversation_id_lock.lock().await.as_deref()
-        == Some(authoritative_conversation_id.as_str());
-    if should_refresh_history {
-        let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
-            "SELECT role, content, metadata FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC",
-        )
-        .bind(&authoritative_conversation_id)
-        .fetch_all(db)
-        .await
-        .map_err(|e| KokoroError::Database(e.to_string()))?;
-
+    // Publish only committed history, and only to the authoritative active conversation.
+    if let Some(rows) = history_rows {
         let active_conversation_id = current_conversation_id_lock.lock().await;
         if active_conversation_id.as_deref() == Some(authoritative_conversation_id.as_str()) {
             let mut history = history_lock.lock().await;
@@ -563,15 +579,21 @@ pub async fn edit_conversation_message_inner(
 
     Ok(EditConversationMessageResponse {
         message_id: target_id,
-        updated_content: content_to_persist,
+        updated_content: request.new_content,
     })
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn edit_conversation_message(
     request: EditConversationMessageRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<EditConversationMessageResponse, KokoroError> {
+) -> Result<Response<EditConversationMessageResponse>, KokoroError> {
+    let _operation = crate::ipc::admit_in(
+        &state.lifecycle,
+        "conversation",
+        "edit_conversation_message",
+    )?;
     let _activation_guard = state.enter_chat_turn().map_err(KokoroError::Chat)?;
     let _history_guard = state
         .try_acquire_chat_turn("history_mutation")
@@ -582,13 +604,14 @@ pub async fn edit_conversation_message(
     edit_conversation_message_inner(
         request,
         &state.db,
-        &state.history,
-        &state.current_conversation_id,
+        &state.selection.history,
+        &state.selection.current_conversation_id,
         max_chars,
-        &state.conversation_switch_lock,
-        &state.conversation_generation,
+        &state.selection.conversation_switch_lock,
+        &state.selection.conversation_generation,
     )
     .await
+    .map(Response)
 }
 
 #[cfg(test)]
@@ -673,6 +696,11 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('conv-2', 'user', 'unrelated message', ?)")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
         let request = EditConversationMessageRequest {
             conversation_id: Some("conv-1".to_string()),
             conversation_generation: Some(1),
@@ -706,14 +734,19 @@ mod tests {
         )
         .await;
         assert!(matches!(stale, Err(KokoroError::Chat(_))));
-        let (content, updated_at): (String, String) = sqlx::query_as(
-            "SELECT m.content, c.updated_at FROM conversation_messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = 1",
+        let saved: Vec<(String, String)> = sqlx::query_as(
+            "SELECT m.content, c.updated_at FROM conversation_messages m JOIN conversations c ON c.id = m.conversation_id ORDER BY m.id",
         )
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(content, "original message");
-        assert_eq!(updated_at, now);
+        assert_eq!(
+            saved,
+            [
+                ("original message".to_owned(), now.clone()),
+                ("unrelated message".to_owned(), now)
+            ]
+        );
         assert_eq!(history.lock().await[0].content, "original message");
 
         // A fresh editor can still edit the same row.
@@ -769,8 +802,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-a', 'user', 'message-a', NULL, ?)")
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-a', 'user', 'message-a', NULL, ?), ('conv-b', 'user', 'message-b', NULL, ?)")
             .bind(conversation_a_updated_at)
+            .bind(conversation_b_updated_at)
             .execute(&pool)
             .await
             .unwrap();
@@ -802,12 +836,12 @@ mod tests {
 
         assert!(matches!(error, KokoroError::Validation(_)));
 
-        let stored_content: String =
-            sqlx::query_scalar("SELECT content FROM conversation_messages WHERE id = 1")
-                .fetch_one(&pool)
+        let stored_content: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM conversation_messages ORDER BY id")
+                .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(stored_content, "message-a");
+        assert_eq!(stored_content, ["message-a", "message-b"]);
 
         let updated_times: Vec<(String, String)> =
             sqlx::query_as("SELECT id, updated_at FROM conversations ORDER BY id ASC")
@@ -894,35 +928,25 @@ mod tests {
         assert_eq!(synced_history[0].content, "edited-message-a");
     }
 
-    /// Verifies that a conversation timestamp failure rolls back the preceding message update.
     #[tokio::test]
-    async fn test_edit_conversation_message_rolls_back_when_timestamp_update_fails() {
+    async fn test_edit_conversation_message_errors_leave_persisted_and_active_history_unchanged() {
         let pool = setup_test_db().await;
         let original_updated_at = "2026-01-01T00:00:00Z";
 
-        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-a', 'char-1', 'A', ?, ?)")
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-a', 'char-1', 'A', ?, ?), ('conv-b', 'char-1', 'B', ?, ?)")
+            .bind(original_updated_at)
+            .bind(original_updated_at)
             .bind(original_updated_at)
             .bind(original_updated_at)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-a', 'user', 'original-message', NULL, ?)")
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-a', 'user', 'original-message', NULL, ?), ('conv-b', 'user', 'unrelated-message', NULL, ?)")
+            .bind(original_updated_at)
             .bind(original_updated_at)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TRIGGER fail_conversation_timestamp_update
-             BEFORE UPDATE OF updated_at ON conversations
-             WHEN OLD.id = 'conv-a'
-             BEGIN
-                 SELECT RAISE(ABORT, 'forced timestamp failure');
-             END",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
         let history = Arc::new(Mutex::new(VecDeque::from([crate::ai::context::Message {
             role: "user".to_string(),
             content: "original-message".to_string(),
@@ -930,49 +954,156 @@ mod tests {
         }])));
         let current_conv_id = Arc::new(Mutex::new(Some("conv-a".to_string())));
 
-        let error = edit_conversation_message_inner(
-            EditConversationMessageRequest {
-                conversation_id: Some("conv-a".to_string()),
-                message_id: Some(1),
-                conversation_generation: None,
-                visible_index: None,
-                new_content: "must-roll-back".to_string(),
-            },
-            &pool,
-            &history,
-            &current_conv_id,
-            2000,
-            &switch_lock(),
-            &AtomicU64::new(0),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, KokoroError::Database(_)));
-
-        let persisted_state: (String, String) = sqlx::query_as(
-            "SELECT conversation_messages.content, conversations.updated_at
-             FROM conversation_messages
-             JOIN conversations ON conversations.id = conversation_messages.conversation_id
-             WHERE conversation_messages.id = 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            persisted_state,
-            (
-                "original-message".to_string(),
-                original_updated_at.to_string()
+        let scenarios = [
+            ("\n \t　", None, None),
+            ("must-roll-back", Some(
+                "CREATE TRIGGER edit_failure BEFORE UPDATE OF updated_at ON conversations
+                 WHEN OLD.id = 'conv-a'
+                 BEGIN SELECT RAISE(ABORT, 'forced timestamp failure'); END"
+            ), Some("forced timestamp failure")),
+            ("must-roll-back", Some(
+                "CREATE TRIGGER edit_failure AFTER UPDATE OF updated_at ON conversations
+                 WHEN OLD.id = 'conv-a'
+                 BEGIN UPDATE conversation_messages SET metadata = CAST(X'80' AS TEXT) WHERE id = 1; END"
+            ), Some("invalid utf-8")),
+        ];
+        for (replacement, trigger, expected_database_error) in scenarios {
+            if let Some(trigger) = trigger {
+                sqlx::query(trigger).execute(&pool).await.unwrap();
+            }
+            let error = edit_conversation_message_inner(
+                EditConversationMessageRequest {
+                    conversation_id: Some("conv-a".to_string()),
+                    message_id: Some(1),
+                    conversation_generation: None,
+                    visible_index: None,
+                    new_content: replacement.to_string(),
+                },
+                &pool,
+                &history,
+                &current_conv_id,
+                2000,
+                &switch_lock(),
+                &AtomicU64::new(0),
             )
-        );
+            .await
+            .unwrap_err();
 
-        let unchanged_history = history.lock().await;
-        assert_eq!(unchanged_history[0].content, "original-message");
+            if let Some(expected) = expected_database_error {
+                assert!(
+                    matches!(&error, KokoroError::Database(msg) if msg.contains(expected)),
+                    "{error}"
+                );
+                sqlx::query("DROP TRIGGER edit_failure")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                assert!(matches!(error, KokoroError::Validation(_)));
+            }
+
+            let persisted_state: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT m.content, c.updated_at, m.metadata FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.conversation_id ORDER BY m.id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                persisted_state,
+                [
+                    (
+                        "original-message".to_owned(),
+                        original_updated_at.to_owned(),
+                        None,
+                    ),
+                    (
+                        "unrelated-message".to_owned(),
+                        original_updated_at.to_owned(),
+                        None,
+                    ),
+                ]
+            );
+            assert_eq!(history.lock().await[0].content, "original-message");
+        }
     }
 
     #[tokio::test]
-    async fn test_edit_conversation_message_by_visible_index() {
+    async fn test_edit_user_message_enforces_shared_utf8_limit_for_both_selectors() {
+        use crate::chat::persistence::{validate_user_input, MAX_USER_INPUT_BYTES};
+
+        let pool = setup_test_db().await;
+        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-2', 'char-1', 'Test', 'now', 'now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let message_id = sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, created_at) VALUES ('conv-2', 'user', 'original', 'now')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let text = format!("{}a", "界🙂".repeat(MAX_USER_INPUT_BYTES / "界🙂".len()));
+        assert_eq!(text.len(), MAX_USER_INPUT_BYTES);
+        let oversized = format!("{text}b");
+        assert_eq!(oversized.len(), MAX_USER_INPUT_BYTES + 1);
+        let expected_error = validate_user_input(&oversized).unwrap_err();
+        let history = Mutex::new(VecDeque::new());
+        let active = Mutex::new(Some("conv-2".into()));
+        let generation = AtomicU64::new(0);
+
+        for (id, index) in [(Some(message_id), None), (None, Some(0))] {
+            let request = EditConversationMessageRequest {
+                conversation_id: Some("conv-2".into()),
+                conversation_generation: Some(0),
+                message_id: id,
+                visible_index: index,
+                new_content: text.clone(),
+            };
+            let result = edit_conversation_message_inner(
+                request.clone(),
+                &pool,
+                &history,
+                &active,
+                120,
+                &switch_lock(),
+                &generation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.updated_content, text);
+            assert_eq!(result.message_id, message_id);
+
+            let read = || {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT m.content, c.updated_at FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.conversation_id WHERE m.id = ?",
+                )
+                .bind(message_id)
+                .fetch_one(&pool)
+            };
+            let before = read().await.unwrap();
+            assert_eq!(before.0, text);
+            let error = edit_conversation_message_inner(
+                EditConversationMessageRequest {
+                    new_content: oversized.clone(),
+                    ..request
+                },
+                &pool,
+                &history,
+                &active,
+                120,
+                &switch_lock(),
+                &generation,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, expected_error);
+            assert_eq!(read().await.unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_edit_conversation_message_by_visible_index_above_new_user_input_limit() {
         let pool = setup_test_db().await;
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -997,8 +1128,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Insert message 2: assistant
-        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-2', 'assistant', 'answer', NULL, ?)")
+        // Generated assistant history can exceed the transport limit for new user inputs.
+        let half = "长".repeat(crate::chat::persistence::MAX_USER_INPUT_BYTES / 4);
+        let original = format!("{half}\n旧\n{half}\n末尾");
+        assert!(original.len() > crate::chat::persistence::MAX_USER_INPUT_BYTES);
+        let edited = original.replacen('旧', "新", 1);
+        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-2', 'assistant', ?, NULL, ?)")
+            .bind(&original)
             .bind(&now)
             .execute(&pool)
             .await
@@ -1014,7 +1150,7 @@ mod tests {
                 message_id: None,
                 conversation_generation: None,
                 visible_index: Some(1),
-                new_content: "new answer content".to_string(),
+                new_content: edited.clone(),
             },
             &pool,
             &history,
@@ -1027,14 +1163,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(res.message_id, 3);
-        assert_eq!(res.updated_content, "new answer content");
+        assert_eq!(res.updated_content, edited);
 
         let (content,): (String,) =
             sqlx::query_as("SELECT content FROM conversation_messages WHERE id = 3")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(content, "new answer content");
+        assert_eq!(content, edited);
     }
 
     #[tokio::test]
@@ -1228,60 +1364,158 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_conversation_message_truncates_overlong_content() {
-        let pool = setup_test_db().await;
-        let now = chrono::Utc::now().to_rfc3339();
+    async fn test_edit_conversation_message_preserves_full_text_and_bounds_model_history() {
+        use crate::chat::persistence::ConversationTarget;
+        use crate::llm::messages::{extract_message_text, history_message_to_llm_chat_message};
 
-        sqlx::query("INSERT INTO conversations (id, character_id, title, created_at, updated_at) VALUES ('conv-trunc', 'char-1', 'Test', ?, ?)")
-            .bind(&now)
-            .bind(&now)
-            .execute(&pool)
+        const MODEL_CHARS: usize = 160;
+        const ORIGINAL_TIMESTAMP: &str = "2026-01-01T00:00:00Z";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite");
+        let url = format!("sqlite:///{}", path.to_string_lossy().replace('\\', "/"));
+        let mut state = AIOrchestrator::new(&url).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id, character_id, created_at, updated_at) VALUES ('edited', 'default', ?, ?)")
+            .bind(ORIGINAL_TIMESTAMP)
+            .bind(ORIGINAL_TIMESTAMP)
+            .execute(&state.db)
             .await
             .unwrap();
 
-        sqlx::query("INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at) VALUES ('conv-trunc', 'user', 'short text', NULL, ?)")
-            .bind(&now)
-            .execute(&pool)
+        let original = format!(
+            "\n  {}\n旧\n{}\n独有末尾\n\t",
+            "开头内容".repeat(25),
+            "后半内容".repeat(30)
+        );
+        let message_id = sqlx::query(
+            r#"INSERT INTO conversation_messages (conversation_id, role, content, metadata, created_at)
+               VALUES ('edited', 'assistant', '前一条可见消息', NULL, 'now'),
+                      ('edited', 'assistant', '隐藏行', '{"type":"translation_instruction"}', 'now'),
+                      ('edited', 'user', ?, NULL, 'now')"#,
+        )
+        .bind(&original)
+        .execute(&state.db)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let target = ConversationTarget {
+            character_id: "default".into(),
+            conversation_id: "edited".into(),
+            require_character: false,
+            create: false,
+        };
+        let mut previous = original.clone();
+
+        for (id, index, edited) in [
+            (Some(message_id), None, original.replacen('旧', "新", 1)),
+            (None, Some(1), original.replacen('旧', "改", 1)),
+        ] {
+            let loaded = load_conversation_inner(
+                LoadConversationRequest {
+                    id: "edited".into(),
+                },
+                &state.db,
+                &state.selection.history,
+                &state.selection.current_conversation_id,
+                MODEL_CHARS,
+                &state.selection.conversation_switch_lock,
+                Some(&state.selection.conversation_generation),
+                false,
+            )
             .await
             .unwrap();
+            assert_eq!(loaded.messages[1].content, previous);
+            let response = edit_conversation_message_inner(
+                EditConversationMessageRequest {
+                    conversation_id: Some("edited".into()),
+                    conversation_generation: Some(state.current_conversation_generation()),
+                    message_id: id,
+                    visible_index: index,
+                    new_content: edited.clone(),
+                },
+                &state.db,
+                &state.selection.history,
+                &state.selection.current_conversation_id,
+                MODEL_CHARS,
+                &state.selection.conversation_switch_lock,
+                &state.selection.conversation_generation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.message_id, message_id);
+            assert_eq!(response.updated_content, edited);
 
-        let history = Arc::new(Mutex::new(VecDeque::new()));
-        let current_conv_id = Arc::new(Mutex::new(Some("conv-trunc".to_string())));
+            let expected_model_text = format!(
+                "{}…[truncated]",
+                edited.chars().take(MODEL_CHARS).collect::<String>()
+            );
+            assert_eq!(
+                state.selection.history.lock().await.back().unwrap().content,
+                expected_model_text
+            );
+            let (content, updated_at): (String, String) = sqlx::query_as(
+                "SELECT m.content, c.updated_at FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.conversation_id WHERE m.id = ?",
+            )
+            .bind(message_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(content, edited);
+            assert_ne!(updated_at, ORIGINAL_TIMESTAMP);
+            state.db.close().await;
+            state = AIOrchestrator::new(&url).await.unwrap();
 
-        // Set max_message_chars to 20, but provide 50 chars
-        let long_text = "12345678901234567890EXTRA_TEXT_EXCEEDING_LIMIT_HERE!";
-        let res = edit_conversation_message_inner(
-            EditConversationMessageRequest {
-                conversation_id: Some("conv-trunc".to_string()),
-                message_id: Some(1),
-                conversation_generation: None,
-                visible_index: None,
-                new_content: long_text.to_string(),
+            state.set_memory_enabled(false).await;
+            state
+                .set_context_settings("window".into(), MODEL_CHARS)
+                .await;
+            let history = state.saved_history_for(&target, None).await.unwrap();
+            let (prompt, _) = state
+                .compose_chat_prompt(
+                    "后续问题",
+                    false,
+                    None,
+                    false,
+                    "default",
+                    Some("edited"),
+                    Some(history),
+                    true,
+                    &state.prompt_snapshot("default").await.unwrap(),
+                )
+                .await
+                .unwrap();
+            let user = prompt
+                .iter()
+                .find(|message| message.role == "user")
+                .unwrap();
+            let provider_message = history_message_to_llm_chat_message(
+                &user.role,
+                user.content.clone(),
+                user.metadata.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(
+                extract_message_text(&provider_message.message),
+                expected_model_text
+            );
+            previous = edited;
+        }
+
+        let loaded = load_conversation_inner(
+            LoadConversationRequest {
+                id: "edited".into(),
             },
-            &pool,
-            &history,
-            &current_conv_id,
-            20,
-            &switch_lock(),
-            &AtomicU64::new(0),
+            &state.db,
+            &state.selection.history,
+            &state.selection.current_conversation_id,
+            MODEL_CHARS,
+            &state.selection.conversation_switch_lock,
+            Some(&state.selection.conversation_generation),
+            false,
         )
         .await
         .unwrap();
-
-        assert_eq!(res.message_id, 1);
-        assert_eq!(res.updated_content, "12345678901234567890…[truncated]");
-
-        // Verify SQLite has the truncated text
-        let (content,): (String,) =
-            sqlx::query_as("SELECT content FROM conversation_messages WHERE id = 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(content, "12345678901234567890…[truncated]");
-
-        // Verify history has the truncated text
-        let synced = history.lock().await;
-        assert_eq!(synced[0].content, "12345678901234567890…[truncated]");
+        assert_eq!(loaded.messages[1].content, previous);
     }
 
     #[tokio::test]
@@ -1466,10 +1700,11 @@ mod tests {
         assert_eq!(*boundary.lock().await, 0);
         assert_eq!(*trigger_count.lock().await, 0);
 
-        let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let conv_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(conv_count, 0);
     }
 
@@ -1524,15 +1759,17 @@ mod tests {
         assert_eq!(*trigger_count.lock().await, 5);
 
         // conv-2 deleted, conv-1 preserved
-        let conv2_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-2'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let conv2_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(conv2_count, 0);
-        let conv1_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let conv1_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = 'conv-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(conv1_count, 1);
     }
 }

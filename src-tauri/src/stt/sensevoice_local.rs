@@ -2,6 +2,7 @@ use super::config::SttProviderConfig;
 use super::interface::{
     AudioSource, SttEngine, SttError, TranscriptionResult, TranscriptionSegment,
 };
+use crate::lifecycle::TaskScope;
 use async_trait::async_trait;
 use bzip2::read::BzDecoder;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ const RECOMMENDED_ARCHIVE_NAME: &str =
     "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2";
 const RECOMMENDED_DOWNLOAD_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct SenseVoiceLocalModelStatus {
     pub installed: bool,
     pub download_instructions_url: String,
@@ -28,11 +29,13 @@ pub struct SenseVoiceLocalModelStatus {
     pub tokens_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "stt:sensevoice-local-progress")]
 pub struct SenseVoiceLocalDownloadProgress {
     pub stage: String,
     pub message: String,
     pub downloaded_bytes: u64,
+    #[serde(default)]
     pub total_bytes: Option<u64>,
 }
 
@@ -81,7 +84,8 @@ pub fn recommended_model_status() -> SenseVoiceLocalModelStatus {
     }
 }
 
-pub async fn download_recommended_model<F>(
+pub(crate) async fn download_recommended_model<F>(
+    scope: TaskScope,
     emit_progress: F,
 ) -> Result<SenseVoiceLocalModelStatus, String>
 where
@@ -115,7 +119,7 @@ where
         total_bytes: None,
     })?;
 
-    let progress = crate::utils::download::download_file_with_progress(
+    let download = crate::utils::download::download_file_with_progress(
         &client,
         RECOMMENDED_DOWNLOAD_URL,
         &archive_path,
@@ -131,8 +135,13 @@ where
                 })
             })
         },
-    )
-    .await?;
+    );
+    let stop = scope.token();
+    let progress = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Err("SenseVoice model download cancelled during shutdown".into()),
+        downloaded = download => downloaded?,
+    };
     let downloaded_bytes = progress.downloaded_bytes;
     let total_bytes = progress.total_bytes;
 
@@ -145,14 +154,18 @@ where
 
     let extract_parent = root_dir.clone();
     let archive_path_for_extract = archive_path.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let tar_file = File::open(&archive_path_for_extract).map_err(|e| e.to_string())?;
-        let decoder = BzDecoder::new(BufReader::new(tar_file));
-        let mut archive = Archive::new(decoder);
-        archive.unpack(&extract_parent).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let mut extraction = scope
+        .spawn_blocking(
+            "SenseVoice model extraction",
+            move || -> Result<(), String> {
+                let tar_file = File::open(&archive_path_for_extract).map_err(|e| e.to_string())?;
+                let decoder = BzDecoder::new(BufReader::new(tar_file));
+                let mut archive = Archive::new(decoder);
+                archive.unpack(&extract_parent).map_err(|e| e.to_string())
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    extraction.join().await.map_err(|e| e.to_string())??;
 
     let _ = fs::remove_file(&archive_path);
 
@@ -171,7 +184,9 @@ where
     Ok(final_status)
 }
 
+#[derive(Clone)]
 pub struct SenseVoiceLocalProvider {
+    scope: Option<TaskScope>,
     provider_id: String,
     model_path: PathBuf,
     tokens_path: PathBuf,
@@ -197,6 +212,7 @@ impl SenseVoiceLocalProvider {
             .unwrap_or_else(|| PathBuf::from(&status.tokens_path));
 
         Self {
+            scope: None,
             provider_id: config.id.clone(),
             model_path,
             tokens_path,
@@ -204,6 +220,11 @@ impl SenseVoiceLocalProvider {
             num_threads: config.num_threads.unwrap_or(2).max(1),
             use_itn: config.use_itn.unwrap_or(true),
         }
+    }
+
+    pub(crate) fn with_scope(mut self, scope: Option<TaskScope>) -> Self {
+        self.scope = scope;
+        self
     }
 
     fn create_recognizer(&self, language: Option<&str>) -> Result<OfflineRecognizer, SttError> {
@@ -302,6 +323,31 @@ impl SttEngine for SenseVoiceLocalProvider {
     }
 
     async fn transcribe(
+        &self,
+        audio: &AudioSource,
+        language: Option<&str>,
+    ) -> Result<TranscriptionResult, SttError> {
+        let provider = self.clone();
+        let audio = audio.clone();
+        let language = language.map(str::to_owned);
+        let infer = move || provider.transcribe_sync(&audio, language.as_deref());
+        if let Some(scope) = &self.scope {
+            let mut task = scope
+                .spawn_blocking("SenseVoice local inference", infer)
+                .map_err(|error| SttError::EngineUnavailable(error.to_string()))?;
+            task.join()
+                .await
+                .map_err(|error| SttError::Unknown(error.to_string()))?
+        } else {
+            tokio::task::spawn_blocking(infer)
+                .await
+                .map_err(|error| SttError::Unknown(error.to_string()))?
+        }
+    }
+}
+
+impl SenseVoiceLocalProvider {
+    fn transcribe_sync(
         &self,
         audio: &AudioSource,
         language: Option<&str>,

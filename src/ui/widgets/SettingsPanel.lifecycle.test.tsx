@@ -4,14 +4,19 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type { CharacterRecord, VisionConfig, SttConfig, TtsSystemConfig, BotConfig } from "@/lib/kokoro-bridge";
+import { emptyCharacterDetails } from "@/features/characters/character-record";
+import { DEFAULT_BACKGROUND_CONFIG } from "../hooks/useBackgroundSlideshow";
 import {
   saveVisionConfig,
   saveSttConfig,
   getSttConfig,
   getTtsConfig,
   getBotConfig,
+  saveBotConfig,
   getJailbreakPrompt,
   getAutoBackupConfig,
   updateCharacter,
@@ -47,6 +52,7 @@ const char1: CharacterRecord = {
   user_nickname: "User",
   persona: "Persona of Character One",
   source_format: "manual",
+  ...emptyCharacterDetails,
   created_at: 100,
   updated_at: 100,
 };
@@ -57,6 +63,7 @@ const char2: CharacterRecord = {
   user_nickname: "User",
   persona: "Persona of Character Two",
   source_format: "manual",
+  ...emptyCharacterDetails,
   created_at: 200,
   updated_at: 200,
 };
@@ -91,6 +98,7 @@ vi.mock("@/lib/kokoro-bridge", async (importOriginal) => {
     saveSttConfig: vi.fn(async () => undefined),
     getTtsConfig: vi.fn(async () => null),
     getBotConfig: vi.fn(async () => null),
+    saveBotConfig: vi.fn(async (config: BotConfig) => ({ ...config, revision: config.revision + 1 })),
   };
 });
 
@@ -154,7 +162,362 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
+    vi.mocked(invoke).mockReset();
+    vi.mocked(saveBotConfig).mockReset();
     vi.clearAllMocks();
+  });
+
+  const botSnapshot: BotConfig = {
+    revision: 1,
+    selected_platform: "telegram",
+    telegram: { enabled: true, bot_token: "old-token", allowed_chat_ids: [123456789], send_voice_reply: false },
+    qq: { enabled: false, allow_c2c: false, allowed_user_openids: [], allowed_group_openids: [] },
+    discord: { enabled: false, allowed_channel_ids: [], allow_direct_messages: true, send_voice_reply: false },
+    line: { enabled: false, webhook_path: "/line", allowed_user_ids: [] },
+    webhook: { enabled: false, bind_host: "127.0.0.1", port: 8787, endpoint_path: "/webhook", send_voice_reply: false },
+  };
+  const approvedSnapshot: BotConfig = {
+    ...botSnapshot,
+    revision: 3,
+    telegram: { ...botSnapshot.telegram, allowed_chat_ids: [] },
+    qq: { ...botSnapshot.qq, allowed_user_openids: ["approved-user"] },
+  };
+
+  async function openBotSettings() {
+    const onClose = vi.fn();
+    vi.mocked(getBotConfig).mockResolvedValueOnce(botSnapshot);
+    await act(async () => root.render(createElement(SettingsPanel, {
+      isOpen: true, onClose, activeTab: "bot",
+      backgroundControls: { ...dummyBackgroundControls(), config: DEFAULT_BACKGROUND_CONFIG },
+      displayMode: "full", onDisplayModeChange: vi.fn(), customModelPath: null,
+      onCustomModelChange: vi.fn(), renderFps: 60, onRenderFpsChange: vi.fn(),
+      onActivateCharacter: vi.fn(), onCharacterRuntimeChange: vi.fn(),
+    })));
+    const eventName = "qq-authorization-approved";
+    const callback = vi.mocked(listen).mock.calls.find(([name]) => name === eventName)?.[1];
+    expect(callback).toBeDefined();
+    const notify = (revision: number, user: string) => callback!({
+      event: eventName,
+      id: revision,
+      payload: {
+        revision, approved_user_openid: user, user_openid: user,
+        group_openid: null, approved_group_openid: null,
+      },
+    });
+    return { onClose, notify };
+  }
+
+  async function editBotInput(placeholder: string, value: string) {
+    const input = container.querySelector<HTMLInputElement>(`input[placeholder="${placeholder}"]`)!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    return input;
+  }
+
+  function editTelegramToken(value: string) {
+    return editBotInput("telegram.bot_token.placeholder", value);
+  }
+
+  async function addTelegramChat(value: string) {
+    await editBotInput("telegram.whitelist.placeholder", value);
+    await clickBotButton("telegram.whitelist.add");
+  }
+
+  async function reviewBotConflict(saved: BotConfig) {
+    vi.mocked(saveBotConfig).mockRejectedValueOnce({ code: "BotConfigConflict", message: "Settings changed" });
+    await saveSettings();
+    vi.mocked(getBotConfig).mockResolvedValueOnce(saved);
+    await clickBotButton("bot.config_conflict.refresh");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
+  }
+
+  function saveButton() {
+    return container.querySelector<HTMLButtonElement>('[data-onboarding-id="settings-save-button"]')!;
+  }
+
+  function saveSettings() {
+    return act(async () => saveButton().click());
+  }
+
+  function botButton(label: string) {
+    const button = Array.from(container.querySelectorAll("button"))
+      .find(candidate => candidate.textContent?.trim() === label);
+    expect(button).toBeDefined();
+    return button!;
+  }
+
+  function clickBotButton(label: string) {
+    return act(async () => botButton(label).click());
+  }
+
+  async function beginBotConflictConfirmation() {
+    let finishRead!: (config: BotConfig) => void;
+    vi.mocked(getBotConfig).mockReturnValueOnce(new Promise(resolve => { finishRead = resolve; }));
+    await clickBotButton("bot.config_conflict.keep_saved");
+    return (saved: BotConfig) => act(async () => finishRead(saved));
+  }
+
+  it.each(["save", "start"])("shares the pending Bot config write when %s is pressed first", async first => {
+    await openBotSettings();
+    await editTelegramToken("new-token");
+    const bridge = await vi.importActual<typeof import("@/lib/kokoro-bridge")>("@/lib/kokoro-bridge");
+    vi.mocked(saveBotConfig).mockImplementation(bridge.saveBotConfig);
+    let finishSave!: () => void;
+    let committed = botSnapshot;
+    let startedWith: BotConfig | undefined;
+    const write = vi.fn((config: BotConfig) => new Promise<BotConfig>(resolve => {
+      finishSave = () => {
+        committed = { ...config, revision: config.revision + 1 };
+        resolve(committed);
+      };
+    }));
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "save_bot_config") {
+        const { config } = args as { config: BotConfig };
+        if (write.mock.calls.length > 0) {
+          throw { code: "BotConfigConflict", message: "Second write with a stale revision" };
+        }
+        return write(config);
+      }
+      if (command === "start_telegram_bot") startedWith = committed;
+      return {};
+    });
+
+    const save = saveButton();
+    const start = botButton("telegram.start");
+    await act(async () => {
+      const primary = first === "save" ? save : start;
+      const alternate = first === "save" ? start : save;
+      primary.click();
+      primary.click();
+      alternate.click();
+    });
+    expect(save.disabled).toBe(true);
+    expect(start.disabled).toBe(true);
+    expect(write).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      revision: botSnapshot.revision,
+      telegram: expect.objectContaining({ bot_token: "new-token" }),
+    }));
+    expect(startedWith).toBeUndefined();
+
+    await act(async () => finishSave());
+    expect(save.disabled).toBe(false);
+    expect(start.disabled).toBe(false);
+    expect(container.textContent).not.toContain("bot.config_conflict.stale");
+    expect(write).toHaveBeenCalledTimes(1);
+    if (first === "save") {
+      expect(startedWith).toBeUndefined();
+      await clickBotButton("telegram.start");
+    }
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_telegram_bot")).toHaveLength(1);
+    expect(startedWith?.revision).toBe(botSnapshot.revision + 1);
+    expect(startedWith?.telegram.bot_token).toBe("new-token");
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes a clean bot draft from the full snapshot and ignores an older response", async () => {
+    const { notify } = await openBotSettings();
+    expect(container.textContent).toContain("123456789");
+    let resolveOlder!: (config: BotConfig) => void;
+    vi.mocked(getBotConfig)
+      .mockReturnValueOnce(new Promise(resolve => { resolveOlder = resolve; }))
+      .mockResolvedValueOnce(approvedSnapshot);
+    await act(async () => notify(2, "prior-user"));
+    await act(async () => notify(3, "approved-user"));
+    expect(container.textContent).not.toContain("123456789");
+    await act(async () => resolveOlder({ ...botSnapshot, revision: 2 }));
+    expect(container.textContent).not.toContain("123456789");
+
+    await editTelegramToken("new-token");
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenCalledWith({
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
+    });
+  });
+
+  it("refreshes and retries a dirty bot draft without undoing the intervening Telegram revocation or QQ approval", async () => {
+    const { onClose, notify } = await openBotSettings();
+    const token = await editTelegramToken("new-token");
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    vi.mocked(saveBotConfig).mockRejectedValueOnce({ code: "BotConfigConflict", message: "Settings changed" });
+    await act(async () => notify(3, "approved-user"));
+    await saveSettings();
+
+    expect(token.value).toBe("new-token");
+    expect(saveBotConfig).toHaveBeenCalledWith({
+      ...botSnapshot,
+      telegram: { ...botSnapshot.telegram, bot_token: "new-token" },
+    });
+    expect(container.textContent).toContain("bot.config_conflict.stale");
+    expect(container.textContent).not.toContain("common.actions.saved");
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    await clickBotButton("bot.config_conflict.refresh");
+    expect(token.value).toBe("new-token");
+    expect(container.textContent).not.toContain("123456789");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
+    });
+    expect(container.textContent).toContain("common.actions.saved");
+  });
+
+  it("holds an overlapping allowlist edit for review and preserves unrelated edits after choosing the saved allowlist", async () => {
+    await openBotSettings();
+    const token = await editTelegramToken("new-token");
+    await addTelegramChat("987654321");
+    await reviewBotConflict(approvedSnapshot);
+    expect(container.textContent).toContain("987654321");
+    expect(token.value).toBe("new-token");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
+    await clickBotButton("bot.config_conflict.keep_saved");
+    expect(container.textContent).not.toContain("987654321");
+    expect(container.textContent).not.toContain("123456789");
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
+    });
+  });
+
+  it("retains an edit to another conflicting field while confirmation is waiting for saved settings", async () => {
+    await openBotSettings();
+    await addTelegramChat("987654321");
+    const saved = {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "saved-token" },
+    };
+    await reviewBotConflict(saved);
+
+    const finishConfirmation = await beginBotConflictConfirmation();
+    const token = await editTelegramToken("typed-during-confirmation");
+    await finishConfirmation(saved);
+
+    expect(token.value).toBe("typed-during-confirmation");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    vi.mocked(getBotConfig).mockResolvedValueOnce(saved);
+    await clickBotButton("bot.config_conflict.keep_saved");
+    expect(token.value).toBe("saved-token");
+    expect(container.textContent).not.toContain("987654321");
+    expect(container.textContent).not.toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a new edit to the same allowlist while confirmation is waiting", async () => {
+    await openBotSettings();
+    await addTelegramChat("987654321");
+    await reviewBotConflict(approvedSnapshot);
+
+    const finishConfirmation = await beginBotConflictConfirmation();
+    await addTelegramChat("876543210");
+    await finishConfirmation(approvedSnapshot);
+
+    expect(container.textContent).toContain("876543210");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts the reviewed allowlist and saves a disjoint edit made during confirmation", async () => {
+    await openBotSettings();
+    await addTelegramChat("987654321");
+    await reviewBotConflict(approvedSnapshot);
+
+    const finishConfirmation = await beginBotConflictConfirmation();
+    const token = await editTelegramToken("typed-during-confirmation");
+    await finishConfirmation(approvedSnapshot);
+
+    expect(token.value).toBe("typed-during-confirmation");
+    expect(container.textContent).not.toContain("987654321");
+    expect(container.textContent).not.toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "typed-during-confirmation" },
+    });
+    expect(container.textContent).toContain("common.actions.saved");
+  });
+
+  it.each(["changed allowlist", "new token overlap"])(
+    "requires fresh review when the saved revision contains a %s",
+    async change => {
+      await openBotSettings();
+      const token = await editTelegramToken("my-token");
+      await addTelegramChat("987654321");
+      await reviewBotConflict(approvedSnapshot);
+
+      const newer = {
+        ...approvedSnapshot,
+        revision: approvedSnapshot.revision + 1,
+        telegram: {
+          ...approvedSnapshot.telegram,
+          allowed_chat_ids: change === "changed allowlist" ? [765432109] : [],
+          bot_token: change === "new token overlap" ? "new-saved-token" : botSnapshot.telegram.bot_token,
+        },
+      };
+      vi.mocked(getBotConfig).mockResolvedValueOnce(newer);
+      await clickBotButton("bot.config_conflict.keep_saved");
+
+      expect(token.value).toBe("my-token");
+      expect(container.textContent).toContain("987654321");
+      expect(container.textContent).toContain("bot.config_conflict.overlap");
+      expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+      vi.mocked(getBotConfig).mockResolvedValueOnce(newer);
+      await clickBotButton("bot.config_conflict.keep_saved");
+      expect(container.textContent).not.toContain("987654321");
+      expect(container.textContent).not.toContain("bot.config_conflict.overlap");
+      const remainingToken = change === "changed allowlist" ? "my-token" : "new-saved-token";
+      expect(token.value).toBe(remainingToken);
+
+      await addTelegramChat("654321098");
+      await saveSettings();
+      expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+        ...newer,
+        telegram: {
+          ...newer.telegram,
+          bot_token: remainingToken,
+          allowed_chat_ids: [...newer.telegram.allowed_chat_ids, 654321098],
+        },
+      });
+    },
+  );
+
+  it("keeps an unsaved Telegram edit and stops before starting the bot when the write fails", async () => {
+    await openBotSettings();
+    const token = await editTelegramToken("new-token");
+    vi.mocked(saveBotConfig).mockRejectedValueOnce(new Error("Cannot persist Bot settings"));
+    await clickBotButton("telegram.start");
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "start_telegram_bot")).toBe(false);
+    expect(container.textContent).toContain("Cannot persist Bot settings");
+    expect(container.textContent).not.toContain("common.actions.saved");
+    expect(token.value).toBe("new-token");
+
+    vi.mocked(saveBotConfig).mockRejectedValueOnce(new Error("Cannot persist Bot settings"));
+    await saveSettings();
+    expect(container.textContent).not.toContain("common.actions.saved");
+    expect(token.value).toBe("new-token");
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...botSnapshot,
+      telegram: { ...botSnapshot.telegram, bot_token: "new-token" },
+    });
+
+    await clickBotButton("telegram.start");
+    expect(saveBotConfig).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_telegram_bot")).toHaveLength(1);
+    expect(container.textContent).not.toContain("Cannot persist Bot settings");
   });
 
   it("does not forward character A runtime changes after switching to B while saving A", async () => {

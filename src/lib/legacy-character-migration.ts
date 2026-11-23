@@ -5,15 +5,14 @@ import {
     createCharacter,
     createCharacterWithAvatar,
     updateCharacter,
-    type CharacterRecord,
 } from "./kokoro-bridge";
 
 export type LegacyCharacterMigrationDependencies = {
     readonly getAll: () => Promise<ReadonlyArray<CharacterProfile>>;
     readonly remove: (id: number) => Promise<void>;
-    readonly createCharacter: (record: CharacterRecord) => Promise<void>;
-    readonly createCharacterWithAvatar: (record: CharacterRecord, bytes: Uint8Array) => Promise<void>;
-    readonly updateCharacter: (record: Omit<CharacterRecord, "created_at">) => Promise<void>;
+    readonly createCharacter: typeof createCharacter;
+    readonly createCharacterWithAvatar: typeof createCharacterWithAvatar;
+    readonly updateCharacter: typeof updateCharacter;
 };
 
 const defaultDependencies: LegacyCharacterMigrationDependencies = {
@@ -24,7 +23,7 @@ const defaultDependencies: LegacyCharacterMigrationDependencies = {
     updateCharacter,
 };
 
-function toCharacterRecord(character: CharacterProfile): CharacterRecord {
+function toCharacterRecord(character: CharacterProfile): Parameters<typeof createCharacter>[0] {
     return {
         id: character.stableId,
         name: character.name,

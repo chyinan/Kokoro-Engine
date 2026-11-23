@@ -3,7 +3,7 @@
 use crate::ai::context::AIOrchestrator;
 use crate::characters::activation::{
     ActivationCoordinator, ActivationRuntimeBackend, BackendRuntimeSnapshot,
-    CharacterActivationToken, CommittedCharacterRuntime, LocalTtsPreset,
+    CharacterActivationToken, CommittedCharacterRuntime,
 };
 use crate::characters::catalog::{CatalogEntry, CharacterCatalog, DOCUMENTATION_TEMPLATE_ID};
 use crate::characters::instance_resource::{
@@ -12,6 +12,7 @@ use crate::characters::instance_resource::{
 };
 use crate::characters::manifest::CharacterTemplateManifest;
 use crate::error::KokoroError;
+use crate::ipc::wire::Response;
 use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
@@ -20,9 +21,9 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-struct OrchestratorActivationBackend<'a> {
-    orchestrator: &'a AIOrchestrator,
-    app_data: PathBuf,
+pub(crate) struct OrchestratorActivationBackend<'a> {
+    pub(crate) orchestrator: &'a AIOrchestrator,
+    pub(crate) app_data: PathBuf,
 }
 
 #[async_trait]
@@ -54,6 +55,7 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
             proactive_enabled: self.orchestrator.is_proactive_enabled(),
             current_conversation_id: self
                 .orchestrator
+                .selection
                 .current_conversation_id
                 .lock()
                 .await
@@ -64,14 +66,24 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
 
     async fn apply(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
         // 会话切换锁：会话指针写入必须与删除/加载等历史重写路径互斥
-        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
+        let _switch_guard = self
+            .orchestrator
+            .selection
+            .conversation_switch_lock
+            .lock()
+            .await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await
     }
 
     async fn restore(&self, snapshot: &BackendRuntimeSnapshot) -> Result<(), KokoroError> {
         // 会话切换锁：覆盖整个「会话指针写入 + 历史重同步」序列，防止在途删除操作
         // 把旧会话历史写回刚恢复的新会话
-        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
+        let _switch_guard = self
+            .orchestrator
+            .selection
+            .conversation_switch_lock
+            .lock()
+            .await;
         apply_orchestrator_runtime(self.orchestrator, snapshot, &self.app_data).await?;
         sync_orchestrator_history(
             self.orchestrator,
@@ -86,7 +98,12 @@ impl ActivationRuntimeBackend for OrchestratorActivationBackend<'_> {
 
     async fn sync_history(&self, conversation_id: Option<&str>) -> Result<(), KokoroError> {
         // 会话切换锁：历史重同步与删除/加载互斥
-        let _switch_guard = self.orchestrator.conversation_switch_lock.lock().await;
+        let _switch_guard = self
+            .orchestrator
+            .selection
+            .conversation_switch_lock
+            .lock()
+            .await;
         sync_orchestrator_history(self.orchestrator, conversation_id).await
     }
 
@@ -136,7 +153,8 @@ async fn apply_orchestrator_runtime(
         .set_response_language(snapshot.response_language.clone())
         .await;
     orchestrator.set_proactive_enabled(snapshot.proactive_enabled);
-    *orchestrator.current_conversation_id.lock().await = snapshot.current_conversation_id.clone();
+    *orchestrator.selection.current_conversation_id.lock().await =
+        snapshot.current_conversation_id.clone();
     orchestrator.bump_conversation_generation();
     Ok(())
 }
@@ -235,13 +253,7 @@ fn replace_json_file(
         .map_err(|error| KokoroError::Internal(format!("failed to finalize {file_name}: {error}")))
 }
 
-fn allowlisted_local_tts_presets() -> Vec<LocalTtsPreset> {
-    vec![LocalTtsPreset {
-        id: "gpt-sovits-loopback".to_string(),
-        provider_type: "gpt_sovits".to_string(),
-        endpoint: "http://127.0.0.1:9880".to_string(),
-    }]
-}
+use crate::characters::activation::allowlisted_local_tts_presets;
 
 use super::character_instance_core::{
     build_reconcile_preview, create_request_from_manifest, parse_template_defaults,
@@ -261,20 +273,25 @@ const CHARACTER_COLUMNS: &str =
      runtime_profile_json, user_modified_at";
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_characters(
     orchestrator: State<'_, AIOrchestrator>,
-) -> Result<Vec<CharacterRecord>, KokoroError> {
+) -> Result<Response<Vec<CharacterRecord>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "list_characters")?;
     list_characters_from_pool(&orchestrator.db).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn prepare_character_activation(
     character_id: String,
     allow_local_preset: Option<bool>,
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
-) -> Result<CharacterActivationToken, KokoroError> {
+) -> Result<Response<CharacterActivationToken>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "prepare_character_activation")?;
     let app_data = resolve_app_data(&app)?;
     let tts_config = crate::tts::config::load_config(&app_data.join("tts_config.json"));
     let backend = OrchestratorActivationBackend {
@@ -297,29 +314,35 @@ pub async fn prepare_character_activation(
             &backend,
         )
         .await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn commit_character_activation(
     token: CharacterActivationToken,
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
-) -> Result<CommittedCharacterRuntime, KokoroError> {
+) -> Result<Response<CommittedCharacterRuntime>, KokoroError> {
+    let _activation = crate::ipc::admit_operation(&app, "characters", "activation-commit")?;
     let app_data = resolve_app_data(&app)?;
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
         app_data,
     };
     coordinator.commit(&orchestrator.db, token, &backend).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_committed_character_runtime(
     coordinator: State<'_, ActivationCoordinator>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
-) -> Result<Option<CommittedCharacterRuntime>, KokoroError> {
+) -> Result<Response<Option<CommittedCharacterRuntime>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "get_committed_character_runtime")?;
     let backend = OrchestratorActivationBackend {
         orchestrator: &orchestrator,
         app_data: resolve_app_data(&app)?,
@@ -327,6 +350,7 @@ pub async fn get_committed_character_runtime(
     coordinator
         .recover_committed(&orchestrator.db, &backend)
         .await
+        .map(Response)
 }
 
 pub(crate) async fn recover_committed_character_runtime_for_startup(
@@ -368,76 +392,95 @@ pub(crate) async fn activate_character_for_package_removal(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_character(
     request: CreateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "create_character")?;
     create_character_in_pool(&orchestrator.db, request).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn create_character_with_avatar(
     request: CreateCharacterRequest,
     avatar_bytes: Vec<u8>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "create_character_with_avatar")?;
     let app_data = resolve_app_data(&app)?;
     create_character_with_avatar_in_pool(&orchestrator.db, &app_data, request, &avatar_bytes).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_character_with_avatar(
     request: UpdateCharacterRequest,
     avatar_bytes: Vec<u8>,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "update_character_with_avatar")?;
     let app_data = resolve_app_data(&app)?;
     update_character_with_avatar_in_pool(&orchestrator.db, &app_data, request, &avatar_bytes).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_character(
     request: UpdateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "update_character")?;
     let app_data = resolve_app_data(&app)?;
     update_character_with_resources_in_pool(&orchestrator.db, &app_data, request).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_character(
     id: String,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "delete_character")?;
+    let _memory_commit = orchestrator.owners.memory_commit.write().await;
+    let _selection = orchestrator.selection.conversation_switch_lock.lock().await;
     let app_data = resolve_app_data(&app)?;
-    delete_character_with_resources_in_pool(&orchestrator.db, &app_data, &id).await
+    delete_character_with_resources_in_pool(&orchestrator.db, &app_data, &id).await?;
+    orchestrator.forget_character(&id).await;
+    Ok(())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn duplicate_character(
     request: DuplicateCharacterRequest,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "duplicate_character")?;
     let app_data = resolve_app_data(&app)?;
     duplicate_character_with_resources_in_pool(&orchestrator.db, &app_data, request).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn restore_character_defaults(
     request: RestoreCharacterDefaultsRequest,
     orchestrator: State<'_, AIOrchestrator>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "restore_character_defaults")?;
     let app_data = resolve_app_data(&app)?;
     restore_character_defaults_with_resources_in_pool(&orchestrator.db, &app_data, request).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_character_templates(
     catalog: State<'_, CharacterCatalog>,
 ) -> Result<Vec<CharacterTemplateManifest>, KokoroError> {
@@ -445,30 +488,37 @@ pub fn list_character_templates(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn instantiate_character_template(
     request: InstantiateCharacterTemplateRequest,
     orchestrator: State<'_, AIOrchestrator>,
     catalog: State<'_, CharacterCatalog>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "instantiate_character_template")?;
     instantiate_character_template_in_pool(&orchestrator.db, &catalog, request).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn reconcile_character_template(
     request: ReconcileCharacterTemplateRequest,
     orchestrator: State<'_, AIOrchestrator>,
     catalog: State<'_, CharacterCatalog>,
-) -> Result<ReconcileCharacterTemplatePreview, KokoroError> {
+) -> Result<Response<ReconcileCharacterTemplatePreview>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "reconcile_character_template")?;
     reconcile_character_template_from_pool(&orchestrator.db, &catalog, request).await
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn apply_character_template_reconciliation(
     request: ApplyCharacterTemplateReconciliationRequest,
     orchestrator: State<'_, AIOrchestrator>,
     catalog: State<'_, CharacterCatalog>,
     app: AppHandle,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&orchestrator.lifecycle, "characters", "apply_character_template_reconciliation")?;
     let app_data = resolve_app_data(&app)?;
     apply_character_template_reconciliation_with_resources_in_pool(
         &orchestrator.db,

@@ -180,7 +180,7 @@ Secrets must not be committed or included in exported configuration. Backup expo
 
 ## 5. IPC and protocol boundaries
 
-All supported frontend calls should be represented in `src/lib/kokoro-bridge.ts`. Every invoked command must be registered in the `tauri::generate_handler![]` list in `src-tauri/src/lib.rs`. Run `npm run check:ipc` whenever either side changes.
+The Rust builder in `src-tauri/src/ipc.rs` registers application commands and events and generates `src/lib/generated/ipc.ts`. Frontend code calls the generated bindings directly or through adapters in `src/lib/kokoro-bridge.ts`. Regenerate with `npm run generate:ipc` and verify with `npm run check:ipc` after changing the contract. See the [IPC binding inventory](ipc-bindings.md) for the dependency pins and wire conventions.
 
 The application also exposes narrowly scoped custom schemes:
 

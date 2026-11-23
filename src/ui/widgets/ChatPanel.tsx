@@ -1,21 +1,21 @@
+import { events } from "@/lib/generated/ipc";
 import { useChatTextReveal } from "./chat/use-chat-text-reveal";
-import { listen } from "@tauri-apps/api/event";
 // Display adapter: drafts, voice input, layout and rendering only.
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useDeferredValue, useSyncExternalStore, useMemo, memo, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import { motion, AnimatePresence, useIsPresent } from "framer-motion";
 import { clsx } from "clsx";
 import { Send, Trash2, AlertCircle, MessageCircle, ChevronLeft, ChevronDown, ImagePlus, X, Mic, MicOff, History } from "lucide-react";
 import { onChatWarning, uploadVisionImage, setVisionTextInputFocused } from "../../lib/kokoro-bridge";
-import type { ToolTraceItem } from "../../lib/kokoro-bridge";
+import type { ChatTurnSnapshot, ToolTraceItem } from "../../lib/kokoro-bridge";
 import { chatApplication, type ChatMessageTarget } from "../../lib/chat/application";
-import { projectMessages, isActiveTurn } from "../../lib/chat/projection";
+import { projectMessages, isActiveTurn, chatEventMatchesView } from "../../lib/chat/projection";
 import { canSubmitApproval, getApprovalRequestId, type ChatPanelMessage } from "../../lib/chat/turn-state";
 import { getLatestCameraFrame } from "../../lib/camera-frame-cache";
 import { useVoiceInput, VoiceState, useWakeWord } from "../hooks";
 import { useTranslation } from "react-i18next";
 import { ImageLightbox } from "../components/ImageLightbox";
 import ConversationSidebar from "./ConversationSidebar";
-import { ChatMessage } from "./ChatMessage";
+import { ChatMessage, type ChatMessageEditResult } from "./ChatMessage";
 import { shouldRenderTypingIndicator } from "./chat-streaming-state";
 import { computeTargetScrollTop, isScrollAtBottom, computeAnchoredScrollTop, type ChatScrollSnapshot } from "./chat/chat-scroll-state";
 import { computeResizedInputHeight, loadSavedChatInputHeight, saveChatInputHeight, toggleChatInputResetHeight } from "./chat/chat-input-layout";
@@ -58,8 +58,14 @@ function getAsyncErrorMessage(error: unknown): string {
 type ChatErrorSelection = { characterId: string; conversationId: string | null; generation: number };
 type ChatRequestError = ChatErrorSelection & { message: string; requestId: string };
 
-function sameChatSelection(left: ChatErrorSelection, right: ChatErrorSelection): boolean {
-    return left.characterId === right.characterId && left.conversationId === right.conversationId && left.generation === right.generation;
+function chatErrorMatchesSelection(origin: ChatErrorSelection, selected: ChatErrorSelection, turn?: ChatTurnSnapshot): boolean {
+    if (origin.characterId !== selected.characterId) return false;
+    if (origin.conversationId === selected.conversationId && origin.generation === selected.generation) return true;
+    // A first send owns the selection change only if the backend bound its request to the new conversation.
+    return origin.conversationId === null && selected.conversationId !== null
+        && selected.generation === origin.generation + 1
+        && turn?.character_id === selected.characterId && turn.conversation_id === selected.conversationId
+        && turn.conversation_generation === selected.generation;
 }
 
 function TypingIndicator() {
@@ -121,6 +127,7 @@ function ErrorToast({ message, requestId, onDismiss }: { message: string; reques
 // ── MemoizedChatMessage wrapper ───────────────────────────
 interface MemoizedChatMessageProps {
     message: ChatMessage;
+    characterId: string;
     conversationId: string | null;
     generation: number;
     historyRevision: number | null;
@@ -128,8 +135,9 @@ interface MemoizedChatMessageProps {
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: (index: number) => void;
-    onEdit: (target: ChatMessageTarget, newText: string) => void;
+    onEdit: (target: ChatMessageTarget, newText: string) => Promise<ChatMessageEditResult>;
     onRegenerate: (target: ChatMessageTarget) => Promise<void>;
+    onRetryPersistence: (requestId: string) => Promise<void>;
     onContinueFrom: (target: ChatMessageTarget) => Promise<void>;
     onApproveTool: (index: number, tool: ToolTraceItem) => Promise<void>;
     onRejectTool: (index: number, tool: ToolTraceItem) => Promise<void>;
@@ -144,31 +152,41 @@ function createToolActionHandler<TArgs extends Array<unknown>>(
 }
 
 const MemoizedChatMessage = memo(function MemoizedChatMessage({
-    message, conversationId, generation, historyRevision, globalIndex, isStreaming, isTranslationExpanded,
+    message, characterId, conversationId, generation, historyRevision, globalIndex, isStreaming, isTranslationExpanded,
     onToggleTranslation, onEdit, onRegenerate, onContinueFrom, onApproveTool, onRejectTool,
-    onPreviewImage,
+    onPreviewImage, onRetryPersistence,
 }: MemoizedChatMessageProps) {
+    const { t } = useTranslation();
     const target = conversationId !== null && message.id !== undefined
         ? { conversationId, generation, messageId: message.id }
         : undefined;
-    const editableTarget = message.failureScope ? undefined : target;
-    const retryTarget = target && (!message.failureScope || message.canRetryFailure)
+    const isPresent = useIsPresent();
+    const continueTarget = !isPresent || message.failureScope || message.unfinished ? undefined : target;
+    const editableTarget = message.awaitingHistory ? undefined : continueTarget;
+    const retryTarget = target && !message.unfinished && (!message.failureScope || message.canRetryFailure)
         ? { ...target, historyRevision }
         : undefined;
-    const isPresent = useIsPresent();
+    const persistenceRequestId = message.canRetryPersistence ? message.clientRequestId : undefined;
     const announceFailure = useFailureAnnouncement(isPresent && message.failureScope ? message.clientRequestId : undefined);
     if (message.failureScope && !isPresent) return null;
     return (
         <ChatMessage
-            message={message.failureScope ? { ...message, announceError: announceFailure } : message}
+            message={message.failureScope ? {
+                ...message,
+                announceError: announceFailure,
+                text: message.persistenceFailure ? t("chat.persistence_failed") : message.text,
+            } : message}
             index={globalIndex}
             isStreaming={isStreaming}
             isTranslationExpanded={isTranslationExpanded}
             onToggleTranslation={() => onToggleTranslation(globalIndex)}
-            editScope={editableTarget ? JSON.stringify([editableTarget.conversationId, editableTarget.generation, editableTarget.messageId]) : undefined}
-            onEdit={editableTarget ? text => onEdit(editableTarget, text) : undefined}
+            editScope={editableTarget ? JSON.stringify([characterId, conversationId, generation, message.id]) : undefined}
+            historyRevision={historyRevision}
+            onEdit={editableTarget ? text => onEdit({ ...editableTarget, characterId }, text) : undefined}
+            onRetryEditRefresh={editableTarget ? () => chatApplication.refreshEditedHistory() : undefined}
             onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
-            onContinueFrom={editableTarget ? () => onContinueFrom({ ...editableTarget, historyRevision }) : undefined}
+            onRetryPersistence={persistenceRequestId ? () => onRetryPersistence(persistenceRequestId) : undefined}
+            onContinueFrom={continueTarget ? () => onContinueFrom({ ...continueTarget, historyRevision }) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
             onPreviewImage={onPreviewImage}
@@ -203,7 +221,7 @@ export default function ChatPanel({
     activeCharacterIdRef.current = activeCharacterId;
     activeConversationIdRef.current = activeConversationId;
     conversationGenerationRef.current = view.generation;
-    const activeTurn = view.turns.find(turn => isActiveTurn(turn) && turn.character_id === activeCharacterId);
+    const activeTurn = view.turns.find(turn => isActiveTurn(turn) && turn.character_id === activeCharacterId && chatEventMatchesView(view, turn));
     const messages = useChatTextReveal(projectedMessages, activeTurn?.turn_id);
     const isStreaming = Boolean(activeTurn);
     const isThinking = isStreaming && !activeTurn?.text;
@@ -214,14 +232,17 @@ export default function ChatPanel({
     const [showClearConfirm, setShowClearConfirm] = useState(false);
     const [expandedTranslations, setExpandedTranslations] = useState<Set<number>>(new Set());
     const messageList = useMemo(() => ({
-        messages, conversationId: activeConversationId, generation: view.generation, historyRevision: view.conversation_history_revision,
-    }), [messages, activeConversationId, view.generation, view.conversation_history_revision]);
+        messages, savedRows: view.messages, characterId: activeCharacterId, conversationId: activeConversationId,
+        generation: view.generation, historyRevision: view.conversation_history_revision,
+    }), [messages, view.messages, activeCharacterId, activeConversationId, view.generation, view.conversation_history_revision]);
     const deferredList = useDeferredValue(messageList);
-    // Defer updates within a conversation, but never show old rows under a new selection.
+    // Stream updates can lag. A saved edit and its history version must render together with the editor state.
     const { messages: deferredMessages, historyRevision: displayedHistoryRevision } =
-        deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
+        deferredList.savedRows === view.messages && deferredList.characterId === activeCharacterId
+            && deferredList.conversationId === activeConversationId && deferredList.generation === view.generation
             ? deferredList : messageList;
     const [visibleCount, setVisibleCount] = useState(20);
+    const visibleMessages = deferredMessages.slice(-visibleCount);
     const [showScrollBottom, setShowScrollBottom] = useState(false);
     const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
     const isPrependingRef = useRef(false);
@@ -289,7 +310,22 @@ export default function ChatPanel({
     const dragCounterRef = useRef(0);
     const [error, setError] = useState<string | ChatRequestError | null>(null);
     const currentSelection = { characterId: activeCharacterId, conversationId: activeConversationId, generation: view.generation };
-    const requestError = error && typeof error !== "string" && !isSwitchingConversation && sameChatSelection(error, currentSelection) ? error : null;
+    const errorTurn = error && typeof error !== "string"
+        ? view.turns.find(turn => turn.client_request_id === error.requestId) : undefined;
+    const requestError = error && typeof error !== "string" && !isSwitchingConversation
+        && chatErrorMatchesSelection(error, currentSelection, errorTurn)
+        ? error : null;
+    // The history row takes over once it is visible in the deferred list.
+    const requestErrorSettled = requestError !== null && (
+        visibleMessages.some(message => message.clientRequestId === requestError.requestId && message.failureScope)
+        || errorTurn?.status === "completed" || errorTurn?.status === "cancelled"
+    );
+    const dismissRequestError = useCallback(() => {
+        setError(current => current === requestError ? null : current);
+    }, [requestError]);
+    useLayoutEffect(() => {
+        if (requestErrorSettled) dismissRequestError();
+    }, [requestErrorSettled, dismissRequestError]);
     const [unreadCount, setUnreadCount] = useState(0);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -347,19 +383,15 @@ export default function ChatPanel({
         const current = chatApplication.getSnapshot();
         const selected = { characterId: current.character_id, conversationId: current.conversation_id, generation: current.generation };
         const turn = current.turns.find(turn => turn.client_request_id === requestId);
-        // A first send may create the selected conversation while it is in flight.
-        const createdHere = origin.conversationId === null && selected.conversationId !== null
-            && origin.characterId === selected.characterId && selected.generation === origin.generation + 1
-            && turn?.character_id === selected.characterId && turn.conversation_id === selected.conversationId
-            && turn.conversation_generation === selected.generation;
-        if (!switchingConversation.current && turn?.status !== "cancelled" && (sameChatSelection(origin, selected) || createdHere)) {
+        if (!switchingConversation.current && turn?.status !== "cancelled" && chatErrorMatchesSelection(origin, selected, turn)) {
             setError({ ...selected, message: getAsyncErrorMessage(error), requestId });
         }
     }, []);
     useEffect(() => {
         let mounted = true;
         const unlisten = onChatWarning(warning => {
-            if (mounted) reportError(warning);
+            if (!mounted) return;
+            if (chatEventMatchesView(chatApplication.getSnapshot(), warning)) reportError(warning.message);
         });
         // Registration can finish after the panel closes or is replaced.
         void unlisten.catch(error => console.warn("[Chat] Warning subscription failed", error));
@@ -393,7 +425,7 @@ export default function ChatPanel({
         submittingRef.current = true;
         try {
             const response = await chatApplication.send({
-                message: draftText.trim() || "(image attached)",
+                message: draftText.trim() ? draftText : "(image attached)",
                 images: draftImages.length ? draftImages : undefined, camera_frame: camera ?? undefined,
                 client_request_id: clientRequestId, character_id: character,
                 conversation_id: origin.conversationId ?? undefined,
@@ -402,6 +434,8 @@ export default function ChatPanel({
             });
             if (response.user_message_id != null) finishSubmission(character, clientRequestId, true);
         } catch (error) {
+            const failed = chatApplication.getSnapshot().turns.find(turn => turn.client_request_id === clientRequestId);
+            if (failed?.user_save_failed) finishSubmission(character, clientRequestId, false);
             reportRequestError(error, clientRequestId, origin);
         } finally {
             reconcileSubmission(character, clientRequestId);
@@ -461,7 +495,7 @@ export default function ChatPanel({
 
     useEffect(() => {
         let mounted = true;
-        const unlisten = listen("voice-interrupt-stt", () => {
+        const unlisten = events.voiceInterruptStt.listen(() => {
             const { character_id, conversation_id, generation } = chatApplication.getSnapshot();
             const isAllowed = () => {
                 const current = chatApplication.getSnapshot();
@@ -900,9 +934,13 @@ export default function ChatPanel({
     const onToggleTranslation = useCallback((index: number) => {
         setExpandedTranslations(previous => { const next = new Set(previous); if (next.has(index)) next.delete(index); else next.add(index); return next; });
     }, []);
-    const onEdit = useCallback(async (target: ChatMessageTarget, text: string) => {
-        try { await chatApplication.edit(target, text); } catch (error) { reportError(error); }
-    }, [reportError]);
+    const onEdit = useCallback(async (target: ChatMessageTarget, text: string): Promise<ChatMessageEditResult> => {
+        try {
+            return await chatApplication.edit(target, text);
+        } catch (error) {
+            return { status: "failed", message: getAsyncErrorMessage(error) };
+        }
+    }, []);
     const onRegenerate = useCallback(async (target: ChatMessageTarget) => {
         const requestId = `req_${crypto.randomUUID()}`;
         const origin = { characterId: activeCharacterIdRef.current, conversationId: target.conversationId, generation: target.generation };
@@ -913,6 +951,10 @@ export default function ChatPanel({
             });
         } catch (error) { reportRequestError(error, requestId, origin); }
     }, [reportRequestError]);
+    const onRetryPersistence = useCallback(async (requestId: string) => {
+        try { await chatApplication.retryPersistence(requestId); }
+        catch (error) { reportError(error); }
+    }, [reportError]);
     const onContinueFrom = useCallback(async (target: ChatMessageTarget) => {
         try {
             await chatApplication.continueFrom(target);
@@ -1168,8 +1210,8 @@ export default function ChatPanel({
             <AnimatePresence>
                 {typeof error === "string" && <ErrorToast message={error} onDismiss={() => setError(null)} />}
             </AnimatePresence>
-            {requestError && <ErrorToast key={requestError.requestId} message={requestError.message}
-                requestId={requestError.requestId} onDismiss={() => setError(null)} />}
+            {requestError && !requestErrorSettled && <ErrorToast key={requestError.requestId} message={requestError.message}
+                requestId={requestError.requestId} onDismiss={dismissRequestError} />}
 
             {/* 对话历史侧边栏 */}
             <ConversationSidebar
@@ -1301,8 +1343,8 @@ export default function ChatPanel({
                 className="flex-1 overflow-y-auto p-4 space-y-3 scrollable"
             >
                 <AnimatePresence initial={false}>
-                    {deferredMessages.slice(-visibleCount).map((msg, i) => {
-                        const globalIndex = Math.max(0, deferredMessages.length - visibleCount) + i;
+                    {visibleMessages.map((msg, i) => {
+                        const globalIndex = deferredMessages.length - visibleMessages.length + i;
                         return (
                             <MemoizedChatMessage
                                 key={msg.failureScope
@@ -1311,6 +1353,7 @@ export default function ChatPanel({
                                     ? JSON.stringify([activeCharacterId, msg.turnId])
                                     : JSON.stringify([activeConversationId, view.generation, msg.id ?? `${globalIndex}-${msg.role}`])}
                                 message={msg}
+                                characterId={activeCharacterId}
                                 conversationId={activeConversationId}
                                 generation={view.generation}
                                 historyRevision={displayedHistoryRevision}
@@ -1320,6 +1363,7 @@ export default function ChatPanel({
                                 onToggleTranslation={onToggleTranslation}
                                 onEdit={onEdit}
                                 onRegenerate={onRegenerate}
+                                onRetryPersistence={onRetryPersistence}
                                 onContinueFrom={onContinueFrom}
                                 onApproveTool={onApproveTool}
                                 onRejectTool={onRejectTool}

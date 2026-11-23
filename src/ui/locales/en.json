@@ -1023,6 +1023,9 @@
                 }
             },
             "refresh_tooltip": "Refresh tools from all servers",
+            "refresh_failed": "Could not refresh MCP tools.",
+            "server_status_unavailable": "Could not load server status.",
+            "tool_list_unavailable": "Could not load the tool list.",
             "add_button": "ADD",
             "add_modal": {
                 "title": "Add MCP Server",
@@ -1092,6 +1095,11 @@
             "provider_credentials_warning": "Provider credentials are never included. Configure them again after restoring on another device.",
             "restored_characters": "Restored {{count}} character instances.",
             "skipped_memories": "{{count}} memories were skipped because they do not fit the local data layout.",
+            "legacy_telegram_skipped": {
+                "existing_bot_config": "Legacy Telegram settings were skipped because Skip Existing keeps the local Bot configuration file, even if it only contains settings for other platforms.",
+                "existing_telegram_config": "Legacy Telegram settings were skipped because Skip Existing keeps the local Telegram configuration file."
+            },
+            "reload_now": "Reload now",
             "merged_characters": "{{count}} characters were merged into existing ones.",
             "character_mapping_label": "Character ownership",
             "character_mapping_hint": "Character instance ids differ per device. Choose where each backup character's memories and conversations should go.",
@@ -1136,7 +1144,11 @@
         }
     },
     "chat": {
+        "tool_only_completion": "The tool calls finished, but no text reply was generated.",
         "speech_failed": "Could not read this reply aloud: {{error}}",
+        "persistence_failed": "Could not save this chat to the database.",
+        "reply_unfinished": "Unfinished reply",
+        "retry_save": "Retry saving",
         "status": {
             "streaming": "STREAMING",
             "chat": "CHAT"
@@ -1151,6 +1163,7 @@
             "edit": "Edit",
             "regenerate": "Regenerate",
             "save": "Save (Ctrl+Enter)",
+            "retry_refresh": "Retry refreshing",
             "cancel": "Cancel (Esc)",
             "clear": "Clear conversation",
             "confirm_clear_title": "Clear Conversation",
@@ -1174,6 +1187,7 @@
             "memory_model_required": "The local memory model is not ready yet. Chat can continue without semantic memory.",
             "memory_model_check_failed": "Could not confirm the local memory model status. Chat remains available; check the download dialog when convenient.",
             "edit_failed": "Failed to save edited message",
+            "edit_refresh_failed": "Message saved. The conversation could not be refreshed.",
             "delete_failed": "Failed to delete messages",
             "new_conversation_failed": "Failed to start new conversation. Current conversation preserved.",
             "new_conversation_slow": "Creating new conversation is taking longer than expected..."
@@ -1300,6 +1314,12 @@
     },
     "bot": {
         "title": "Bot Integrations",
+        "config_conflict": {
+            "stale": "Bot settings changed while you were editing. Refresh and review your edits before saving again.",
+            "overlap": "Some of the same fields changed in your draft and in the saved settings. You can keep the saved values for those fields and review the rest of your edits.",
+            "refresh": "Refresh Bot settings",
+            "keep_saved": "Keep saved values for overlapping edits"
+        },
         "status": {
             "enabled": "Enabled",
             "disabled": "Disabled",
@@ -1388,7 +1408,7 @@
         },
         "whitelist": {
             "label": "ALLOWED CHAT IDS",
-            "desc": "Only these chat IDs can interact with the bot. Empty = reject all.",
+            "desc": "Only listed chat IDs are allowed, not sender IDs. A group ID authorizes the whole chat. An empty list means no chats are authorized: all messages and commands are rejected, even while the bot is running. If you used an empty list before upgrading, add each chat ID you want to authorize and select Save.",
             "placeholder": "Chat ID (number)",
             "add": "Add"
         },

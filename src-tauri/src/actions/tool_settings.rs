@@ -8,7 +8,7 @@ use std::path::Path;
 
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 10;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ToolSettings {
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: usize,

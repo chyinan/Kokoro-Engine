@@ -2,6 +2,7 @@ pub mod api;
 pub mod manager;
 pub mod manifest;
 pub mod protocol;
+pub(crate) mod script_queue;
 pub mod theme;
 
 pub use api::ScriptEvent;

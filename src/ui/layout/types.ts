@@ -1,4 +1,5 @@
 import { CSSProperties } from "react";
+import type { JsonValue } from "@/lib/generated/ipc";
 
 export interface MotionAnimationConfig {
     initial?: Record<string, number | string>;
@@ -6,6 +7,8 @@ export interface MotionAnimationConfig {
     exit?: Record<string, number | string>;
     transition?: Record<string, number | string>;
 }
+
+export type ModMotionAnimation = Record<string, JsonValue>;
 
 export interface ThemeConfig {
     id: string;
@@ -17,7 +20,7 @@ export interface ThemeConfig {
         noise_texture?: string;
         [key: string]: string | string[] | undefined;
     };
-    animations?: Record<string, MotionAnimationConfig>;
+    animations?: Record<string, MotionAnimationConfig | ModMotionAnimation>;
 }
 
 export interface LayoutNode {

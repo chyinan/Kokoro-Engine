@@ -1,8 +1,9 @@
 // pattern: Imperative Shell
 
+import { dispatchModEvent } from "@/lib/kokoro-bridge";
 import { useEffect, useRef, useCallback } from 'react';
 import { modMessageBus } from './ModMessageBus';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeModCommand } from './mod-ipc';
 import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
 
 /** Message protocol between host ↔ iframe */
@@ -326,10 +327,7 @@ export const IframeSandbox = ({
                     }
 
                     // Route actions to the QuickJS script runtime via Tauri
-                    invoke('dispatch_mod_event', {
-                        event: `action:${actionPayload.action}`,
-                        payload: actionPayload.data ?? null,
-                    }).catch((err) => {
+                    dispatchModEvent(`action:${actionPayload.action}`, actionPayload.data ?? null).catch((err) => {
                         console.error(`[ModFrame ${id}] Failed to dispatch action:`, err);
                     });
 
@@ -385,7 +383,7 @@ export const IframeSandbox = ({
                                 title: args.title as string ?? undefined,
                             });
                         } else {
-                            promise = invoke(cmd, invokePayload.args ?? {});
+                            promise = invokeModCommand(cmd, invokePayload.args ?? {});
                         }
 
                         promise

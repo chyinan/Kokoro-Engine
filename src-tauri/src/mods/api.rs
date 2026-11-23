@@ -1,6 +1,6 @@
 use rquickjs::{Ctx, Function, Object, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Events emitted by QuickJS scripts, forwarded to the Tauri event bus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,9 +20,9 @@ pub enum ScriptEvent {
 }
 
 /// Register the Kokoro API into the QuickJS context.
-/// `event_tx` is a std::sync channel sender used by closures to forward events
+/// `event_tx` is used by closures to forward events
 /// out of the QuickJS thread to the Tauri event bus.
-pub fn register_api(ctx: &Ctx<'_>, event_tx: Sender<ScriptEvent>) -> Result<()> {
+pub fn register_api(ctx: &Ctx<'_>, event_tx: UnboundedSender<ScriptEvent>) -> Result<()> {
     let globals = ctx.globals();
     let kokoro = Object::new(ctx.clone())?;
 

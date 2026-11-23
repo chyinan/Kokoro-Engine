@@ -8,17 +8,18 @@
     "predev": "node scripts/prune-target.mjs --auto",
     "dev": "vite",
     "pretauri": "node scripts/prune-target.mjs --auto",
-    "tauri:dev": "node scripts/prune-target.mjs --auto && tauri dev",
+    "tauri:dev": "node scripts/prune-target.mjs --auto && node scripts/tauri.mjs dev",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "check:ipc": "node scripts/check-ipc-contract.mjs",
+    "generate:ipc": "cargo run --locked --manifest-path src-tauri/Cargo.toml --example export-ipc --",
+    "check:ipc": "npm run generate:ipc -- --check && node scripts/check-ipc-contract.mjs",
     "storage:doctor": "node scripts/prune-target.mjs --doctor",
     "storage:setup-hooks": "node scripts/prune-target.mjs --setup-hooks",
     "prune:target": "node scripts/prune-target.mjs",
     "prune:target:dry": "node scripts/prune-target.mjs --dry-run",
     "clean:target": "cargo clean --manifest-path src-tauri/Cargo.toml",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri.mjs"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",

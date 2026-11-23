@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const COMMITTED_RUNTIME_TABLE: &str = "character_activation_runtime";
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct BackendRuntimeSnapshot {
     pub character_id: String,
     pub character_name: String,
@@ -24,16 +24,20 @@ pub struct BackendRuntimeSnapshot {
     pub system_prompt: String,
     pub response_language: String,
     pub proactive_enabled: bool,
+    #[serde(default)]
     pub current_conversation_id: Option<String>,
+    #[serde(default)]
     pub live2d_model: Option<PackageAssetReference>,
+    #[serde(default)]
     pub background: Option<PackageAssetReference>,
+    #[serde(default)]
     pub cue_profile: Option<PackageAssetReference>,
     pub tts: ResolvedTts,
 }
 
 pub type ResolvedCharacterRuntime = BackendRuntimeSnapshot;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum PackageAssetReference {
     Package {
@@ -46,7 +50,7 @@ pub enum PackageAssetReference {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedTtsMode {
     ConfiguredProvider,
@@ -56,20 +60,27 @@ pub enum ResolvedTtsMode {
     TextOnly,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct ResolvedTts {
     pub mode: ResolvedTtsMode,
+    #[serde(default)]
     pub provider_id: Option<String>,
+    #[serde(default)]
     pub provider_type: Option<String>,
+    #[serde(default)]
     pub local_preset: Option<String>,
+    #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub voice: Option<String>,
+    #[serde(default)]
     pub speed: Option<f64>,
+    #[serde(default)]
     pub pitch: Option<f64>,
     pub requires_save_confirmation: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct PromptPayload {
     pub character_name: String,
     pub user_name: String,
@@ -77,15 +88,17 @@ pub struct PromptPayload {
     pub example_dialogue: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct CapabilityRecommendations {
+    #[serde(default)]
     pub vision: Option<bool>,
+    #[serde(default)]
     pub memory: Option<bool>,
     pub mcp_servers: Vec<String>,
     pub bot_platforms: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum GreetingAction {
     None,
@@ -93,7 +106,7 @@ pub enum GreetingAction {
     Emit { content: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct CharacterActivationToken {
     pub revision: u64,
     pub nonce: String,
@@ -101,12 +114,13 @@ pub struct CharacterActivationToken {
     pub previous_committed: BackendRuntimeSnapshot,
     pub resolved_runtime: ResolvedCharacterRuntime,
     pub prompt: PromptPayload,
+    #[serde(default)]
     pub target_conversation_id: Option<String>,
     pub greeting_action: GreetingAction,
     pub recommendations: CapabilityRecommendations,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct CommittedCharacterRuntime {
     pub revision: u64,
     pub runtime: ResolvedCharacterRuntime,
@@ -164,9 +178,9 @@ struct ActivationState {
     prepared: Option<PreparedActivation>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ActivationCoordinator {
-    state: Mutex<ActivationState>,
+    state: std::sync::Arc<Mutex<ActivationState>>,
 }
 
 impl ActivationCoordinator {
@@ -233,23 +247,9 @@ impl ActivationCoordinator {
         let revision = state.next_revision;
         state.latest_prepared_revision = revision;
 
-        let row = sqlx::query(
-            "SELECT name, persona, user_nickname, source_format, updated_at, greeting, \
-                    greeting_consumed_at, example_dialogue, runtime_profile_json, template_id, \
-                    template_version, template_snapshot_json \
-             FROM characters WHERE id = ?",
-        )
-        .bind(character_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| KokoroError::NotFound(format!("character '{character_id}' not found")))?;
-
-        let requested_runtime: CharacterRuntimeProfile = serde_json::from_str(
-            &row.try_get::<String, _>("runtime_profile_json")?,
-        )
-        .map_err(|error| {
-            KokoroError::Validation(format!("invalid character runtime profile: {error}"))
-        })?;
+        let content = read_character_content(pool, package_root, character_id).await?;
+        let row = content.row;
+        let requested_runtime = content.profile;
         // The backend snapshot is authoritative for the live session. The
         // persisted activation row is only a recovery fallback when the
         // backend has not been initialized yet; it may lag a conversation
@@ -265,45 +265,19 @@ impl ActivationCoordinator {
         let character_name = row.try_get::<String, _>("name")?;
         let user_name = normalized_user_name(row.try_get::<String, _>("user_nickname")?);
         let persona = row.try_get::<String, _>("persona")?;
-        let template_content = resolve_template_content(
-            &row.try_get::<String, _>("source_format")?,
-            row.try_get::<Option<String>, _>("template_id")?.as_deref(),
-            row.try_get::<Option<String>, _>("template_version")?
-                .as_deref(),
-            row.try_get::<Option<String>, _>("template_snapshot_json")?
-                .as_deref(),
-            package_root,
-        )?;
         let target_conversation_id = sqlx::query_scalar::<_, String>(
             "SELECT id FROM conversations WHERE character_id = ? ORDER BY updated_at DESC, id ASC LIMIT 1",
         )
         .bind(character_id)
         .fetch_optional(pool)
         .await?;
-        let resolved_runtime = BackendRuntimeSnapshot {
-            character_id: character_id.to_string(),
-            character_name: character_name.clone(),
-            user_name: user_name.clone(),
-            system_prompt: compose_system_prompt(
-                &persona,
-                &row.try_get::<String, _>("example_dialogue")?,
-            ),
-            response_language: requested_runtime
-                .response_language
-                .unwrap_or_else(|| previous_committed.response_language.clone()),
-            proactive_enabled: requested_runtime
-                .proactive_enabled
-                .unwrap_or(previous_committed.proactive_enabled),
-            current_conversation_id: target_conversation_id.clone(),
-            live2d_model: resolve_library_live2d_reference(
-                package_root,
-                requested_runtime.live2d_model.as_deref(),
-            )
-            .or(template_content.live2d_model),
-            background: template_content.background,
-            cue_profile: template_content.cue_profile,
-            tts: resolve_tts(requested_runtime.tts.as_ref(), tts_config, local_presets),
-        };
+        let mut resolved_runtime = content.runtime;
+        resolved_runtime.proactive_enabled = requested_runtime
+            .proactive_enabled
+            .unwrap_or(previous_committed.proactive_enabled);
+        resolved_runtime.current_conversation_id = target_conversation_id.clone();
+        resolved_runtime.tts =
+            resolve_tts(requested_runtime.tts.as_ref(), tts_config, local_presets);
         let greeting = row.try_get::<String, _>("greeting")?;
         let greeting_action = match (
             row.try_get::<Option<i64>, _>("greeting_consumed_at")?,
@@ -327,7 +301,7 @@ impl ActivationCoordinator {
             },
             target_conversation_id,
             greeting_action,
-            recommendations: template_content.recommendations,
+            recommendations: content.recommendations,
         };
         state.prepared = Some(PreparedActivation {
             token: token.clone(),
@@ -688,6 +662,91 @@ impl ActivationCoordinator {
     }
 }
 
+struct CharacterContent {
+    row: sqlx::sqlite::SqliteRow,
+    profile: CharacterRuntimeProfile,
+    runtime: BackendRuntimeSnapshot,
+    recommendations: CapabilityRecommendations,
+}
+
+async fn read_character_content(
+    pool: &SqlitePool,
+    package_root: Option<&Path>,
+    character_id: &str,
+) -> Result<CharacterContent, KokoroError> {
+    let row = sqlx::query(
+        "SELECT name, persona, user_nickname, source_format, updated_at, greeting, \
+                greeting_consumed_at, example_dialogue, runtime_profile_json, template_id, \
+                template_version, template_snapshot_json \
+         FROM characters WHERE id = ?",
+    )
+    .bind(character_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| KokoroError::NotFound(format!("character '{character_id}' not found")))?;
+
+    let requested_runtime: CharacterRuntimeProfile =
+        serde_json::from_str(&row.try_get::<String, _>("runtime_profile_json")?).map_err(
+            |error| KokoroError::Validation(format!("invalid character runtime profile: {error}")),
+        )?;
+
+    let template = resolve_template_content(
+        &row.try_get::<String, _>("source_format")?,
+        row.try_get::<Option<String>, _>("template_id")?.as_deref(),
+        row.try_get::<Option<String>, _>("template_version")?
+            .as_deref(),
+        row.try_get::<Option<String>, _>("template_snapshot_json")?
+            .as_deref(),
+        package_root,
+    )?;
+    let runtime = BackendRuntimeSnapshot {
+        character_id: character_id.into(),
+        character_name: row.try_get("name")?,
+        user_name: normalized_user_name(row.try_get("user_nickname")?),
+        system_prompt: compose_system_prompt(
+            &row.try_get::<String, _>("persona")?,
+            &row.try_get::<String, _>("example_dialogue")?,
+        ),
+        response_language: requested_runtime
+            .response_language
+            .clone()
+            .unwrap_or_default(),
+        live2d_model: resolve_library_live2d_reference(
+            package_root,
+            requested_runtime.live2d_model.as_deref(),
+        )
+        .or(template.live2d_model),
+        background: template.background,
+        cue_profile: template.cue_profile,
+        ..Default::default()
+    };
+    Ok(CharacterContent {
+        row,
+        profile: requested_runtime,
+        runtime,
+        recommendations: template.recommendations,
+    })
+}
+
+/// Read committed role fields without staging activation or choosing a session.
+/// TTS is resolved separately together with its application provider snapshot.
+pub(crate) async fn read_execution_runtime(
+    pool: &SqlitePool,
+    package_root: &Path,
+    character_id: &str,
+) -> Result<(BackendRuntimeSnapshot, Option<CharacterTtsProfile>), KokoroError> {
+    let content = read_character_content(pool, Some(package_root), character_id).await?;
+    Ok((content.runtime, content.profile.tts))
+}
+
+pub(crate) fn allowlisted_local_tts_presets() -> Vec<LocalTtsPreset> {
+    vec![LocalTtsPreset {
+        id: "gpt-sovits-loopback".to_string(),
+        provider_type: "gpt_sovits".to_string(),
+        endpoint: "http://127.0.0.1:9880".to_string(),
+    }]
+}
+
 /// Encapsulates compensation during recovery failure to guarantee consistent state:
 /// Restores initial snapshot, clears dirty in-memory history, marks degraded, and returns accurate diagnostics.
 async fn compensate_recovery_failure<B: ActivationRuntimeBackend>(
@@ -735,7 +794,7 @@ fn normalized_user_name(name: String) -> String {
     }
 }
 
-fn resolve_tts(
+pub(crate) fn resolve_tts(
     requested: Option<&CharacterTtsProfile>,
     config: &TtsSystemConfig,
     local_presets: &[LocalTtsPreset],
@@ -1104,7 +1163,7 @@ fn asset_metadata_is_redirected(metadata: &fs::Metadata) -> bool {
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
-fn compose_system_prompt(persona: &str, example_dialogue: &str) -> String {
+pub(crate) fn compose_system_prompt(persona: &str, example_dialogue: &str) -> String {
     let persona = persona.trim();
     let example_dialogue = example_dialogue.trim();
     if example_dialogue.is_empty() {
@@ -1281,9 +1340,7 @@ async fn revert_staged_greeting_in_tx(
     }
 }
 
-async fn ensure_committed_runtime_table(
-    pool: &SqlitePool,
-) -> Result<(), KokoroError> {
+async fn ensure_committed_runtime_table(pool: &SqlitePool) -> Result<(), KokoroError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS character_activation_runtime (\
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),\

@@ -1,11 +1,12 @@
 // pattern: Imperative Shell
 use crate::ai::context::AIOrchestrator;
 use crate::error::KokoroError;
+use crate::ipc::wire::{emit, Response};
 use crate::llm::service::LlmService;
 use serde::Deserialize;
 use tauri::State;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct ListMemoriesRequest {
     pub character_id: String,
     #[serde(default = "default_limit")]
@@ -18,17 +19,19 @@ fn default_limit() -> i64 {
     50
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, specta::Type)]
 pub struct ListMemoriesResponse {
     pub memories: Vec<crate::ai::memory::MemoryRecord>,
     pub total: i64,
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_memories(
     request: ListMemoriesRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<ListMemoriesResponse, KokoroError> {
+) -> Result<Response<ListMemoriesResponse>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "list_memories")?;
     tracing::info!(
         target: "memory",
         "[Memory] list_memories called for character_id='{}', limit={}, offset={}",
@@ -46,10 +49,10 @@ pub async fn list_memories(
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))?;
 
-    Ok(ListMemoriesResponse { memories, total })
+    Ok(Response(ListMemoriesResponse { memories, total }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct UpdateMemoryRequest {
     pub character_id: String,
     pub id: i64,
@@ -58,10 +61,12 @@ pub struct UpdateMemoryRequest {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_memory(
     request: UpdateMemoryRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "update_memory")?;
     if request.character_id.trim().is_empty() {
         return Err(KokoroError::Validation(
             "character_id must not be empty".to_string(),
@@ -79,17 +84,19 @@ pub async fn update_memory(
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct DeleteMemoryRequest {
     pub character_id: String,
     pub id: i64,
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_memory(
     request: DeleteMemoryRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "delete_memory")?;
     if request.character_id.trim().is_empty() {
         return Err(KokoroError::Validation(
             "character_id must not be empty".to_string(),
@@ -102,7 +109,7 @@ pub async fn delete_memory(
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct UpdateMemoryTierRequest {
     pub character_id: String,
     pub id: i64,
@@ -110,10 +117,12 @@ pub struct UpdateMemoryTierRequest {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn update_memory_tier(
     request: UpdateMemoryTierRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "update_memory_tier")?;
     if request.character_id.trim().is_empty() {
         return Err(KokoroError::Validation(
             "character_id must not be empty".to_string(),
@@ -131,19 +140,19 @@ pub async fn update_memory_tier(
         .map_err(|e| KokoroError::Database(e.to_string()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct DreamCharacterRequest {
     pub character_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct ListDreamJobsRequest {
     pub character_id: String,
     #[serde(default = "default_dream_limit")]
     pub limit: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct ListDreamProposalsRequest {
     pub character_id: String,
     #[serde(default)]
@@ -152,7 +161,7 @@ pub struct ListDreamProposalsRequest {
     pub limit: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, specta::Type)]
 pub struct DreamProposalRequest {
     pub id: i64,
 }
@@ -162,11 +171,16 @@ fn default_dream_limit() -> i64 {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn run_dream_now(
     request: DreamCharacterRequest,
     state: State<'_, AIOrchestrator>,
     llm_state: State<'_, LlmService>,
-) -> Result<crate::ai::memory::MemoryDreamRunResult, KokoroError> {
+) -> Result<Response<crate::ai::memory::MemoryDreamRunResult>, KokoroError> {
+    let _dream = state
+        .chat_memory_work()
+        .lease("manual-dream")
+        .map_err(|error| KokoroError::Internal(error.to_string()))?;
     let provider = llm_state.system_provider().await;
     let target_language = state.response_language.lock().await.clone();
     state
@@ -179,37 +193,46 @@ pub async fn run_dream_now(
         )
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_dreaming_summary(
     request: DreamCharacterRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<crate::ai::memory::MemoryDreamingSummary, KokoroError> {
+) -> Result<Response<crate::ai::memory::MemoryDreamingSummary>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "get_dreaming_summary")?;
     state
         .memory_manager
         .dreaming_summary(&request.character_id)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_dream_jobs(
     request: ListDreamJobsRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<Vec<crate::ai::memory::MemoryDreamJobRecord>, KokoroError> {
+) -> Result<Response<Vec<crate::ai::memory::MemoryDreamJobRecord>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "list_dream_jobs")?;
     state
         .memory_manager
         .list_dream_jobs(&request.character_id, request.limit)
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_dream_proposals(
     request: ListDreamProposalsRequest,
     state: State<'_, AIOrchestrator>,
-) -> Result<Vec<crate::ai::memory::MemoryDreamProposalRecord>, KokoroError> {
+) -> Result<Response<Vec<crate::ai::memory::MemoryDreamProposalRecord>>, KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "list_dream_proposals")?;
     state
         .memory_manager
         .list_dream_proposals(
@@ -219,13 +242,16 @@ pub async fn list_dream_proposals(
         )
         .await
         .map_err(|e| KokoroError::Database(e.to_string()))
+        .map(Response)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn approve_dream_proposal(
     request: DreamProposalRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "approve_dream_proposal")?;
     state
         .memory_manager
         .approve_dream_proposal(request.id)
@@ -234,10 +260,12 @@ pub async fn approve_dream_proposal(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn reject_dream_proposal(
     request: DreamProposalRequest,
     state: State<'_, AIOrchestrator>,
 ) -> Result<(), KokoroError> {
+    let _operation = crate::ipc::admit_in(&state.lifecycle, "memory", "reject_dream_proposal")?;
     state
         .memory_manager
         .reject_dream_proposal(request.id)
@@ -246,20 +274,20 @@ pub async fn reject_dream_proposal(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn get_memory_embedding_model_status(
 ) -> Result<crate::ai::memory::MemoryEmbeddingModelStatus, KokoroError> {
     Ok(crate::ai::memory::memory_embedding_model_status())
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn download_memory_embedding_model(
     app: tauri::AppHandle,
 ) -> Result<crate::ai::memory::MemoryEmbeddingModelStatus, KokoroError> {
-    use tauri::Emitter;
-
+    let _download = crate::ipc::admit_operation(&app, "memory-model", "embedding-download")?;
     crate::ai::memory::download_memory_embedding_model(move |progress| {
-        app.emit("memory:embedding-model-progress", &progress)
-            .map_err(|error| error.to_string())
+        emit(&app, progress).map_err(|error| error.to_string())
     })
     .await
     .map_err(KokoroError::Internal)

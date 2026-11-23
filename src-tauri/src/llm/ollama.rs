@@ -17,10 +17,12 @@ use crate::llm::provider::{
     LlmProvider, LlmStreamEvent, LlmToolDefinition,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct OllamaModelInfo {
     pub name: String,
+    #[serde(default)]
     pub size: Option<u64>,
+    #[serde(default)]
     pub modified_at: Option<String>,
 }
 

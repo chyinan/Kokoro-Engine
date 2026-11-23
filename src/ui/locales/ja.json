@@ -1014,6 +1014,9 @@
                 }
             },
             "refresh_tooltip": "全サーバーのツールを更新",
+            "refresh_failed": "MCP ツールを更新できませんでした。",
+            "server_status_unavailable": "サーバーの状態を取得できませんでした。",
+            "tool_list_unavailable": "ツール一覧を取得できませんでした。",
             "add_button": "追加",
             "add_modal": {
                 "title": "MCP サーバーを追加",
@@ -1083,6 +1086,11 @@
             "provider_credentials_warning": "プロバイダー認証情報はバックアップされません。別の端末で復元した後に再設定してください。",
             "restored_characters": "{{count}} 件のキャラクターを復元しました。",
             "skipped_memories": "{{count}} 件の記憶は、ローカルのデータ構造に適合しないためスキップされました。",
+            "legacy_telegram_skipped": {
+                "existing_bot_config": "既存の設定をスキップする設定のため、旧形式の Telegram 設定は読み込まれませんでした。ローカルの Bot 設定ファイルは、他のプラットフォームしか設定されていない場合も保持されます。",
+                "existing_telegram_config": "既存の設定をスキップする設定のため、ローカルの Telegram 設定ファイルが保持され、旧形式の Telegram 設定は読み込まれませんでした。"
+            },
+            "reload_now": "今すぐ再読み込み",
             "merged_characters": "{{count}} 件のキャラクターを既存のキャラクターに統合しました。",
             "character_mapping_label": "キャラクターの所属",
             "character_mapping_hint": "インスタンス ID は端末ごとに異なります。バックアップ内の各キャラクターの記憶と会話を、どのローカルキャラクターに割り当てるか選んでください。",
@@ -1127,7 +1135,11 @@
         }
     },
     "chat": {
+        "tool_only_completion": "ツールの呼び出しは終了しましたが、テキストの返信は生成されませんでした。",
         "speech_failed": "この返信を読み上げられませんでした：{{error}}",
+        "persistence_failed": "チャットをデータベースに保存できませんでした。",
+        "reply_unfinished": "未完了の返信",
+        "retry_save": "保存を再試行",
         "status": {
             "streaming": "生成中",
             "chat": "チャット"
@@ -1142,6 +1154,7 @@
             "edit": "編集",
             "regenerate": "再生成",
             "save": "保存 (Ctrl+Enter)",
+            "retry_refresh": "再読み込み",
             "cancel": "キャンセル (Esc)",
             "clear": "会話をクリア",
             "confirm_clear_title": "会話をクリア",
@@ -1165,6 +1178,7 @@
             "memory_model_required": "ローカル記憶モデルはまだ準備中です。チャットは続けられますが、意味検索は一時的に使われません。",
             "memory_model_check_failed": "ローカル記憶モデルの状態を確認できませんでした。チャットは続けられるため、都合のよい時にダウンロード画面を確認してください。",
             "edit_failed": "編集したメッセージの保存に失敗しました",
+            "edit_refresh_failed": "メッセージを保存しました。会話を再読み込みできませんでした。",
             "delete_failed": "メッセージの削除に失敗しました",
             "new_conversation_failed": "新しい会話の開始に失敗しました。現在の会話を保持しました。",
             "new_conversation_slow": "新しい会話の作成に時間がかかっています。しばらくお待ちください..."
@@ -1289,6 +1303,12 @@
     },
     "bot": {
         "title": "Bot 連携",
+        "config_conflict": {
+            "stale": "編集中に Bot 設定が変更されました。設定を再読み込みし、変更内容を確認してから保存し直してください。",
+            "overlap": "下書きと保存済みの設定で、同じ項目が変更されています。該当する項目には保存済みの値を使い、残りの変更を確認できます。",
+            "refresh": "Bot 設定を再読み込み",
+            "keep_saved": "重複する項目は保存済みの値を使う"
+        },
         "status": {
             "enabled": "有効",
             "disabled": "無効",
@@ -1377,7 +1397,7 @@
         },
         "whitelist": {
             "label": "許可されたチャット ID",
-            "desc": "これらのチャット ID のみがボットと対話できます。空 = すべて拒否。",
+            "desc": "送信者 ID ではなく、一覧にあるチャット ID のみを許可します。グループ ID はグループ全体を許可します。空の一覧では許可されたチャットはなく、ボットの稼働中もすべてのメッセージとコマンドを拒否します。 アップグレード前に空のリストで利用していた場合は、許可したいチャット ID をすべて追加して保存してください。",
             "placeholder": "チャット ID（数字）",
             "add": "追加"
         },

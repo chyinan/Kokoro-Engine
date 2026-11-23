@@ -1,5 +1,8 @@
+use crate::lifecycle::TaskScope;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, SystemTime};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use warp::Filter;
 
@@ -12,6 +15,7 @@ pub struct VisionServer {
     pub port: u16,
     pub upload_dir: PathBuf,
     image_counter: AtomicU32,
+    stop: Option<CancellationToken>,
 }
 
 impl VisionServer {
@@ -31,11 +35,17 @@ impl VisionServer {
             port: 0, // assigned after bind
             upload_dir,
             image_counter: AtomicU32::new(1),
+            stop: None,
         }
     }
 
     /// Start the HTTP file server in background. Stores the actual port.
-    pub async fn start(&mut self) {
+    pub(crate) fn start(&mut self, scope: &TaskScope) -> Result<(), String> {
+        if self.stop.is_some() {
+            return Ok(());
+        }
+        let _start = scope.lease("bind").map_err(|error| error.to_string())?;
+        let stop = scope.token().child_token();
         let dir = self.upload_dir.clone();
 
         // Bind to port 0 to get a random free port
@@ -48,40 +58,40 @@ impl VisionServer {
             })
             .and_then(serve_file);
 
-        let (addr, fut) = warp::serve(vision_route).bind_ephemeral(([127, 0, 0, 1], 0));
+        let stop_listener = stop.clone();
+        let (addr, listener) = warp::serve(vision_route)
+            .try_bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
+                stop_listener.cancelled().await;
+            })
+            .map_err(|error| error.to_string())?;
+        scope
+            .spawn_durable("http-listener", listener)
+            .map_err(|error| error.to_string())?;
 
+        // Delete files older than 30 minutes, every 10 minutes.
+        let cleanup_dir = self.upload_dir.clone();
+        let stop_cleanup = stop.clone();
+        if let Err(error) = scope.spawn_durable("upload-ttl-cleanup", async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stop_cleanup.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(600)) => {}
+                }
+                prune_old_uploads(&cleanup_dir, &stop_cleanup).await;
+            }
+        }) {
+            stop.cancel();
+            return Err(error.to_string());
+        }
+        self.stop = Some(stop);
         self.port = addr.port();
-
         tracing::info!(
             target: "vision",
-            "Static file server started on http://127.0.0.1:{}",
-            self.port
+            port = self.port,
+            "static file server listening on localhost",
         );
-
-        // Spawn the server in the background
-        tokio::spawn(fut);
-
-        // Spawn TTL cleanup thread — delete files older than 30 minutes, every 10 minutes
-        let cleanup_dir = self.upload_dir.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
-                if let Ok(entries) = std::fs::read_dir(&cleanup_dir) {
-                    let cutoff =
-                        std::time::SystemTime::now() - std::time::Duration::from_secs(1800);
-                    for entry in entries.flatten() {
-                        if let Ok(meta) = entry.metadata() {
-                            if let Ok(modified) = meta.modified() {
-                                if modified < cutoff {
-                                    let _ = std::fs::remove_file(entry.path());
-                                    tracing::info!(target: "vision", "TTL cleanup: removed {:?}", entry.path());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        Ok(())
     }
 
     /// Save uploaded bytes to a random filename and return the served URL.
@@ -118,6 +128,39 @@ impl VisionServer {
         tracing::info!(target: "vision", "Uploaded {} -> {}", original_filename, url);
 
         Ok(url)
+    }
+}
+
+impl Drop for VisionServer {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.cancel();
+        }
+    }
+}
+
+async fn prune_old_uploads(dir: &std::path::Path, stop: &CancellationToken) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    let cutoff = SystemTime::now() - Duration::from_secs(1800);
+    while !stop.is_cancelled() {
+        let Ok(Some(entry)) = entries.next_entry().await else {
+            break;
+        };
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if metadata.modified().is_ok_and(|modified| modified < cutoff) {
+            match tokio::fs::remove_file(entry.path()).await {
+                Ok(()) => {
+                    tracing::debug!(target: "vision", "TTL cleanup removed {:?}", entry.path())
+                }
+                Err(error) => {
+                    tracing::warn!(target: "vision", %error, "could not remove expired vision upload")
+                }
+            }
+        }
     }
 }
 

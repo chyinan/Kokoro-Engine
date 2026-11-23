@@ -16,29 +16,46 @@ use super::openai_realtime::OpenAIRealtimeTtsProvider;
 use super::queue::TtsQueue;
 use super::router::TtsRouter;
 use super::voice_registry::VoiceRegistry;
+use crate::lifecycle::TaskScope;
 
-use crate::chat::runtime::ChatRuntimeState;
+use crate::ai::context::AIOrchestrator;
+use crate::chat::runtime::ChatPlaybackScope;
+use crate::error::KokoroError;
 use crate::hooks::{HookEvent, HookPayload, HookRuntime, TtsHookPayload};
 use futures::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{watch, Mutex, RwLock};
 
 const MAX_CANCELLED_TTS_REQUESTS: usize = 128;
 
-// ── Tauri Event Payloads ───────────────────────────────
-
-#[derive(Clone, Serialize)]
-struct TtsStartEvent {
-    request_id: String,
-    text: String,
+pub(crate) trait TtsPlayback: Send + Sync {
+    fn emit(&self, event: TtsPlaybackEvent) -> Result<(), String>;
 }
 
-#[derive(Clone, Serialize)]
-struct TtsAudioEvent {
+pub(crate) enum TtsPlaybackEvent {
+    Start(TtsStartEvent),
+    Audio(TtsAudioEvent),
+    End(TtsEndEvent),
+    Error(TtsErrorEvent),
+    BrowserDelegate(TtsBrowserDelegateEvent),
+}
+
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:start")]
+pub(crate) struct TtsStartEvent {
+    pub(crate) request_id: String,
+    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_scope: Option<ChatPlaybackScope>,
+}
+
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:audio")]
+pub(crate) struct TtsAudioEvent {
     request_id: String,
     sentence_id: usize,
     sequence: u64,
@@ -47,14 +64,15 @@ struct TtsAudioEvent {
     data: Vec<u8>,
 }
 
-#[derive(Clone, Serialize)]
-struct TtsEndEvent {
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:end")]
+pub(crate) struct TtsEndEvent {
     request_id: String,
     text: String,
     status: TtsFinishStatus,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 enum TtsFinishStatus {
     Completed,
@@ -62,14 +80,16 @@ enum TtsFinishStatus {
     Error,
 }
 
-#[derive(Clone, Serialize)]
-struct TtsErrorEvent {
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:error")]
+pub(crate) struct TtsErrorEvent {
     request_id: String,
     error: String,
 }
 
-#[derive(Clone, Serialize)]
-struct TtsBrowserDelegateEvent {
+#[derive(Clone, Serialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "tts:browser-delegate")]
+pub(crate) struct TtsBrowserDelegateEvent {
     request_id: String,
     sentence_id: usize,
     text: String,
@@ -80,7 +100,7 @@ struct TtsBrowserDelegateEvent {
 
 // ── Provider Status (for frontend queries) ─────────────
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 pub struct ProviderStatus {
     pub id: String,
     pub available: bool,
@@ -91,13 +111,71 @@ pub struct ProviderStatus {
 
 #[derive(Clone)]
 pub struct TtsService {
+    snapshot_gate: Arc<RwLock<()>>,
+    committed_config: Arc<RwLock<TtsSystemConfig>>,
     providers: Arc<RwLock<HashMap<String, Arc<dyn TtsProvider>>>>,
     default_provider: Arc<RwLock<Option<String>>>,
     voice_registry: Arc<RwLock<VoiceRegistry>>,
     cache: Arc<RwLock<TtsCache>>,
     requests: Arc<Mutex<TtsRequests>>,
     _queue: Arc<TtsQueue>,
+    process_scope: Option<TaskScope>,
     cache_enabled: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct TtsExecutionSnapshot {
+    provider_id: String,
+    provider: Option<Arc<dyn TtsProvider>>,
+    params: TtsParams,
+}
+impl std::fmt::Debug for TtsExecutionSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtsExecutionSnapshot")
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for TtsExecutionSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.provider_id == other.provider_id
+            && match (&self.provider, &other.provider) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && serde_json::to_value(&self.params).ok() == serde_json::to_value(&other.params).ok()
+    }
+}
+impl Eq for TtsExecutionSnapshot {}
+impl TtsExecutionSnapshot {
+    fn provider(&self) -> Result<&Arc<dyn TtsProvider>, String> {
+        self.provider.as_ref().ok_or_else(|| {
+            format!(
+                "TTS provider {} was unavailable when this turn started",
+                self.provider_id
+            )
+        })
+    }
+
+    pub(crate) async fn synthesize(&self, text: &str) -> Result<Vec<u8>, String> {
+        let provider = self.provider()?;
+        let output_format = provider.output_format();
+        let mut stream = provider
+            .synthesize_stream(text, self.params.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut audio = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            audio.extend_from_slice(&chunk.map_err(|error| error.to_string())?.data);
+        }
+        match output_format {
+            Some(AudioFormat::PcmS16Le {
+                sample_rate,
+                channels,
+            }) => wrap_pcm_s16le_as_wav(&audio, sample_rate, channels),
+            _ => Ok(audio),
+        }
+    }
 }
 
 struct ActiveTtsRequest {
@@ -118,21 +196,115 @@ impl Default for TtsService {
 }
 
 impl TtsService {
+    pub(crate) async fn execution_snapshot(
+        &self,
+        speech: Option<&crate::characters::activation::ResolvedTts>,
+        profile: Option<&crate::characters::manifest::CharacterTtsProfile>,
+    ) -> Option<Arc<TtsExecutionSnapshot>> {
+        let _snapshot = self.snapshot_gate.read().await;
+        let resolved = if let Some(profile) = profile {
+            Some(crate::characters::activation::resolve_tts(
+                Some(profile),
+                &*self.committed_config.read().await,
+                &[],
+            ))
+        } else {
+            None
+        };
+        self.capture_execution_snapshot(resolved.as_ref().or(speech))
+            .await
+    }
+
+    /// Resolve the bound role's speech policy and provider under the same config gate.
+    pub(crate) async fn role_execution_snapshot(
+        &self,
+        profile: &crate::characters::manifest::CharacterTtsProfile,
+    ) -> (
+        crate::characters::activation::ResolvedTts,
+        Option<Arc<TtsExecutionSnapshot>>,
+    ) {
+        let _snapshot = self.snapshot_gate.read().await;
+        let speech = crate::characters::activation::resolve_tts(
+            Some(profile),
+            &*self.committed_config.read().await,
+            &crate::characters::activation::allowlisted_local_tts_presets(),
+        );
+        let snapshot = self.capture_execution_snapshot(Some(&speech)).await;
+        (speech, snapshot)
+    }
+
+    /// Caller holds snapshot_gate so config resolution and provider capture agree.
+    async fn capture_execution_snapshot(
+        &self,
+        speech: Option<&crate::characters::activation::ResolvedTts>,
+    ) -> Option<Arc<TtsExecutionSnapshot>> {
+        use crate::characters::activation::ResolvedTtsMode;
+        if speech.is_some_and(|speech| {
+            matches!(
+                speech.mode,
+                ResolvedTtsMode::TextOnly | ResolvedTtsMode::LocalPresetConfirmation
+            )
+        }) {
+            return None;
+        }
+        let browser = speech.is_some_and(|speech| speech.mode == ResolvedTtsMode::Browser);
+        let id = match speech.and_then(|speech| speech.provider_id.clone()) {
+            Some(id) => id,
+            None if browser => "browser".into(),
+            None => self.default_provider.read().await.clone()?,
+        };
+        let provider = self.providers.read().await.get(&id).cloned().or_else(|| {
+            // Browser speech is a fixed frontend delegation even if no Rust
+            // provider was registered. Never resolve it again after the model.
+            browser.then(|| Arc::new(BrowserTTSProvider::new()) as Arc<dyn TtsProvider>)
+        });
+        let params = TtsParams {
+            voice: speech.and_then(|speech| speech.voice.clone()),
+            speed: speech
+                .and_then(|speech| speech.speed)
+                .map(|value| value as f32),
+            pitch: speech
+                .and_then(|speech| speech.pitch)
+                .map(|value| value as f32),
+            ..Default::default()
+        };
+        Some(Arc::new(TtsExecutionSnapshot {
+            provider_id: id,
+            provider,
+            params,
+        }))
+    }
     pub fn new() -> Self {
         Self {
+            snapshot_gate: Arc::default(),
+            committed_config: Arc::default(),
             providers: Arc::new(RwLock::new(HashMap::new())),
             default_provider: Arc::new(RwLock::new(None)),
             voice_registry: Arc::new(RwLock::new(VoiceRegistry::new())),
             cache: Arc::new(RwLock::new(TtsCache::new(500, 3600))),
             requests: Arc::new(Mutex::new(TtsRequests::default())),
             _queue: Arc::new(TtsQueue::new(3)),
+            process_scope: None,
             cache_enabled: true,
         }
     }
 
     /// Initialize TtsService from a config, building and registering all providers.
     pub async fn init_from_config(config: &TtsSystemConfig) -> Self {
+        Self::initialize(config, None).await
+    }
+
+    pub(crate) async fn init_from_config_with_scope(
+        config: &TtsSystemConfig,
+        scope: TaskScope,
+    ) -> Self {
+        Self::initialize(config, Some(scope)).await
+    }
+
+    async fn initialize(config: &TtsSystemConfig, process_scope: Option<TaskScope>) -> Self {
         let service = Self {
+            snapshot_gate: Arc::default(),
+            committed_config: Arc::new(RwLock::new(config.clone())),
             providers: Arc::new(RwLock::new(HashMap::new())),
             default_provider: Arc::new(RwLock::new(config.default_provider.clone())),
             voice_registry: Arc::new(RwLock::new(VoiceRegistry::new())),
@@ -142,6 +314,7 @@ impl TtsService {
             ))),
             requests: Arc::new(Mutex::new(TtsRequests::default())),
             _queue: Arc::new(TtsQueue::new(config.queue.max_concurrent)),
+            process_scope,
             cache_enabled: config.cache.enabled,
         };
 
@@ -151,7 +324,7 @@ impl TtsService {
                 continue;
             }
 
-            match Self::build_provider(provider_config).await {
+            match service.build_provider(provider_config).await {
                 Some(provider) => {
                     tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
                     service.register_provider(provider).await;
@@ -170,7 +343,7 @@ impl TtsService {
     }
 
     /// Build a provider from config.
-    async fn build_provider(config: &ProviderConfig) -> Option<Arc<dyn TtsProvider>> {
+    async fn build_provider(&self, config: &ProviderConfig) -> Option<Arc<dyn TtsProvider>> {
         match config.provider_type.as_str() {
             "openai" => {
                 OpenAITtsProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
@@ -188,9 +361,9 @@ impl TtsService {
             }
             "gpt_sovits" => LocalGPTSoVITSProvider::from_config(config)
                 .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
-            "omnivoice" => {
-                OmniVoiceProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
-            }
+            "omnivoice" => OmniVoiceProvider::from_config(config).map(|provider| {
+                Arc::new(provider.with_scope(self.process_scope.clone())) as Arc<dyn TtsProvider>
+            }),
             "azure" => {
                 AzureTtsProvider::from_config(config).map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
             }
@@ -205,6 +378,7 @@ impl TtsService {
 
     /// Register a provider and its voices.
     pub async fn register_provider(&self, provider: Arc<dyn TtsProvider>) {
+        let _snapshot = self.snapshot_gate.write().await;
         let id = provider.id();
         let voices = provider.voices();
 
@@ -230,9 +404,10 @@ impl TtsService {
     }
 
     /// Main synthesis method with cache → queue → route → synthesize pipeline.
-    pub async fn speak(
+    pub(crate) async fn speak(
         &self,
-        app: AppHandle,
+        playback: &dyn TtsPlayback,
+        hooks: Option<&HookRuntime>,
         text: String,
         provider_id: Option<String>,
         params: Option<TtsParams>,
@@ -244,15 +419,68 @@ impl TtsService {
 
         let result = self
             .speak_request(
-                app,
+                playback,
+                hooks,
                 text,
                 provider_id,
                 params.unwrap_or_default(),
                 request_id,
                 &cancel,
+                None,
+                None,
             )
             .await;
 
+        let mut requests = self.requests.lock().await;
+        if requests
+            .active
+            .as_ref()
+            .is_some_and(|current| current.cancel.same_channel(&cancel))
+        {
+            requests.active = None;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn speak_snapshot(
+        &self,
+        playback: &dyn TtsPlayback,
+        hooks: Option<&HookRuntime>,
+        text: String,
+        request_id: String,
+        snapshot: Arc<TtsExecutionSnapshot>,
+        scope: &ChatPlaybackScope,
+        selection: &AIOrchestrator,
+    ) -> Result<(), String> {
+        let cancel = {
+            let Ok(_activation) = selection.enter_chat_turn() else {
+                return Ok(());
+            };
+            let _selection = selection.selection.conversation_switch_lock.lock().await;
+            if !scope.matches_selection(selection).await {
+                return Ok(());
+            }
+            // Only short in-memory registration is covered. A late A request cannot
+            // replace a B request registered after the selection changed.
+            let Some(cancel) = self.register_request(&request_id).await else {
+                return Ok(());
+            };
+            cancel
+        };
+        let result = self
+            .speak_request(
+                playback,
+                hooks,
+                text,
+                None,
+                snapshot.params.clone(),
+                request_id,
+                &cancel,
+                Some(&snapshot),
+                Some((scope, selection)),
+            )
+            .await;
         let mut requests = self.requests.lock().await;
         if requests
             .active
@@ -307,8 +535,6 @@ impl TtsService {
     async fn publish_playback_start(
         &self,
         cancel: &watch::Sender<bool>,
-        window: &str,
-        runtime: Option<&ChatRuntimeState>,
         emit_start: impl FnOnce(&str) -> Result<(), String>,
     ) -> Result<bool, String> {
         let requests = self.requests.lock().await;
@@ -321,51 +547,58 @@ impl TtsService {
         };
         let request_id = &current.request_id;
         // A replacement or cancellation must wait until ownership and tts:start are published.
-        if let Some(runtime) = runtime {
-            runtime.begin_playback(request_id, window);
-        }
-        if let Err(error) = emit_start(request_id) {
-            if let Some(runtime) = runtime {
-                runtime.finish_playback(request_id, window, None);
-            }
-            return Err(error);
-        }
+        emit_start(request_id)?;
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn speak_request(
         &self,
-        app: AppHandle,
+        playback: &dyn TtsPlayback,
+        hooks: Option<&HookRuntime>,
         text: String,
         preferred_provider_id: Option<String>,
         params: TtsParams,
         request_id: String,
         cancellation: &watch::Sender<bool>,
+        snapshot: Option<&TtsExecutionSnapshot>,
+        chat_scope: Option<(&ChatPlaybackScope, &AIOrchestrator)>,
     ) -> Result<(), String> {
         let mut cancel = cancellation.subscribe();
-        let playback_window = if app.get_webview_window("main").is_some() { "main" } else { "pet" };
-        let hook_runtime = app.try_state::<HookRuntime>();
-        let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
-        let route = router
-            .select_provider(
-                preferred_provider_id.as_deref(),
-                params.required_capabilities.as_ref(),
+        let (route, provider) = if let Some(snapshot) = snapshot {
+            let provider = snapshot.provider()?.clone();
+            (
+                super::router::RouteResult {
+                    provider_id: snapshot.provider_id.clone(),
+                    score: 1.0,
+                },
+                provider,
             )
-            .await
-            .map_err(|error| error.to_string())?;
-        let provider = self
-            .providers
-            .read()
-            .await
-            .get(&route.provider_id)
-            .cloned()
-            .ok_or_else(|| format!("Provider {} not found", route.provider_id))?;
+        } else {
+            let router = TtsRouter::new(self.providers.clone(), self.default_provider.clone());
+            let route = router
+                .select_provider(
+                    preferred_provider_id.as_deref(),
+                    params.required_capabilities.as_ref(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let provider = self
+                .providers
+                .read()
+                .await
+                .get(&route.provider_id)
+                .cloned()
+                .ok_or_else(|| format!("Provider {} not found", route.provider_id))?;
+
+            (route, provider)
+        };
 
         if *cancel.borrow() {
             return Ok(());
         }
 
-        if let Some(hooks) = hook_runtime.as_ref() {
+        if let Some(hooks) = hooks {
             hooks
                 .emit_best_effort(
                     &HookEvent::BeforeTtsPlay,
@@ -377,24 +610,19 @@ impl TtsService {
                 .await;
         }
 
-        let runtime = app.try_state::<Arc<ChatRuntimeState>>();
+        if let Some((scope, selection)) = chat_scope {
+            if !scope.is_selected(selection).await {
+                return Ok(());
+            }
+        }
         if !self
-            .publish_playback_start(
-                cancellation,
-                playback_window,
-                runtime.as_ref().map(|state| state.inner().as_ref()),
-                |request_id| {
-                    app.emit_to(
-                        playback_window,
-                        "tts:start",
-                        TtsStartEvent {
-                            request_id: request_id.to_owned(),
-                            text: text.clone(),
-                        },
-                    )
-                    .map_err(|error| error.to_string())
-                },
-            )
+            .publish_playback_start(cancellation, |request_id| {
+                playback.emit(TtsPlaybackEvent::Start(TtsStartEvent {
+                    request_id: request_id.to_owned(),
+                    text: text.clone(),
+                    chat_scope: chat_scope.map(|(scope, _)| scope.clone()),
+                }))
+            })
             .await?
         {
             return Ok(());
@@ -481,7 +709,12 @@ impl TtsService {
         let mut synthesis_error: Option<String> = None;
         let mut cancelled = false;
         'sentences: while let Some(result) = sentences.next().await {
-            if *cancel.borrow() {
+            if *cancel.borrow()
+                || match chat_scope {
+                    Some((scope, selection)) => !scope.is_selected(selection).await,
+                    None => false,
+                }
+            {
                 cancelled = true;
                 provider.cancel_request(&request_id).await;
                 break;
@@ -500,16 +733,23 @@ impl TtsService {
                                 match chunk {
                                     Some(Ok(chunk)) if chunk.data.is_empty() => continue,
                                     Some(Ok(chunk)) => {
+                                        if let Some((scope, selection)) = chat_scope {
+                                            if !scope.is_selected(selection).await {
+                                                cancelled = true;
+                                                provider.cancel_request(&request_id).await;
+                                                break;
+                                            }
+                                        }
                                         full_audio.extend_from_slice(&chunk.data);
                                         sequence += 1;
-                                        if let Err(error) = app.emit_to(playback_window, "tts:audio", TtsAudioEvent {
+                                        if let Err(error) = playback.emit(TtsPlaybackEvent::Audio(TtsAudioEvent {
                                             request_id: request_id.clone(),
                                             sentence_id,
                                             sequence,
                                             response_id: chunk.response_id,
                                             format: chunk.format.or_else(|| provider_output_format.clone()),
                                             data: chunk.data,
-                                        }) {
+                                        })) {
                                             synthesis_error = Some(format!("failed to deliver TTS audio: {error}"));
                                             provider.cancel_request(&request_id).await;
                                             break;
@@ -544,18 +784,14 @@ impl TtsService {
                     }
                 }
                 Ok((sentence_id, sentence, None, None)) => {
-                    app.emit_to(playback_window,
-                        "tts:browser-delegate",
-                        TtsBrowserDelegateEvent {
-                            request_id: request_id.clone(),
-                            sentence_id,
-                            text: sentence,
-                            voice: params.voice.clone(),
-                            speed: params.speed,
-                            pitch: params.pitch,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
+                    playback.emit(TtsPlaybackEvent::BrowserDelegate(TtsBrowserDelegateEvent {
+                        request_id: request_id.clone(),
+                        sentence_id,
+                        text: sentence,
+                        voice: params.voice.clone(),
+                        speed: params.speed,
+                        pitch: params.pitch,
+                    }))?;
                 }
                 Ok((_, _, None, Some(_))) => {
                     synthesis_error = Some("TTS provider returned no audio stream".to_string());
@@ -587,29 +823,22 @@ impl TtsService {
         };
 
         if let Some(error) = synthesis_error.as_ref() {
-            let _ = app.emit_to(playback_window,
-                "tts:error",
-                TtsErrorEvent {
-                    request_id: request_id.clone(),
-                    error: error.clone(),
-                },
-            );
-        }
-        app.emit_to(playback_window,
-            "tts:end",
-            TtsEndEvent {
+            let _ = playback.emit(TtsPlaybackEvent::Error(TtsErrorEvent {
                 request_id: request_id.clone(),
-                text: text.clone(),
-                status: finish_status,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+                error: error.clone(),
+            }));
+        }
+        playback.emit(TtsPlaybackEvent::End(TtsEndEvent {
+            request_id: request_id.clone(),
+            text: text.clone(),
+            status: finish_status,
+        }))?;
 
         if let Some(error) = synthesis_error {
             return Err(error);
         }
         if !cancelled {
-            if let Some(hooks) = hook_runtime.as_ref() {
+            if let Some(hooks) = hooks {
                 hooks
                     .emit_best_effort(
                         &HookEvent::AfterTtsPlay,
@@ -656,6 +885,17 @@ impl TtsService {
         })
     }
 
+    pub(crate) async fn save_and_reload_config(
+        &self,
+        path: &Path,
+        config: &TtsSystemConfig,
+    ) -> Result<(), KokoroError> {
+        super::config::save_config(path, config)?;
+        self.reload_from_config(config)
+            .await
+            .map_err(|error| KokoroError::Tts(format!("failed to reload TTS providers: {error}")))
+    }
+
     /// Hot-reload: rebuild providers first, then atomically swap runtime state.
     pub async fn reload_from_config(&self, config: &TtsSystemConfig) -> Result<(), TtsError> {
         self.cancel_request(None).await;
@@ -669,7 +909,7 @@ impl TtsService {
                 continue;
             }
 
-            match Self::build_provider(provider_config).await {
+            match self.build_provider(provider_config).await {
                 Some(provider) => {
                     tracing::info!(target: "tts", "Registering provider: {}", provider_config.id);
                     let provider_id = provider.id();
@@ -713,6 +953,8 @@ impl TtsService {
             new_default = first_provider_id.clone();
         }
 
+        let _snapshot = self.snapshot_gate.write().await;
+        *self.committed_config.write().await = config.clone();
         {
             let mut providers = self.providers.write().await;
             *providers = new_providers;
@@ -737,8 +979,7 @@ impl TtsService {
         Ok(())
     }
 
-    /// Synthesize text to raw audio bytes without requiring an AppHandle.
-    /// Used by services that need audio data directly (e.g. Telegram bot).
+    /// Synthesize text to audio bytes for file-oriented consumers.
     pub async fn synthesize_text(
         &self,
         text: &str,
@@ -889,10 +1130,439 @@ fn record_tts_error(current: &mut Option<String>, error: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        record_tts_error, wrap_pcm_s16le_as_wav, ChatRuntimeState, TtsService,
-        MAX_CANCELLED_TTS_REQUESTS,
-    };
+    use super::*;
+    use crate::chat::runtime::ChatRuntimeState;
+    use std::sync::Mutex as SyncMutex;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct RecordingPlayback {
+        events: SyncMutex<Vec<TtsPlaybackEvent>>,
+        started: Notify,
+        reject_audio: bool,
+    }
+
+    impl TtsPlayback for RecordingPlayback {
+        fn emit(&self, event: TtsPlaybackEvent) -> Result<(), String> {
+            if self.reject_audio && matches!(event, TtsPlaybackEvent::Audio(_)) {
+                return Err("audio output closed".into());
+            }
+            if matches!(event, TtsPlaybackEvent::Start(_)) {
+                self.started.notify_one();
+            }
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct PlaybackProvider {
+        id: &'static str,
+        sample: u8,
+        pending: bool,
+        error: Option<TtsError>,
+        calls: SyncMutex<Vec<TtsParams>>,
+        cancellations: SyncMutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TtsProvider for PlaybackProvider {
+        fn id(&self) -> String {
+            self.id.into()
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        fn voices(&self) -> Vec<VoiceProfile> {
+            vec![]
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn synthesize(&self, _: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
+            self.calls.lock().unwrap().push(params);
+            if self.pending {
+                return std::future::pending().await;
+            }
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(vec![self.sample]),
+            }
+        }
+
+        async fn cancel_request(&self, request_id: &str) {
+            self.cancellations
+                .lock()
+                .unwrap()
+                .push(request_id.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_uses_the_requested_provider_and_emits_ordered_audio() {
+        let service = TtsService::new();
+        let default = Arc::new(PlaybackProvider {
+            id: "default",
+            sample: 2,
+            ..Default::default()
+        });
+        let requested = Arc::new(PlaybackProvider {
+            id: "requested",
+            sample: 3,
+            ..Default::default()
+        });
+        service.register_provider(default.clone()).await;
+        service.register_provider(requested.clone()).await;
+        let playback = RecordingPlayback::default();
+        service
+            .speak(
+                &playback,
+                None,
+                "First. Second.".into(),
+                Some("requested".into()),
+                Some(TtsParams {
+                    voice: Some("requested-voice".into()),
+                    ..Default::default()
+                }),
+                "request".into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(default.calls.lock().unwrap().is_empty());
+        let calls = requested.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|call| call.voice.as_deref() == Some("requested-voice")));
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(start), TtsPlaybackEvent::Audio(first), TtsPlaybackEvent::Audio(second), TtsPlaybackEvent::End(end)] =
+            events.as_slice()
+        else {
+            panic!("expected start, two audio events and end");
+        };
+        assert_eq!(start.request_id, "request");
+        assert!(start.chat_scope.is_none());
+        assert_eq!(
+            (first.sentence_id, first.sequence, first.data.as_slice()),
+            (1, 1, &[3][..])
+        );
+        assert_eq!(
+            (second.sentence_id, second.sequence, second.data.as_slice()),
+            (2, 2, &[3][..])
+        );
+        assert!(matches!(end.status, TtsFinishStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn provider_failure_emits_error_end_without_audio() {
+        let service = TtsService::new();
+        let provider = Arc::new(PlaybackProvider {
+            id: "test",
+            error: Some(TtsError::SynthesisFailed("voice unavailable".into())),
+            ..Default::default()
+        });
+        service.register_provider(provider.clone()).await;
+        let playback = RecordingPlayback::default();
+        let result = service
+            .speak(
+                &playback,
+                None,
+                "message".into(),
+                None,
+                None,
+                "request".into(),
+            )
+            .await;
+
+        let expected = "TTS synthesis failed: Synthesis failed: voice unavailable";
+        assert_eq!(result.unwrap_err(), expected);
+        assert_eq!(
+            provider.cancellations.lock().unwrap().as_slice(),
+            ["request"]
+        );
+        assert!(service.requests.lock().await.active.is_none());
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(_), TtsPlaybackEvent::Error(error), TtsPlaybackEvent::End(end)] =
+            events.as_slice()
+        else {
+            panic!("expected start, error and end");
+        };
+        assert_eq!(error.error, expected);
+        assert!(matches!(end.status, TtsFinishStatus::Error));
+    }
+
+    #[tokio::test]
+    async fn failed_audio_output_cancels_the_provider_and_emits_error_end() {
+        let service = TtsService::new();
+        let provider = Arc::new(PlaybackProvider {
+            id: "test",
+            sample: 1,
+            ..Default::default()
+        });
+        service.register_provider(provider.clone()).await;
+        let playback = RecordingPlayback {
+            reject_audio: true,
+            ..Default::default()
+        };
+        let result = service
+            .speak(
+                &playback,
+                None,
+                "message".into(),
+                None,
+                None,
+                "request".into(),
+            )
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "failed to deliver TTS audio: audio output closed"
+        );
+        assert_eq!(
+            provider.cancellations.lock().unwrap().as_slice(),
+            ["request"]
+        );
+        assert!(service.requests.lock().await.active.is_none());
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(_), TtsPlaybackEvent::Error(error), TtsPlaybackEvent::End(end)] =
+            events.as_slice()
+        else {
+            panic!("expected start, error and end");
+        };
+        assert_eq!(error.request_id, "request");
+        assert!(matches!(end.status, TtsFinishStatus::Error));
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_start_ends_playback_without_audio_or_error() {
+        let service = TtsService::new();
+        let provider = Arc::new(PlaybackProvider {
+            id: "test",
+            pending: true,
+            ..Default::default()
+        });
+        service.register_provider(provider.clone()).await;
+        let playback = RecordingPlayback::default();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (result, ()) = tokio::join!(
+                service.speak(
+                    &playback,
+                    None,
+                    "message".into(),
+                    None,
+                    None,
+                    "request".into()
+                ),
+                async {
+                    playback.started.notified().await;
+                    assert!(service.cancel_request(Some("request")).await);
+                }
+            );
+            result.unwrap();
+        })
+        .await
+        .expect("cancel must wake the waiting synthesis");
+
+        assert_eq!(
+            provider.cancellations.lock().unwrap().as_slice(),
+            ["request"]
+        );
+        assert!(service.requests.lock().await.active.is_none());
+        let events = playback.events.lock().unwrap();
+        let [TtsPlaybackEvent::Start(_), TtsPlaybackEvent::End(end)] = events.as_slice() else {
+            panic!("expected start and end");
+        };
+        assert!(matches!(end.status, TtsFinishStatus::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn role_execution_snapshot_preserves_disabled_preset_and_unavailable_modes() {
+        use crate::characters::activation::ResolvedTtsMode;
+        use crate::characters::manifest::CharacterTtsProfile;
+        let service = TtsService::new();
+        let (browser, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile::default())
+            .await;
+        assert_eq!(browser.mode, ResolvedTtsMode::Browser);
+        assert!(snapshot.unwrap().provider().is_ok());
+        let (disabled, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile {
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(disabled.mode, ResolvedTtsMode::TextOnly);
+        assert!(snapshot.is_none());
+        let (preset, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile {
+                local_preset: Some("gpt-sovits-loopback".into()),
+                provider_type: Some("gpt_sovits".into()),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(preset.mode, ResolvedTtsMode::LocalPresetConfirmation);
+        assert!(snapshot.is_none());
+        let mut config = service.committed_config.write().await;
+        let mut configured = config.providers[0].clone();
+        configured.id = "configured-unavailable".into();
+        configured.provider_type = "openai".into();
+        config.providers.push(configured);
+        drop(config);
+        let (configured, snapshot) = service
+            .role_execution_snapshot(&CharacterTtsProfile {
+                provider_id: Some("configured-unavailable".into()),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(configured.mode, ResolvedTtsMode::ConfiguredProvider);
+        assert!(snapshot
+            .unwrap()
+            .synthesize("no browser fallback")
+            .await
+            .unwrap_err()
+            .contains("configured-unavailable"));
+    }
+
+    #[tokio::test]
+    async fn execution_snapshot_keeps_provider_voice_and_speed_after_reload() {
+        use crate::characters::activation::{ResolvedTts, ResolvedTtsMode};
+        use crate::tts::interface::*;
+        use std::sync::{Arc, Mutex};
+        struct Provider {
+            value: u8,
+            calls: Arc<Mutex<Vec<TtsParams>>>,
+        }
+        #[async_trait::async_trait]
+        impl TtsProvider for Provider {
+            fn id(&self) -> String {
+                "voice-fixture".into()
+            }
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::default()
+            }
+            fn voices(&self) -> Vec<VoiceProfile> {
+                vec![]
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+            async fn synthesize(&self, _: &str, params: TtsParams) -> Result<Vec<u8>, TtsError> {
+                self.calls.lock().unwrap().push(params);
+                Ok(vec![self.value])
+            }
+        }
+        for mode in [
+            ResolvedTtsMode::ConfiguredProvider,
+            ResolvedTtsMode::Browser,
+        ] {
+            let service = TtsService::new();
+            let old_calls = Arc::new(Mutex::new(Vec::new()));
+            let new_calls = Arc::new(Mutex::new(Vec::new()));
+            service
+                .register_provider(Arc::new(Provider {
+                    value: 1,
+                    calls: old_calls.clone(),
+                }))
+                .await;
+            let speech = ResolvedTts {
+                mode,
+                provider_id: Some("voice-fixture".into()),
+                voice: Some("original".into()),
+                speed: Some(1.25),
+                pitch: Some(0.8),
+                ..Default::default()
+            };
+            let snapshot = service
+                .execution_snapshot(Some(&speech), None)
+                .await
+                .unwrap();
+            service
+                .register_provider(Arc::new(Provider {
+                    value: 2,
+                    calls: new_calls.clone(),
+                }))
+                .await;
+            let changed = ResolvedTts {
+                voice: Some("changed".into()),
+                speed: Some(0.5),
+                ..speech
+            };
+            let next = service
+                .execution_snapshot(Some(&changed), None)
+                .await
+                .unwrap();
+            assert_eq!(snapshot.synthesize("first turn").await.unwrap(), vec![1]);
+            assert_eq!(next.synthesize("next turn").await.unwrap(), vec![2]);
+            let old = old_calls.lock().unwrap();
+            assert_eq!(old[0].voice.as_deref(), Some("original"));
+            assert_eq!(old[0].speed, Some(1.25));
+            assert_eq!(old[0].pitch, Some(0.8));
+            let new = new_calls.lock().unwrap();
+            assert_eq!(new[0].voice.as_deref(), Some("changed"));
+            assert_eq!(new[0].speed, Some(0.5));
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_delegation_and_missing_provider_are_bound_before_later_registration() {
+        use crate::characters::activation::{ResolvedTts, ResolvedTtsMode};
+        use crate::tts::{browser::BrowserTTSProvider, interface::TtsError};
+        use std::sync::Arc;
+        let service = TtsService::new();
+        let speech = ResolvedTts {
+            mode: ResolvedTtsMode::Browser,
+            provider_id: Some("browser".into()),
+            voice: Some("original-browser-voice".into()),
+            speed: Some(1.2),
+            pitch: Some(0.9),
+            ..Default::default()
+        };
+        let browser = service
+            .execution_snapshot(Some(&speech), None)
+            .await
+            .unwrap();
+        let configured = ResolvedTts {
+            mode: ResolvedTtsMode::ConfiguredProvider,
+            ..speech
+        };
+        let unavailable = service
+            .execution_snapshot(Some(&configured), None)
+            .await
+            .unwrap();
+        let original_error = unavailable.synthesize("original turn").await.unwrap_err();
+        assert!(original_error.contains("was unavailable when this turn started"));
+        service
+            .register_provider(Arc::new(BrowserTTSProvider::new()))
+            .await;
+        assert_eq!(
+            unavailable.synthesize("late old turn").await.unwrap_err(),
+            original_error
+        );
+        assert_eq!(
+            browser.synthesize("browser turn").await.unwrap_err(),
+            TtsError::BrowserDelegate.to_string()
+        );
+        assert_eq!(
+            browser.params.voice.as_deref(),
+            Some("original-browser-voice")
+        );
+        assert_eq!(browser.params.speed, Some(1.2));
+        assert_eq!(browser.params.pitch, Some(0.9));
+        let next = service
+            .execution_snapshot(Some(&configured), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.synthesize("new turn").await.unwrap_err(),
+            TtsError::BrowserDelegate.to_string()
+        );
+    }
 
     #[test]
     fn records_the_first_synthesis_error_for_the_command_result() {
@@ -964,7 +1634,8 @@ mod tests {
                 old_paused.send(()).unwrap();
                 wait_for_new.await.unwrap();
                 assert!(!service
-                    .publish_playback_start(&old, "main", Some(&runtime), |id| {
+                    .publish_playback_start(&old, |id| {
+                        runtime.begin_playback(id, "main");
                         old_start = Some(id.to_owned());
                         Ok(())
                     })
@@ -975,7 +1646,8 @@ mod tests {
                 wait_for_old.await.unwrap();
                 let new = service.register_request("chat_new-turn").await.unwrap();
                 assert!(service
-                    .publish_playback_start(&new, "main", Some(&runtime), |id| {
+                    .publish_playback_start(&new, |id| {
+                        runtime.begin_playback(id, "main");
                         new_start = Some(id.to_owned());
                         Ok(())
                     })
@@ -1001,7 +1673,7 @@ mod tests {
         let request = service.register_request("chat_cancelled").await.unwrap();
         assert!(service.cancel_request(Some("chat_cancelled")).await);
         assert!(!service
-            .publish_playback_start(&request, "main", None, |_| {
+            .publish_playback_start(&request, |_| {
                 panic!("cancelled request must not publish start")
             })
             .await

@@ -45,7 +45,7 @@ impl From<TtsError> for String {
 
 // ── Capability Flags ───────────────────────────────────
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, specta::Type)]
 pub struct ProviderCapabilities {
     pub supports_streaming: bool,
     pub supports_emotions: bool,
@@ -80,7 +80,7 @@ impl ProviderCapabilities {
 
 // ── Voice Profiles ─────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum Gender {
     Male,
@@ -88,7 +88,7 @@ pub enum Gender {
     Neutral,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub enum TtsEngine {
     Vits,
@@ -96,7 +96,7 @@ pub enum TtsEngine {
     Native, // Browser SpeechSynthesis
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct VoiceProfile {
     pub voice_id: String,
     pub name: String,
@@ -124,7 +124,7 @@ pub struct TtsParams {
 }
 
 /// Explicit audio metadata for streams that cannot be detected from their bytes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(tag = "codec", rename_all = "snake_case")]
 pub enum AudioFormat {
     Mp3,

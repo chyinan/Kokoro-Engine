@@ -1014,6 +1014,9 @@
                 }
             },
             "refresh_tooltip": "重新整理所有伺服器的工具",
+            "refresh_failed": "無法重新整理 MCP 工具。",
+            "server_status_unavailable": "無法讀取伺服器狀態。",
+            "tool_list_unavailable": "無法讀取工具清單。",
             "add_button": "新增",
             "add_modal": {
                 "title": "新增 MCP 伺服器",
@@ -1083,6 +1086,11 @@
             "provider_credentials_warning": "提供者憑證永遠不會包含在備份中。在其他裝置還原後請重新設定。",
             "restored_characters": "已還原 {{count}} 個角色實例。",
             "skipped_memories": "有 {{count}} 條記憶因不符合本機資料結構而被略過。",
+            "legacy_telegram_skipped": {
+                "existing_bot_config": "已略過舊版 Telegram 設定。「略過現有設定」會保留本機的統一 Bot 設定檔，即使其中只設定了其他平台。",
+                "existing_telegram_config": "已略過舊版 Telegram 設定。「略過現有設定」會保留本機的 Telegram 設定檔。"
+            },
+            "reload_now": "立即重新載入",
             "merged_characters": "已將 {{count}} 個角色合併到本機角色。",
             "character_mapping_label": "角色歸屬",
             "character_mapping_hint": "角色實例 ID 因裝置而異。請為備份中的每個角色選擇：它的記憶與對話要歸到哪個本機角色。",
@@ -1127,7 +1135,11 @@
         }
     },
     "chat": {
+        "tool_only_completion": "工具呼叫已結束，但未產生文字回覆。",
         "speech_failed": "無法朗讀這則回覆：{{error}}",
+        "persistence_failed": "無法將這輪對話儲存至資料庫。",
+        "reply_unfinished": "未完成的回覆",
+        "retry_save": "重試儲存",
         "status": {
             "streaming": "生成中",
             "chat": "對話"
@@ -1142,6 +1154,7 @@
             "edit": "編輯",
             "regenerate": "重新生成",
             "save": "儲存 (Ctrl+Enter)",
+            "retry_refresh": "重試重新整理",
             "cancel": "取消 (Esc)",
             "clear": "清空對話",
             "confirm_clear_title": "清空當前對話",
@@ -1165,6 +1178,7 @@
             "memory_model_required": "本機記憶模型還沒準備好。聊天仍可繼續，但暫時不會使用語意記憶。",
             "memory_model_check_failed": "暫時無法確認本機記憶模型狀態。聊天仍可繼續，方便時再檢查下載視窗。",
             "edit_failed": "儲存編輯訊息失敗",
+            "edit_refresh_failed": "訊息已儲存，無法重新整理會話。",
             "delete_failed": "刪除訊息失敗",
             "new_conversation_failed": "新建會話失敗，已保留目前會話",
             "new_conversation_slow": "新建會話回應較慢，請稍候..."
@@ -1291,6 +1305,12 @@
     },
     "bot": {
         "title": "Bot 接入",
+        "config_conflict": {
+            "stale": "編輯期間 Bot 設定已變更。請重新整理並檢查你的修改，再重新儲存。",
+            "overlap": "草稿與已儲存的設定修改了部分相同欄位。你可以保留這些欄位的已儲存值，再檢查其餘修改。",
+            "refresh": "重新整理 Bot 設定",
+            "keep_saved": "在重疊欄位保留已儲存值"
+        },
         "status": {
             "enabled": "已啟用",
             "disabled": "未啟用",
@@ -1379,7 +1399,7 @@
         },
         "whitelist": {
             "label": "允許的聊天 ID",
-            "desc": "只有這些聊天 ID 可以與機器人互動。留空 = 拒絕所有。",
+            "desc": "僅允許列出的聊天 ID（不是傳送者 ID）。群組聊天 ID 授權整個群組聊天。留空表示尚未授權任何聊天，即使機器人執行中也會拒絕所有訊息和指令。 如果升級前留空也能使用，請加入每個要繼續授權的聊天 ID，然後按「儲存」。",
             "placeholder": "聊天 ID（數字）",
             "add": "新增"
         },

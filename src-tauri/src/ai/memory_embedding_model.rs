@@ -24,7 +24,7 @@ const MODEL_AUX_FILES: &[&str] = &[
 ];
 const MODEL_REF_NAME: &str = "main";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 pub struct MemoryEmbeddingModelStatus {
     pub installed: bool,
     pub repo_id: String,
@@ -52,7 +52,8 @@ pub fn memory_embedding_model_availability(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "memory:embedding-model-progress")]
 pub struct MemoryEmbeddingModelDownloadProgress {
     pub stage: String,
     pub message: String,
@@ -60,6 +61,7 @@ pub struct MemoryEmbeddingModelDownloadProgress {
     pub file_index: usize,
     pub file_count: usize,
     pub downloaded_bytes: u64,
+    #[serde(default)]
     pub total_bytes: Option<u64>,
 }
 

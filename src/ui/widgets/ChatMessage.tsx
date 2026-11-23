@@ -1,33 +1,28 @@
-import { useState, memo } from "react";
+import { useState, useRef, useCallback, memo, type FormEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx } from "clsx";
 import { AlertCircle, Edit2, RefreshCw, Check, X, Languages, CornerDownLeft, ChevronDown, Wrench, Eye, Maximize2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ToolTraceItem } from "../../lib/kokoro-bridge";
+import type { EditMessageResult } from "../../lib/chat/application";
+import type { ChatPanelMessage } from "../../lib/chat/turn-state";
+import { EditMessageDraft, type TextareaEdit } from "./chat/edit-message-draft";
+
+export type ChatMessageEditResult = EditMessageResult | { status: "failed"; message: string };
+type EditRefreshState = { scope: string; revision: number | null; status: "pending" | "failed" | "retrying" };
 
 interface ChatMessageProps {
-    message: {
-        id?: number;
-        role: "user" | "kokoro" | "tool" | "context";
-        text: string;
-        images?: string[];
-        translation?: string;
-        translationPending?: boolean;
-        isError?: boolean;
-        announceError?: boolean;
-        speechError?: string;
-        tools?: ToolTraceItem[];
-        capturedAt?: string;
-        source?: string;
-        turnId?: string;
-    };
+    message: ChatPanelMessage;
     index: number;
     isStreaming: boolean;
     isTranslationExpanded: boolean;
     onToggleTranslation: () => void;
     editScope?: string;
-    onEdit?: (newText: string) => void;
+    historyRevision?: number | null;
+    onEdit?: (newText: string) => Promise<ChatMessageEditResult>;
+    onRetryEditRefresh?: () => Promise<boolean>;
     onRegenerate?: () => void;
+    onRetryPersistence?: () => Promise<void>;
     onContinueFrom?: () => void;
     onApproveTool: (tool: ToolTraceItem) => void;
     onRejectTool: (tool: ToolTraceItem) => void;
@@ -175,8 +170,11 @@ export const ChatMessage = memo(function ChatMessage({
     isTranslationExpanded,
     onToggleTranslation,
     editScope,
+    historyRevision,
     onEdit,
+    onRetryEditRefresh,
     onRegenerate,
+    onRetryPersistence,
     onContinueFrom,
     onApproveTool,
     onRejectTool,
@@ -185,22 +183,108 @@ export const ChatMessage = memo(function ChatMessage({
     const { t } = useTranslation();
     const [editingScope, setEditingScope] = useState<string>();
     const [editingText, setEditingText] = useState("");
+    const [savingDraft, setSavingDraft] = useState<EditMessageDraft>();
+    const [editError, setEditError] = useState<string>();
+    const [editRefresh, setEditRefresh] = useState<EditRefreshState>();
+    const editDraft = useRef<EditMessageDraft | undefined>(undefined);
+    const pendingSave = useRef<EditMessageDraft | undefined>(undefined);
+    const beforeEdit = useRef<TextareaEdit | undefined>(undefined);
     const [toolsExpanded, setToolsExpanded] = useState(false);
+    const [retryingSave, setRetryingSave] = useState(false);
     const isEditing = editScope !== undefined && editingScope === editScope;
+    const savingEdit = savingDraft !== undefined && savingDraft === editDraft.current;
+    const activeEditRefresh = editRefresh && editRefresh.scope === editScope && editRefresh.revision === historyRevision
+        ? editRefresh
+        : undefined;
     const announceError = msg.announceError ?? msg.isError;
+
+    const attachEditor = useCallback((input: HTMLTextAreaElement | null) => {
+        if (!input) return;
+        const captureEdit = (event: InputEvent) => {
+            beforeEdit.current = {
+                value: input.value,
+                start: input.selectionStart,
+                end: input.selectionEnd,
+                inputType: event.inputType,
+            };
+        };
+        // Read the actual selection before the browser applies the edit.
+        input.addEventListener("beforeinput", captureEdit);
+        return () => {
+            input.removeEventListener("beforeinput", captureEdit);
+            beforeEdit.current = undefined;
+        };
+    }, []);
+
+    const handleEditorInput = ({ currentTarget: input, nativeEvent }: FormEvent<HTMLTextAreaElement>) => {
+        const event = nativeEvent as InputEvent;
+        const before = beforeEdit.current;
+        beforeEdit.current = undefined;
+        editDraft.current?.input({
+            value: input.value,
+            start: input.selectionStart,
+            end: input.selectionEnd,
+            inputType: event.inputType ?? "",
+            data: event.data,
+        }, before);
+        setEditingText(input.value);
+    };
 
     const handleStartEdit = () => {
         setEditingScope(editScope);
-        setEditingText(msg.text);
+        setEditError(undefined);
+        setEditRefresh(undefined);
+        const draft = new EditMessageDraft(msg.editText ?? msg.text);
+        editDraft.current = draft;
+        beforeEdit.current = undefined;
+        setEditingText(draft.value);
     };
 
-    const handleSaveEdit = () => {
-        if (!isEditing || !editingText.trim()) return;
-        onEdit?.(editingText);
-        setEditingScope(undefined);
+    const trackEditRefresh = (attempt: EditRefreshState, result: Promise<boolean>) => {
+        setEditRefresh(attempt);
+        void result.then(refreshed => {
+            setEditRefresh(current => {
+                if (current !== attempt) return current;
+                return refreshed ? undefined : { ...attempt, status: "failed" };
+            });
+        });
+    };
+
+    const handleSaveEdit = async () => {
+        const draft = editDraft.current;
+        if (!editScope || !isEditing || pendingSave.current === draft || !draft?.value.trim() || !onEdit) return;
+        pendingSave.current = draft;
+        setSavingDraft(draft);
+        setEditError(undefined);
+        try {
+            const result = await onEdit(draft.serialize());
+            if (editDraft.current !== draft || result.status === "skipped") return;
+            if (result.status === "failed") {
+                setEditError(result.message);
+                return;
+            }
+            if (result.refresh) {
+                trackEditRefresh({ scope: editScope, revision: result.refresh.historyRevision, status: "pending" }, result.refresh.result);
+            }
+            editDraft.current = undefined;
+            setEditingText("");
+            setEditingScope(undefined);
+        } finally {
+            if (pendingSave.current === draft) {
+                pendingSave.current = undefined;
+                setSavingDraft(undefined);
+            }
+        }
+    };
+
+    const handleRetryEditRefresh = () => {
+        if (activeEditRefresh?.status !== "failed" || !onRetryEditRefresh) return;
+        trackEditRefresh({ ...activeEditRefresh, status: "retrying" }, onRetryEditRefresh());
     };
 
     const handleCancelEdit = () => {
+        if (savingEdit) return;
+        editDraft.current = undefined;
         setEditingScope(undefined);
         setEditingText("");
     };
@@ -291,14 +375,18 @@ export const ChatMessage = memo(function ChatMessage({
             {isEditing ? (
                 <div className="space-y-2">
                     <textarea
+                        ref={attachEditor}
                         value={editingText}
-                        onChange={(e) => setEditingText(e.target.value)}
+                        readOnly={savingEdit}
+                        onInput={handleEditorInput}
                         className="w-full bg-black/40 border border-[var(--color-border)] text-[var(--color-text-primary)] rounded-md px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-accent)] resize-none"
                         rows={3}
                         autoFocus
                         onKeyDown={(e) => {
+                            if (e.nativeEvent.isComposing) return;
                             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                                handleSaveEdit();
+                                e.preventDefault();
+                                void handleSaveEdit();
                             } else if (e.key === "Escape") {
                                 handleCancelEdit();
                             }
@@ -307,6 +395,7 @@ export const ChatMessage = memo(function ChatMessage({
                     <div className="flex items-center gap-2">
                         <button
                             onClick={handleSaveEdit}
+                            disabled={savingEdit}
                             className="p-1.5 rounded-md bg-[var(--color-accent)]/20 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/30 transition-colors"
                             title={t("chat.actions.save")}
                         >
@@ -314,12 +403,14 @@ export const ChatMessage = memo(function ChatMessage({
                         </button>
                         <button
                             onClick={handleCancelEdit}
+                            disabled={savingEdit}
                             className="p-1.5 rounded-md bg-slate-800/50 text-slate-400 hover:text-slate-300 transition-colors"
                             title={t("chat.actions.cancel")}
                         >
                             <X size={14} />
                         </button>
                     </div>
+                    {editError && <div role="alert" className="break-words text-xs text-red-300">{editError}</div>}
                 </div>
             ) : (
                 <>
@@ -341,7 +432,7 @@ export const ChatMessage = memo(function ChatMessage({
                     )}
 
                     {/* 悬停显示的操作按钮 */}
-                    {!isStreaming && !msg.isError && msg.role !== "tool" && onContinueFrom && (
+                    {!isStreaming && !activeEditRefresh && !msg.isError && msg.role !== "tool" && onContinueFrom && (
                         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             {/* 从这里继续按钮 */}
                             <button
@@ -376,6 +467,21 @@ export const ChatMessage = memo(function ChatMessage({
                 </>
             )}
 
+            {activeEditRefresh && activeEditRefresh.status !== "pending" && (
+                <div className="mt-2 text-xs text-amber-300">
+                    <p role="alert">{t("chat.errors.edit_refresh_failed")}</p>
+                    <button
+                        type="button"
+                        disabled={activeEditRefresh.status === "retrying"}
+                        onClick={handleRetryEditRefresh}
+                        className="mt-1 rounded-md border border-[var(--color-border)] px-2 py-1 hover:bg-slate-700/90 disabled:opacity-50"
+                        title={t("chat.actions.retry_refresh")}
+                    >
+                        {t("chat.actions.retry_refresh")}
+                    </button>
+                </div>
+            )}
+
             {!isEditing && msg.speechError && (
                 <div role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-red-300">
                     <AlertCircle size={12} className="mt-0.5 shrink-0" />
@@ -383,6 +489,24 @@ export const ChatMessage = memo(function ChatMessage({
                         {t("chat.speech_failed", { error: msg.speechError })}
                     </span>
                 </div>
+            )}
+
+            {msg.unfinished && (
+                <p className="mt-2 text-xs text-slate-400">{t("chat.reply_unfinished")}</p>
+            )}
+            {onRetryPersistence && (
+                <button
+                    type="button"
+                    disabled={isStreaming || retryingSave}
+                    onClick={async () => {
+                        setRetryingSave(true);
+                        try { await onRetryPersistence(); }
+                        finally { setRetryingSave(false); }
+                    }}
+                    className="mt-2 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-slate-700/90 disabled:opacity-50"
+                >
+                    {t("chat.retry_save")}
+                </button>
             )}
 
             {!isEditing && msg.role === "kokoro" && msg.translationPending && !msg.translation && (

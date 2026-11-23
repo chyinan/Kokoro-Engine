@@ -8,14 +8,14 @@ use async_openai::types::responses::{
 };
 use async_openai::Client;
 use async_trait::async_trait;
-use futures::{channel::mpsc, Stream, StreamExt};
+use futures::{channel::mpsc, SinkExt, Stream, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 
 use crate::llm::provider::{
-    build_openai_client, cancellable_unbounded_channel, parse_tool_call_arguments, LlmChatMessage,
-    LlmParams, LlmProvider, LlmStreamEvent, LlmToolCall, LlmToolDefinition,
+    build_openai_client, driven_stream, parse_tool_call_arguments, LlmChatMessage, LlmParams,
+    LlmProvider, LlmStreamEvent, LlmToolCall, LlmToolDefinition,
 };
 use crate::llm::responses_protocol::build_responses_request;
 
@@ -88,26 +88,16 @@ impl OpenAIResponsesProvider {
             .create_stream_byot(&request)
             .await
             .map_err(format_openai_error)?;
-        let (mut tx, rx, mut cancel_rx) =
-            cancellable_unbounded_channel::<Result<LlmStreamEvent, String>>();
-
-        tokio::spawn(async move {
+        Ok(Box::pin(driven_stream(|mut tx| async move {
             let mut pending_calls: HashMap<u32, PendingFunctionCall> = HashMap::new();
             let mut ready_calls = Vec::new();
             let mut completed = false;
 
-            loop {
-                let result = tokio::select! {
-                    _ = cancel_rx.changed() => return,
-                    result = stream.next() => result,
-                };
-                let Some(result) = result else {
-                    break;
-                };
+            while let Some(result) = stream.next().await {
                 let value = match result {
                     Ok(value) => value,
                     Err(error) => {
-                        let _ = tx.start_send(Err(format_openai_error(error)));
+                        let _ = tx.send(Err(format_openai_error(error))).await;
                         return;
                     }
                 };
@@ -117,7 +107,8 @@ impl OpenAIResponsesProvider {
                     .map(str::to_string)
                 else {
                     let _ = tx
-                        .start_send(Err("Responses API stream event is missing type".to_string()));
+                        .send(Err("Responses API stream event is missing type".to_string()))
+                        .await;
                     return;
                 };
                 if !should_parse_event(&event_type) {
@@ -131,10 +122,12 @@ impl OpenAIResponsesProvider {
                 let event = match serde_json::from_value::<ResponseStreamEvent>(value) {
                     Ok(event) => event,
                     Err(error) => {
-                        let _ = tx.start_send(Err(format!(
-                            "failed to parse Responses stream event {}: {}",
-                            event_type, error
-                        )));
+                        let _ = tx
+                            .send(Err(format!(
+                                "failed to parse Responses stream event {}: {}",
+                                event_type, error
+                            )))
+                            .await;
                         return;
                     }
                 };
@@ -143,13 +136,13 @@ impl OpenAIResponsesProvider {
                     ResponseStreamEvent::ResponseOutputTextDelta(event)
                         if !event.delta.is_empty() =>
                     {
-                        let result = tx.start_send(Ok(LlmStreamEvent::Text(event.delta)));
+                        let result = tx.send(Ok(LlmStreamEvent::Text(event.delta))).await;
                         if result.is_err() {
                             return;
                         }
                     }
                     ResponseStreamEvent::ResponseRefusalDelta(event) if !event.delta.is_empty() => {
-                        let result = tx.start_send(Ok(LlmStreamEvent::Text(event.delta)));
+                        let result = tx.send(Ok(LlmStreamEvent::Text(event.delta))).await;
                         if result.is_err() {
                             return;
                         }
@@ -157,8 +150,9 @@ impl OpenAIResponsesProvider {
                     ResponseStreamEvent::ResponseReasoningSummaryTextDelta(event)
                         if !event.delta.is_empty() =>
                     {
-                        let result =
-                            tx.start_send(Ok(LlmStreamEvent::ReasoningContent(event.delta)));
+                        let result = tx
+                            .send(Ok(LlmStreamEvent::ReasoningContent(event.delta)))
+                            .await;
                         if result.is_err() {
                             return;
                         }
@@ -166,8 +160,9 @@ impl OpenAIResponsesProvider {
                     ResponseStreamEvent::ResponseReasoningTextDelta(event)
                         if !event.delta.is_empty() =>
                     {
-                        let result =
-                            tx.start_send(Ok(LlmStreamEvent::ReasoningContent(event.delta)));
+                        let result = tx
+                            .send(Ok(LlmStreamEvent::ReasoningContent(event.delta)))
+                            .await;
                         if result.is_err() {
                             return;
                         }
@@ -219,17 +214,20 @@ impl OpenAIResponsesProvider {
                             match value {
                                 Ok(value) => {
                                     if tx
-                                        .start_send(Ok(LlmStreamEvent::ProviderData(value)))
+                                        .send(Ok(LlmStreamEvent::ProviderData(value)))
+                                        .await
                                         .is_err()
                                     {
                                         return;
                                     }
                                 }
                                 Err(error) => {
-                                    let _ = tx.start_send(Err(format!(
-                                        "failed to preserve Responses reasoning item: {}",
-                                        error
-                                    )));
+                                    let _ = tx
+                                        .send(Err(format!(
+                                            "failed to preserve Responses reasoning item: {}",
+                                            error
+                                        )))
+                                        .await;
                                     return;
                                 }
                             }
@@ -242,7 +240,9 @@ impl OpenAIResponsesProvider {
                             .error
                             .map(|error| format!("{}: {}", error.code, error.message))
                             .unwrap_or_else(|| "response failed".to_string());
-                        let _ = tx.start_send(Err(format!("Responses API error: {}", message)));
+                        let _ = tx
+                            .send(Err(format!("Responses API error: {}", message)))
+                            .await;
                         return;
                     }
                     ResponseStreamEvent::ResponseIncomplete(event) => {
@@ -251,18 +251,22 @@ impl OpenAIResponsesProvider {
                             .incomplete_details
                             .map(|details| details.reason)
                             .unwrap_or_else(|| "unknown reason".to_string());
-                        let _ = tx.start_send(Err(format!(
-                            "Responses API returned an incomplete response: {}",
-                            reason
-                        )));
+                        let _ = tx
+                            .send(Err(format!(
+                                "Responses API returned an incomplete response: {}",
+                                reason
+                            )))
+                            .await;
                         return;
                     }
                     ResponseStreamEvent::ResponseError(event) => {
                         let code = event.code.unwrap_or_else(|| "unknown_error".to_string());
-                        let _ = tx.start_send(Err(format!(
-                            "Responses API error {}: {}",
-                            code, event.message
-                        )));
+                        let _ = tx
+                            .send(Err(format!(
+                                "Responses API error {}: {}",
+                                code, event.message
+                            )))
+                            .await;
                         return;
                     }
                     ResponseStreamEvent::ResponseCompleted(_) => {
@@ -274,7 +278,7 @@ impl OpenAIResponsesProvider {
                             }
                         }
                         for call in ready_calls.drain(..) {
-                            if emit_tool_call(&mut tx, call).is_err() {
+                            if emit_tool_call(&mut tx, call).await.is_err() {
                                 return;
                             }
                         }
@@ -287,13 +291,13 @@ impl OpenAIResponsesProvider {
             }
 
             if !completed {
-                let _ = tx.start_send(Err(
-                    "Responses API stream ended before response.completed".to_string()
-                ));
+                let _ = tx
+                    .send(Err(
+                        "Responses API stream ended before response.completed".to_string()
+                    ))
+                    .await;
             }
-        });
-
-        Ok(Box::pin(rx))
+        })))
     }
 }
 
@@ -315,18 +319,19 @@ fn should_parse_event(event_type: &str) -> bool {
     )
 }
 
-fn emit_tool_call(
-    tx: &mut mpsc::UnboundedSender<Result<LlmStreamEvent, String>>,
+async fn emit_tool_call(
+    tx: &mut mpsc::Sender<Result<LlmStreamEvent, String>>,
     call: PendingFunctionCall,
 ) -> Result<(), ()> {
     if call.call_id.trim().is_empty() || call.name.trim().is_empty() {
         return Ok(());
     }
-    tx.start_send(Ok(LlmStreamEvent::ToolCall(LlmToolCall {
+    tx.send(Ok(LlmStreamEvent::ToolCall(LlmToolCall {
         id: call.call_id,
         name: call.name,
         args: parse_tool_call_arguments(&call.arguments),
     })))
+    .await
     .map_err(|_| ())
 }
 

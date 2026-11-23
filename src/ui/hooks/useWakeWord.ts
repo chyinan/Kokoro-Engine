@@ -1,8 +1,8 @@
 // pattern: Imperative Shell
 
+import { commands, events } from "@/lib/generated/ipc";
 import { useRef, useCallback, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { isTauriEnvironment } from "../../utils/env";
 
 const SAMPLE_RATE = 16000;
@@ -92,7 +92,7 @@ export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWake
     // transport ref, while the Rust worker may still be finishing its start.
     const forceStopNativeCapture = useCallback(async (owner = startOwnerRef.current) => {
         try {
-            await invoke("stop_native_wake_word", { owner });
+            await commands.stopNativeWakeWord(owner);
         } catch (error) {
             console.warn("[WakeWord] Failed to force-stop native wake word:", error);
         } finally {
@@ -166,7 +166,7 @@ export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWake
     ) => {
         try {
             if (modeRef.current === "speech") {
-                const text: string = await invoke("transcribe_wake_word_audio", { samples });
+                const text: string = await commands.transcribeWakeWordAudio(samples);
                 if (
                     captureGeneration !== captureGenerationRef.current
                     || captureOwner !== startOwnerRef.current
@@ -177,7 +177,7 @@ export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWake
                 }
                 return;
             }
-            const text: string = await invoke("transcribe_wake_word_audio", { samples });
+            const text: string = await commands.transcribeWakeWordAudio(samples);
             if (
                 captureGeneration !== captureGenerationRef.current
                 || captureOwner !== startOwnerRef.current
@@ -311,7 +311,7 @@ export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWake
         let detectedUnlisten: UnlistenFn | null = null;
         let errorUnlisten: UnlistenFn | null = null;
         try {
-            detectedUnlisten = await listen<string>("stt:wake-word-detected", (event) => {
+            detectedUnlisten = await events.sttWakeWordDetected.listen((event) => {
                 if (startOwnerRef.current !== owner) return;
                 void triggerWakeWordDetected(event.payload, owner);
             });
@@ -321,7 +321,7 @@ export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWake
             }
             nativeDetectedUnlisten.current?.();
             nativeDetectedUnlisten.current = detectedUnlisten;
-            errorUnlisten = await listen<string>("stt:wake-word-error", (event) => {
+            errorUnlisten = await events.sttWakeWordError.listen((event) => {
                 if (startOwnerRef.current !== owner) return;
                 console.warn("[WakeWord] Native wake word error:", event.payload);
             });
@@ -337,11 +337,7 @@ export function useWakeWord({ wakeWord = "", enabled, mode = "wake_word", onWake
             }
             nativeErrorUnlisten.current?.();
             nativeErrorUnlisten.current = errorUnlisten;
-            await invoke("start_native_wake_word", {
-                wakeWord: wakeWordRef.current,
-                triggerOnSpeech: modeRef.current === "speech",
-                owner,
-            });
+            await commands.startNativeWakeWord(wakeWordRef.current, modeRef.current === "speech", owner);
             // The stop request may have won the race while the native start
             // command was in flight.  Compensate after the command returns so
             // a late Rust worker cannot keep recording after this start dies.

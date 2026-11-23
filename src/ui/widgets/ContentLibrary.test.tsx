@@ -44,13 +44,13 @@ const mod: RegistryEntry = {
   description: "A calm dark theme",
   trust: "community",
   trust_source: "https://community.example/registry.json",
-  registry_identity: undefined,
+  registry_identity: null,
   permissions: ["theme", "components"],
 };
 
 function deps(overrides: Partial<ContentLibraryDependencies> = {}): ContentLibraryDependencies {
   return {
-    listRegistry: vi.fn(async () => ({ schema_version: 1, registry_version: 1, entries: [character, mod] })),
+    listRegistry: vi.fn(async () => ({ schema_version: 1, registry_version: 1, generated_at: null, entries: [character, mod] })),
     listInstalled: vi.fn(async () => []),
     installCharacter: vi.fn(async () => ({ id: "kokoro", version: "1.0.0", name: "Kokoro", trust: "official", package_dir: "" })),
     installMod: vi.fn(async () => undefined),
@@ -280,6 +280,15 @@ describe("ContentLibrary", () => {
       name: "Night Theme",
       version: "2.0.0",
       description: "A calm dark theme",
+      engine_version: null,
+      layout: null,
+      theme: null,
+      components: {},
+      scripts: [],
+      permissions: [],
+      capabilities: [],
+      entry: null,
+      ui_entry: null,
     }));
     const { container, root } = renderLibrary({ dependencies: deps({ installModFromUrl }) });
     await act(async () => { await Promise.resolve(); });

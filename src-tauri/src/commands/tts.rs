@@ -1,19 +1,34 @@
+use crate::chat::runtime::ChatRuntimeState;
 use crate::error::KokoroError;
-use crate::tts::config::{save_config, ProviderConfig, TtsSystemConfig};
+use crate::hooks::HookRuntime;
+use crate::ipc::wire::Response;
+use crate::lifecycle::{AppLifecycle, TaskStage};
+use crate::tts::config::{ProviderConfig, TtsSystemConfig};
+use crate::tts::desktop::TauriTtsPlayback;
+use crate::tts::local_gpt_sovits::GptSovitsModels;
 use crate::tts::{ProviderStatus, TtsParams, TtsService, VoiceProfile};
-use tauri::{command, AppHandle, State};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::{command, AppHandle, Manager, State};
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, specta::Type)]
 pub struct TtsConfig {
+    #[serde(default)]
     pub provider_id: Option<String>,
+    #[serde(default)]
     pub request_id: Option<String>,
+    #[serde(default)]
     pub voice: Option<String>,
+    #[serde(default)]
     pub speed: Option<f32>,
+    #[serde(default)]
     pub pitch: Option<f32>,
+    #[serde(default)]
     pub emotion: Option<String>,
 }
 
 #[command]
+#[specta::specta]
 pub async fn synthesize(
     app: AppHandle,
     state: State<'_, TtsService>,
@@ -29,22 +44,40 @@ pub async fn synthesize(
         extra_params: None,
     };
 
-    state
-        .speak(
-            app,
-            text,
-            config.provider_id,
-            Some(params),
-            config
-                .request_id
-                .filter(|request_id| !request_id.trim().is_empty())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        )
-        .await
-        .map_err(KokoroError::Tts)
+    let runtime = app.try_state::<Arc<ChatRuntimeState>>();
+    let playback = TauriTtsPlayback::new(&app, runtime.as_deref().cloned());
+    let hooks = app.try_state::<HookRuntime>();
+    let scope = app.state::<AppLifecycle>().scope(TaskStage::Work, "tts");
+    let _work = scope
+        .lease("desktop synthesis")
+        .map_err(|error| KokoroError::Tts(error.to_string()))?;
+    let stop = scope.token();
+    let request_id = config
+        .request_id
+        .filter(|request_id| !request_id.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let speak = state.speak(
+        &playback,
+        hooks.as_deref(),
+        text,
+        config.provider_id,
+        Some(params),
+        request_id.clone(),
+    );
+    tokio::pin!(speak);
+    let result = tokio::select! {
+        biased;
+        _ = stop.cancelled() => {
+            state.cancel_request(Some(&request_id)).await;
+            speak.await
+        }
+        result = &mut speak => result,
+    };
+    result.map_err(KokoroError::Tts)
 }
 
 #[command]
+#[specta::specta]
 pub async fn cancel_tts(
     state: State<'_, TtsService>,
     request_id: Option<String>,
@@ -54,6 +87,7 @@ pub async fn cancel_tts(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_tts_providers(
     state: State<'_, TtsService>,
 ) -> Result<Vec<ProviderStatus>, KokoroError> {
@@ -61,6 +95,7 @@ pub async fn list_tts_providers(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_tts_voices(
     state: State<'_, TtsService>,
 ) -> Result<Vec<VoiceProfile>, KokoroError> {
@@ -68,6 +103,7 @@ pub async fn list_tts_voices(
 }
 
 #[command]
+#[specta::specta]
 pub async fn list_openai_tts_models(config: ProviderConfig) -> Result<Vec<String>, KokoroError> {
     crate::tts::openai::list_openai_tts_models(&config)
         .await
@@ -75,6 +111,7 @@ pub async fn list_openai_tts_models(config: ProviderConfig) -> Result<Vec<String
 }
 
 #[command]
+#[specta::specta]
 pub async fn get_tts_provider_status(
     state: State<'_, TtsService>,
     provider_id: String,
@@ -83,6 +120,7 @@ pub async fn get_tts_provider_status(
 }
 
 #[command]
+#[specta::specta]
 pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), KokoroError> {
     state.clear_cache().await;
     Ok(())
@@ -90,90 +128,32 @@ pub async fn clear_tts_cache(state: State<'_, TtsService>) -> Result<(), KokoroE
 
 /// Return the current TTS config from disk.
 #[command]
-pub async fn get_tts_config() -> Result<TtsSystemConfig, KokoroError> {
-    let app_data = crate::utils::paths::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.chyin.kokoro");
-    let config_path = app_data.join("tts_config.json");
-    Ok(crate::tts::load_config(&config_path))
+#[specta::specta]
+pub async fn get_tts_config() -> Result<Response<TtsSystemConfig>, KokoroError> {
+    Ok(Response(crate::tts::load_config(&tts_config_path())))
 }
 
 /// Save TTS config to disk and hot-reload providers.
 #[command]
+#[specta::specta]
 pub async fn save_tts_config(
     state: State<'_, TtsService>,
     config: TtsSystemConfig,
 ) -> Result<(), KokoroError> {
-    let app_data = crate::utils::paths::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.chyin.kokoro");
-    let config_path = app_data.join("tts_config.json");
-
-    // Write to disk
-    save_config(&config_path, &config)?;
-
-    // Hot-reload providers
     state
-        .reload_from_config(&config)
+        .save_and_reload_config(&tts_config_path(), &config)
         .await
-        .map_err(|e| KokoroError::Tts(format!("failed to reload TTS providers: {}", e)))?;
-
-    Ok(())
 }
 
-/// Scan a GPT-SoVITS install directory for available GPT and SoVITS model files.
+fn tts_config_path() -> PathBuf {
+    crate::utils::paths::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("com.chyin.kokoro")
+        .join("tts_config.json")
+}
+
 #[command]
+#[specta::specta]
 pub async fn list_gpt_sovits_models(install_path: String) -> Result<GptSovitsModels, KokoroError> {
-    let root = std::path::Path::new(&install_path);
-    if !root.is_dir() {
-        return Err(KokoroError::NotFound(format!(
-            "Directory not found: {}",
-            install_path
-        )));
-    }
-
-    let mut gpt_models = Vec::new();
-    let mut sovits_models = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                continue;
-            }
-
-            let is_gpt = name.starts_with("GPT_weights");
-            let is_sovits = name.starts_with("SoVITS_weights");
-            if !is_gpt && !is_sovits {
-                continue;
-            }
-
-            if let Ok(files) = std::fs::read_dir(entry.path()) {
-                for file in files.flatten() {
-                    let fname = file.file_name().to_string_lossy().to_string();
-                    let rel_path = format!("{}/{}", name, fname);
-
-                    if is_gpt && fname.ends_with(".ckpt") {
-                        gpt_models.push(rel_path);
-                    } else if is_sovits && fname.ends_with(".pth") {
-                        sovits_models.push(rel_path);
-                    }
-                }
-            }
-        }
-    }
-
-    gpt_models.sort();
-    sovits_models.sort();
-
-    Ok(GptSovitsModels {
-        gpt_models,
-        sovits_models,
-    })
-}
-
-#[derive(serde::Serialize)]
-pub struct GptSovitsModels {
-    pub gpt_models: Vec<String>,
-    pub sovits_models: Vec<String>,
+    crate::tts::local_gpt_sovits::list_gpt_sovits_models(std::path::Path::new(&install_path))
 }

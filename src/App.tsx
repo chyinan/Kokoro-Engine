@@ -1,14 +1,15 @@
+import { commands, events } from "@/lib/generated/ipc";
 import { OnboardingChat } from "./features/onboarding/onboarding-chat";
 import { chatApplication, submitChat } from "./lib/chat/application";
+import { createImageEventHandlers } from "./lib/chat/image-events";
 // pattern: Imperative Shell
 
 import { useState, useEffect, useMemo, useSyncExternalStore, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { Settings } from "lucide-react";
-import { emit, listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { LayoutRenderer } from "./ui/layout/LayoutRenderer";
-import { LayoutConfig } from "./ui/layout/types";
+import { LayoutConfig, type ModMotionAnimation } from "./ui/layout/types";
 import { ThemeProvider } from "./ui/theme/ThemeContext";
 import { defaultTheme } from "./ui/theme/default";
 import { registry } from "./ui/registry/ComponentRegistry";
@@ -225,7 +226,7 @@ function parseMcpJson(raw: string): McpServerConfig[] {
   return configs;
 }
 
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   onImageGenDone,
   onModThemeOverride,
@@ -265,7 +266,6 @@ import {
   // Config Getters
   getLlmConfig,
   getImageGenConfig,
-  getTelegramConfig,
   getTelegramStatus,
   getBotConfig,
   getBotStatus,
@@ -331,7 +331,6 @@ import {
   // New: Context
   setUserLanguage,
   // Types
-  type ImageGenResult,
   type ModThemeJson,
   type Live2dModelInfo,
   type TtsSystemConfig,
@@ -347,7 +346,6 @@ import {
   type VoiceProfile,
   type GptSovitsModels,
   type MemoryRecord,
-  type TelegramConfig,
   type TelegramStatus,
   type BotConfig,
   type BotPlatformId,
@@ -362,6 +360,7 @@ import {
   type QQAuthorizationRequest,
   type CharacterActivationToken,
   getKokoroErrorMessage,
+  isKokoroErrorCode,
   onMemoryEmbeddingModelProgress,
 } from "./lib/kokoro-bridge";
 import type { ThemeConfig } from "./ui/layout/types";
@@ -376,10 +375,6 @@ const _subscribeFn = (cb: () => void) => {
 };
 const _getSnap = () => _regSnap;
 
-interface PetConfig {
-  render_fps?: number;
-}
-
 type ModActionData = Record<string, any>;
 type LegacyModActionEnvelope = ModActionEnvelope & {
   data?: ModActionData;
@@ -387,6 +382,15 @@ type LegacyModActionEnvelope = ModActionEnvelope & {
 
 const ONBOARDING_STATUS_KEY = "kokoro_onboarding_status";
 const ONBOARDING_DRAFT_KEY = "kokoro_onboarding_draft";
+
+function readModThemeAnimations(animations: ModThemeJson["animations"]): Record<string, ModMotionAnimation> | undefined {
+  if (!animations) return undefined;
+  const entries: [string, ModMotionAnimation][] = [];
+  for (const [name, raw] of Object.entries(animations)) {
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) entries.push([name, raw]);
+  }
+  return Object.fromEntries(entries);
+}
 
 const ONBOARDING_LANGUAGE_NAMES: Record<OnboardingLanguageCode, string> = {
   en: "English",
@@ -490,9 +494,11 @@ function App() {
   const [sttConfig, setSttConfig] = useState<SttConfig | undefined>(undefined);
   const [visionConfig, setVisionConfig] = useState<VisionConfig | undefined>(undefined);
   const [imageGenConfig, setImageGenConfig] = useState<ImageGenSystemConfig | undefined>(undefined);
-  const [telegramConfig, setTelegramConfig] = useState<TelegramConfig | undefined>(undefined);
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | undefined>(undefined);
   const [botConfig, setBotConfig] = useState<BotConfig | undefined>(undefined);
+  const applyBotConfig = useCallback((config: BotConfig) => {
+    setBotConfig(current => current && current.revision > config.revision ? current : config);
+  }, []);
   const [botStatus, setBotStatus] = useState<BotStatus | undefined>(undefined);
   const [autoBackupConfig, setAutoBackupConfig] = useState<AutoBackupConfig | undefined>(undefined);
   const [backupStatus, setBackupStatus] = useState<{
@@ -662,7 +668,7 @@ function App() {
         window.dispatchEvent(new CustomEvent("kokoro-character-runtime-changed", {
           detail: runtime,
         }));
-        void emit("character-runtime-committed", runtime).catch((error) => {
+        void events.characterRuntimeCommitted.emit(runtime).catch((error) => {
           console.warn("[CharacterActivation] failed to notify auxiliary windows", error);
         });
       },
@@ -691,7 +697,7 @@ function App() {
         const id = resolved.local_preset;
         const providerType = resolved.provider_type;
         const endpoint = resolved.endpoint;
-        if (id === null || providerType === null || endpoint === null) return;
+        if (id == null || providerType == null || endpoint == null) return;
         const config = await getTtsConfig();
         const existing = config.providers.find((provider) => provider.id === id);
         const nextConfig: TtsSystemConfig = {
@@ -847,7 +853,7 @@ function App() {
     setActiveLive2dModel(backendModelPath).catch((err) => {
       console.error("[App] Failed to sync active Live2D model:", err);
     });
-    emit("live2d-model-selection-updated", {
+    events.live2dModelSelectionUpdated.emit({
       modelPath: activeLive2dModelPath,
       customModelPath,
       modelUrl,
@@ -899,10 +905,10 @@ function App() {
     setRenderFps(fps);
 
     try {
-      const cfg = await invoke<PetConfig>("get_pet_config");
+      const cfg = await commands.getPetConfig();
       const nextConfig = { ...cfg, render_fps: fps };
-      await invoke("save_pet_config", { config: nextConfig });
-      await emit("pet-config-updated", nextConfig);
+      await commands.savePetConfig(nextConfig);
+      await events.petConfigUpdated.emit(nextConfig);
     } catch (e) {
       console.error("[App] Failed to persist render FPS:", e);
     }
@@ -1152,7 +1158,7 @@ function App() {
   useEffect(() => {
     let aborted = false;
     let cleanup: (() => void) | null = null;
-    void listen<QQAuthorizationRequest>("qq-authorization-expired", event => {
+    void events.qqAuthorizationExpired.listen(event => {
       if (aborted) return;
       setQQAuthorizationQueue(current => current.filter(
         request => request.request_id !== event.payload.request_id,
@@ -1174,7 +1180,7 @@ function App() {
   useEffect(() => {
     let aborted = false;
     let cleanup: (() => void) | null = null;
-    void listen<QQAuthorizationRequest>("qq-authorization-request", event => {
+    void events.qqAuthorizationRequest.listen(event => {
       if (aborted) return;
       setQQAuthorizationError(null);
       setQQAuthorizationQueue(current => {
@@ -1202,6 +1208,7 @@ function App() {
     setQQAuthorizationError(null);
     try {
       await respondQQAuthorization(currentQQAuthorization, approved);
+      if (approved) void getBotConfig().then(applyBotConfig).catch(console.error);
       setQQAuthorizationQueue(current => current.filter(
         request => request.request_id !== currentQQAuthorization.request_id,
       ));
@@ -1217,26 +1224,23 @@ function App() {
     } finally {
       setQQAuthorizationBusy(false);
     }
-  }, [currentQQAuthorization, qqAuthorizationBusy]);
+  }, [currentQQAuthorization, qqAuthorizationBusy, applyBotConfig]);
 
   // Listen for pet window requesting main window to show
   useEffect(() => {
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-        const unlisten = listen("show-main-window", async () => {
-          const win = getCurrentWindow();
-          await win.unminimize().catch(console.error);
-          await win.setFocus().catch(console.error);
-        });
-        return unlisten;
-      });
-    });
+    const unlisten = events.showMainWindow.listen(async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const win = getCurrentWindow();
+      await win.unminimize().catch(console.error);
+      await win.setFocus().catch(console.error);
+    }).catch(console.error);
+    return () => { void unlisten.then(stop => stop?.()); };
   }, []);
 
   useEffect(() => {
     ttsService.init();
 
-    invoke<PetConfig>("get_pet_config")
+    commands.getPetConfig()
       .then((cfg) => setRenderFps(typeof cfg.render_fps === "number" ? cfg.render_fps : 60))
       .catch(err => console.error("[App] Failed to load pet config:", err));
 
@@ -1252,12 +1256,11 @@ function App() {
       listMcpServers(),
       listMods(),
       getProactiveEnabled(),
-      getTelegramConfig(),
       getTelegramStatus(),
       getBotConfig(),
       getBotStatus(),
       getAutoBackupConfig(),
-    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegram, telegramStatus, botConfig, botStatus, autoBackup]) => {
+    ]).then(([tts, llm, stt, vision, imageGen, mcp, mods, proactive, telegramStatus, botConfig, botStatus, autoBackup]) => {
       setTtsConfig(tts);
       setLlmConfig(llm);
       const activeProvider = llm.providers.find((provider) => provider.id === llm.active_provider) ?? llm.providers[0];
@@ -1269,9 +1272,8 @@ function App() {
       setModList(mods);
       setProactiveEnabledState(proactive);
       writeBooleanSetting(APP_SETTING_KEYS.proactiveEnabled, proactive);
-      setTelegramConfig(telegram);
       setTelegramStatus(telegramStatus);
-      setBotConfig(botConfig);
+      applyBotConfig(botConfig);
       setBotStatus(botStatus);
       setAutoBackupConfig(autoBackup);
     }).catch(err => console.error("[App] Failed to fetch initial configs:", err));
@@ -1325,22 +1327,15 @@ function App() {
       }
     });
 
-    // Listen for generated images
-    const unlistenImageGen = onImageGenDone((result: ImageGenResult) => {
-      const assetUrl = convertFileSrc(result.image_url);
-      console.log("[App] Received generated image:", assetUrl);
-      setGeneratedImage(assetUrl);
+    const imageEvents = createImageEventHandlers({
+      getView: () => chatApplication.getSnapshot(),
+      generate: generateImage,
+      showImage: result => setGeneratedImage(convertFileSrc(result.image_url)),
+      selectGeneratedBackground: () => bgSlideshow.setConfig({ mode: "generated" }),
+      onError: error => console.error("[App] chat-imagegen generation failed:", error),
     });
-
-    // Listen for chat-triggered image generation requests
-    const unlistenChatImageGen = onChatImageGen(({ prompt }) => {
-      console.log("[App] chat-imagegen triggered, prompt:", prompt);
-      generateImage(prompt).then(result => {
-        const assetUrl = convertFileSrc(result.image_url);
-        setGeneratedImage(assetUrl);
-        bgSlideshow.setConfig({ mode: "generated" });
-      }).catch(err => console.error("[App] chat-imagegen generation failed:", err));
-    });
+    const unlistenImageGen = onImageGenDone(imageEvents.onImageDone);
+    const unlistenChatImageGen = onChatImageGen(imageEvents.onBackgroundRequested);
 
     // ── MOD System: Theme override ──
     const unlistenModTheme = onModThemeOverride((modTheme: ModThemeJson) => {
@@ -1351,11 +1346,11 @@ function App() {
         name: modTheme.name || "Mod Theme",
         variables: modTheme.variables,
         assets: modTheme.assets ? {
-          fonts: modTheme.assets.fonts,
-          background: modTheme.assets.background,
-          noise_texture: modTheme.assets.noise_texture,
+          fonts: modTheme.assets.fonts ?? undefined,
+          background: modTheme.assets.background ?? undefined,
+          noise_texture: modTheme.assets.noise_texture ?? undefined,
         } : undefined,
-        animations: modTheme.animations,
+        animations: readModThemeAnimations(modTheme.animations),
       };
       // Apply the theme (ThemeProvider listens for setTheme calls)
       // We need to access setTheme from context — handled via event
@@ -1385,10 +1380,10 @@ function App() {
     });
 
     // ── MOD System: Engine event bridge → broadcast to iframes + forward to QuickJS ──
-    const unlistenModChatDelta = onChatTurnDelta(({ turn_id, delta }) => {
+    const unlistenModChatDelta = onChatTurnDelta((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-delta', delta, turn_id },
+        payload: { name: 'chat-delta', ...data },
       });
     });
 
@@ -1399,10 +1394,10 @@ function App() {
       });
     });
 
-    const unlistenModChatDone = onChatTurnFinish(({ turn_id, status }) => {
+    const unlistenModChatDone = onChatTurnFinish((data) => {
       modMessageBus.broadcast({
         type: 'event',
-        payload: { name: 'chat-done', turn_id, status },
+        payload: { name: 'chat-done', ...data },
       });
     });
 
@@ -1517,11 +1512,17 @@ function App() {
         ignored_characters: importDb ? options.ignored_characters ?? [] : [],
       });
 
+      const legacyTelegramSkip = result.legacy_telegram_config_skip_reason;
+      const summary = `导入完成 · 记忆 ${result.imported_memories} · 对话 ${result.imported_conversations} · 配置 ${result.imported_configs}`;
       setBackupStatus({
         phase: "imported",
-        message: `导入完成 · 记忆 ${result.imported_memories} · 对话 ${result.imported_conversations} · 配置 ${result.imported_configs}`,
+        message: legacyTelegramSkip
+          ? `${summary}\n${t('settings.backup.legacy_telegram_skipped.' + legacyTelegramSkip)}`
+          : summary,
       });
-      window.setTimeout(() => window.location.reload(), 1500);
+      if (!legacyTelegramSkip || importDb || result.imported_configs > 0) {
+        window.setTimeout(() => window.location.reload(), 1500);
+      }
     } catch (error) {
       setBackupStatus(prev => ({ ...prev, phase: "error", importFilePath: prev.importFilePath, preview: prev.preview, error: getKokoroErrorMessage(error) }));
     }
@@ -1726,22 +1727,33 @@ function App() {
       saveVisionConfig(detail.data.config).catch(console.error);
     }
     if (detail.action === 'save_telegram_config' && detail.data?.config) {
-      setTelegramConfig(detail.data.config);
-      saveTelegramConfig(detail.data.config)
-        .then(() => getTelegramStatus())
-        .then(setTelegramStatus)
-        .catch(console.error);
+      const revision = detail.data.revision;
+      if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+        console.error("[App] Saving Telegram configuration requires the revision from the config read");
+        return;
+      }
+      void saveTelegramConfig(revision, detail.data.config).then(savedConfig => {
+        applyBotConfig(savedConfig);
+        void Promise.all([
+          getBotStatus().then(setBotStatus),
+          getTelegramStatus().then(setTelegramStatus),
+        ]).catch(error => console.error("[App] Telegram configuration saved, but refreshing Bot settings failed", error));
+      })
+        .catch(error => {
+          console.error("[App] Failed to save Telegram configuration", error);
+          if (isKokoroErrorCode(error, "BotConfigConflict")) {
+            window.alert(t("bot.config_conflict.stale"));
+          }
+        });
     }
     if (detail.action === 'save_bot_config' && detail.data?.config) {
-      setBotConfig(detail.data.config);
       saveBotConfig(detail.data.config)
         .then(savedConfig => {
-          setBotConfig(savedConfig);
-          return Promise.all([getBotStatus(), getTelegramConfig(), getTelegramStatus()]);
+          applyBotConfig(savedConfig);
+          return Promise.all([getBotStatus(), getTelegramStatus()]);
         })
-        .then(([status, telegram, telegramStatus]) => {
+        .then(([status, telegramStatus]) => {
           setBotStatus(status);
-          setTelegramConfig(telegram);
           setTelegramStatus(telegramStatus);
         })
         .catch(console.error);
@@ -1749,7 +1761,7 @@ function App() {
     if (detail.action === 'refresh_bot_status') {
       Promise.all([getBotConfig(), getBotStatus(), getTelegramStatus()])
         .then(([config, status, telegramStatus]) => {
-          setBotConfig(config);
+          applyBotConfig(config);
           setBotStatus(status);
           setTelegramStatus(telegramStatus);
         })
@@ -2383,7 +2395,7 @@ function App() {
         toggleMcpServer,
         refreshMcpServers: async () => setMcpServers(await listMcpServers()),
         enableBotPlatforms: async (platforms) => {
-          const current = botConfig ?? await getBotConfig();
+          const current = await getBotConfig();
           let next = current;
           for (const platform of platforms) {
             switch (platform) {
@@ -2395,7 +2407,7 @@ function App() {
             }
           }
           const saved = await saveBotConfig(next);
-          setBotConfig(saved);
+          applyBotConfig(saved);
         },
       },
     });
@@ -2530,7 +2542,7 @@ function App() {
             visionConfig={visionConfig}
             onVisionConfigChange={setVisionConfig}
             imageGenConfig={imageGenConfig}
-            telegramConfig={telegramConfig}
+            telegramConfig={botConfig?.telegram}
             botConfig={botConfig}
             botStatus={botStatus}
             autoBackupConfig={autoBackupConfig}
