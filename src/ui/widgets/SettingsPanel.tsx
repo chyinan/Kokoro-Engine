@@ -25,7 +25,7 @@ import { BackupTab } from "./settings/BackupTab";
 import PetTab from "./settings/PetTab";
 import AboutTab from "./settings/AboutTab";
 import { normalizeTtsVoice } from "./settings/tts-voice";
-import { rebaseBotConfig } from "./settings/bot-config-draft";
+import { rebaseBotConfig, type BotConfigConflictReview } from "./settings/bot-config-draft";
 import { useTranslation } from "react-i18next";
 import {
     setUserLanguage,
@@ -309,9 +309,10 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
     const [botSettings, setBotSettings] = useState<{
         baseline: BotConfig | null;
         draft: BotConfig | null;
-        conflict?: "stale" | "overlap";
+        conflict?: { kind: "stale" } | ({ kind: "overlap" } & BotConfigConflictReview);
     }>({ baseline: null, draft: null });
     const localBotConfig = botSettings.draft;
+    const botConflictReview = botSettings.conflict?.kind === "overlap" ? botSettings.conflict : undefined;
 
     // Sync local state only when the panel opens; while editing, keep local form state authoritative.
     useEffect(() => {
@@ -616,7 +617,7 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
         }
     };
 
-    const refreshBotDraft = async (keepSavedOverlaps: boolean) => {
+    const refreshBotDraft = async (review?: BotConfigConflictReview) => {
         const sessionRevision = openRevisionRef.current;
         const refreshRevision = ++botRefreshRevisionRef.current;
         try {
@@ -626,9 +627,14 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 if (!current.conflict || !current.baseline || !current.draft || latest.revision < current.baseline.revision) {
                     return current;
                 }
-                const rebased = rebaseBotConfig(current.baseline, current.draft, latest);
-                if (rebased.hasOverlap && !keepSavedOverlaps) {
-                    return { ...current, conflict: "overlap" };
+                const rebased = rebaseBotConfig(
+                    current.baseline, current.draft, latest, current.conflict === review ? review : undefined,
+                );
+                if (rebased.hasOverlap) {
+                    return {
+                        ...current,
+                        conflict: { kind: "overlap", baseline: current.baseline, draft: current.draft, saved: latest },
+                    };
                 }
                 return { baseline: latest, draft: rebased.draft };
             });
@@ -648,14 +654,14 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
                 if (!current.draft || (current.baseline?.revision ?? -1) > savedBot.revision) return current;
                 const rebased = rebaseBotConfig(submitted, current.draft, savedBot);
                 return rebased.hasOverlap
-                    ? { ...current, conflict: "stale" }
+                    ? { ...current, conflict: { kind: "stale" } }
                     : { baseline: savedBot, draft: rebased.draft };
             });
         } catch (e) {
             if (openRevisionRef.current === sessionRevision) {
                 if (isKokoroErrorCode(e, "BotConfigConflict")) {
                     setBotSettings(current => current.draft?.revision === submitted.revision
-                        ? { ...current, conflict: current.conflict ?? "stale" }
+                        ? { ...current, conflict: current.conflict ?? { kind: "stale" } }
                         : current);
                 } else {
                     setSaveError(getKokoroErrorMessage(e));
@@ -1362,13 +1368,13 @@ export default function SettingsPanel({ isOpen, onClose, activeTab: activeTabPro
 
                         {botSettings.conflict && (
                             <div role="alert" className="flex items-center justify-between gap-4 border-t border-[var(--color-border)] px-5 py-3 text-sm">
-                                <span>{t(botSettings.conflict === "overlap" ? "bot.config_conflict.overlap" : "bot.config_conflict.stale")}</span>
+                                <span>{t(botConflictReview ? "bot.config_conflict.overlap" : "bot.config_conflict.stale")}</span>
                                 <button
                                     type="button"
                                     className="shrink-0 rounded-md border border-[var(--color-border)] px-3 py-2 text-[var(--color-accent)]"
-                                    onClick={() => void refreshBotDraft(botSettings.conflict === "overlap")}
+                                    onClick={() => void refreshBotDraft(botConflictReview)}
                                 >
-                                    {t(botSettings.conflict === "overlap" ? "bot.config_conflict.keep_saved" : "bot.config_conflict.refresh")}
+                                    {t(botConflictReview ? "bot.config_conflict.keep_saved" : "bot.config_conflict.refresh")}
                                 </button>
                             </div>
                         )}

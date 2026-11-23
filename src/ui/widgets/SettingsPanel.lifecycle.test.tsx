@@ -207,13 +207,30 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
     return { onClose, notify };
   }
 
-  async function editTelegramToken(value: string) {
-    const input = container.querySelector<HTMLInputElement>('input[placeholder="telegram.bot_token.placeholder"]')!;
+  async function editBotInput(placeholder: string, value: string) {
+    const input = container.querySelector<HTMLInputElement>(`input[placeholder="${placeholder}"]`)!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     return input;
+  }
+
+  function editTelegramToken(value: string) {
+    return editBotInput("telegram.bot_token.placeholder", value);
+  }
+
+  async function addTelegramChat(value: string) {
+    await editBotInput("telegram.whitelist.placeholder", value);
+    await clickBotButton("telegram.whitelist.add");
+  }
+
+  async function reviewBotConflict(saved: BotConfig) {
+    vi.mocked(saveBotConfig).mockRejectedValueOnce({ code: "BotConfigConflict", message: "Settings changed" });
+    await saveSettings();
+    vi.mocked(getBotConfig).mockResolvedValueOnce(saved);
+    await clickBotButton("bot.config_conflict.refresh");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
   }
 
   function saveButton() {
@@ -233,6 +250,13 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
 
   function clickBotButton(label: string) {
     return act(async () => botButton(label).click());
+  }
+
+  async function beginBotConflictConfirmation() {
+    let finishRead!: (config: BotConfig) => void;
+    vi.mocked(getBotConfig).mockReturnValueOnce(new Promise(resolve => { finishRead = resolve; }));
+    await clickBotButton("bot.config_conflict.keep_saved");
+    return (saved: BotConfig) => act(async () => finishRead(saved));
   }
 
   it.each(["save", "start"])("shares the pending Bot config write when %s is pressed first", async first => {
@@ -348,18 +372,8 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
   it("holds an overlapping allowlist edit for review and preserves unrelated edits after choosing the saved allowlist", async () => {
     await openBotSettings();
     const token = await editTelegramToken("new-token");
-    const id = container.querySelector<HTMLInputElement>('input[placeholder="telegram.whitelist.placeholder"]')!;
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(id, "987654321");
-      id.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await clickBotButton("telegram.whitelist.add");
-
-    vi.mocked(saveBotConfig).mockRejectedValueOnce({ code: "BotConfigConflict", message: "Settings changed" });
-    await saveSettings();
-    vi.mocked(getBotConfig).mockResolvedValueOnce(approvedSnapshot);
-    await clickBotButton("bot.config_conflict.refresh");
-    expect(container.textContent).toContain("bot.config_conflict.overlap");
+    await addTelegramChat("987654321");
+    await reviewBotConflict(approvedSnapshot);
     expect(container.textContent).toContain("987654321");
     expect(token.value).toBe("new-token");
     expect(saveBotConfig).toHaveBeenCalledTimes(1);
@@ -374,6 +388,112 @@ describe("SettingsPanel persona lifecycle and isolation", () => {
       telegram: { ...approvedSnapshot.telegram, bot_token: "new-token" },
     });
   });
+
+  it("retains an edit to another conflicting field while confirmation is waiting for saved settings", async () => {
+    await openBotSettings();
+    await addTelegramChat("987654321");
+    const saved = {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "saved-token" },
+    };
+    await reviewBotConflict(saved);
+
+    const finishConfirmation = await beginBotConflictConfirmation();
+    const token = await editTelegramToken("typed-during-confirmation");
+    await finishConfirmation(saved);
+
+    expect(token.value).toBe("typed-during-confirmation");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    vi.mocked(getBotConfig).mockResolvedValueOnce(saved);
+    await clickBotButton("bot.config_conflict.keep_saved");
+    expect(token.value).toBe("saved-token");
+    expect(container.textContent).not.toContain("987654321");
+    expect(container.textContent).not.toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a new edit to the same allowlist while confirmation is waiting", async () => {
+    await openBotSettings();
+    await addTelegramChat("987654321");
+    await reviewBotConflict(approvedSnapshot);
+
+    const finishConfirmation = await beginBotConflictConfirmation();
+    await addTelegramChat("876543210");
+    await finishConfirmation(approvedSnapshot);
+
+    expect(container.textContent).toContain("876543210");
+    expect(container.textContent).toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts the reviewed allowlist and saves a disjoint edit made during confirmation", async () => {
+    await openBotSettings();
+    await addTelegramChat("987654321");
+    await reviewBotConflict(approvedSnapshot);
+
+    const finishConfirmation = await beginBotConflictConfirmation();
+    const token = await editTelegramToken("typed-during-confirmation");
+    await finishConfirmation(approvedSnapshot);
+
+    expect(token.value).toBe("typed-during-confirmation");
+    expect(container.textContent).not.toContain("987654321");
+    expect(container.textContent).not.toContain("bot.config_conflict.overlap");
+    expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+    await saveSettings();
+    expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+      ...approvedSnapshot,
+      telegram: { ...approvedSnapshot.telegram, bot_token: "typed-during-confirmation" },
+    });
+    expect(container.textContent).toContain("common.actions.saved");
+  });
+
+  it.each(["changed allowlist", "new token overlap"])(
+    "requires fresh review when the saved revision contains a %s",
+    async change => {
+      await openBotSettings();
+      const token = await editTelegramToken("my-token");
+      await addTelegramChat("987654321");
+      await reviewBotConflict(approvedSnapshot);
+
+      const newer = {
+        ...approvedSnapshot,
+        revision: approvedSnapshot.revision + 1,
+        telegram: {
+          ...approvedSnapshot.telegram,
+          allowed_chat_ids: change === "changed allowlist" ? [765432109] : [],
+          bot_token: change === "new token overlap" ? "new-saved-token" : botSnapshot.telegram.bot_token,
+        },
+      };
+      vi.mocked(getBotConfig).mockResolvedValueOnce(newer);
+      await clickBotButton("bot.config_conflict.keep_saved");
+
+      expect(token.value).toBe("my-token");
+      expect(container.textContent).toContain("987654321");
+      expect(container.textContent).toContain("bot.config_conflict.overlap");
+      expect(saveBotConfig).toHaveBeenCalledTimes(1);
+
+      vi.mocked(getBotConfig).mockResolvedValueOnce(newer);
+      await clickBotButton("bot.config_conflict.keep_saved");
+      expect(container.textContent).not.toContain("987654321");
+      expect(container.textContent).not.toContain("bot.config_conflict.overlap");
+      const remainingToken = change === "changed allowlist" ? "my-token" : "new-saved-token";
+      expect(token.value).toBe(remainingToken);
+
+      await addTelegramChat("654321098");
+      await saveSettings();
+      expect(saveBotConfig).toHaveBeenNthCalledWith(2, {
+        ...newer,
+        telegram: {
+          ...newer.telegram,
+          bot_token: remainingToken,
+          allowed_chat_ids: [...newer.telegram.allowed_chat_ids, 654321098],
+        },
+      });
+    },
+  );
 
   it("keeps an unsaved Telegram edit and stops before starting the bot when the write fails", async () => {
     await openBotSettings();
