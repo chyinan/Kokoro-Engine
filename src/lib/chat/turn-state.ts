@@ -24,6 +24,8 @@ export interface ChatPanelMessage {
     isError?: boolean;
     announceError?: boolean;
     unfinished?: boolean;
+    /** The reply body is still rendered from the turn journal. */
+    awaitingHistory?: boolean;
     failureScope?: ChatFailureScope;
     canRetryFailure?: boolean;
     persistenceFailure?: boolean;

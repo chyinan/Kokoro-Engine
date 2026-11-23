@@ -188,7 +188,7 @@ export function projectMessages(view: ChatViewSnapshot): ChatPanelMessage[] {
     const text = stripStreamingControlMarkup(turn.text);
     if (!text && !turn.tools.length) continue;
     const assistant: ChatPanelMessage = {
-      role: "kokoro", text, turnId: turn.turn_id ?? undefined,
+      role: "kokoro", text, turnId: turn.turn_id ?? undefined, awaitingHistory: true,
       clientRequestId: turn.client_request_id, id: turn.assistant_message_id ?? undefined,
       translation: turn.translation ?? undefined,
       tools: index >= 0 ? messages[index].tools : undefined,

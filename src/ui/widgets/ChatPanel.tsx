@@ -161,7 +161,8 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
         ? { conversationId, generation, messageId: message.id }
         : undefined;
     const isPresent = useIsPresent();
-    const editableTarget = !isPresent || message.failureScope || message.unfinished ? undefined : target;
+    const continueTarget = !isPresent || message.failureScope || message.unfinished ? undefined : target;
+    const editableTarget = message.awaitingHistory ? undefined : continueTarget;
     const retryTarget = target && !message.unfinished && (!message.failureScope || message.canRetryFailure)
         ? { ...target, historyRevision }
         : undefined;
@@ -185,7 +186,7 @@ const MemoizedChatMessage = memo(function MemoizedChatMessage({
             onRetryEditRefresh={editableTarget ? () => chatApplication.refreshEditedHistory() : undefined}
             onRegenerate={retryTarget ? () => onRegenerate(retryTarget) : undefined}
             onRetryPersistence={persistenceRequestId ? () => onRetryPersistence(persistenceRequestId) : undefined}
-            onContinueFrom={editableTarget ? () => onContinueFrom({ ...editableTarget, historyRevision }) : undefined}
+            onContinueFrom={continueTarget ? () => onContinueFrom({ ...continueTarget, historyRevision }) : undefined}
             onApproveTool={createToolActionHandler(globalIndex, onApproveTool)}
             onRejectTool={createToolActionHandler(globalIndex, onRejectTool)}
             onPreviewImage={onPreviewImage}
